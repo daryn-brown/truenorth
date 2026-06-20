@@ -132,13 +132,39 @@ jobs:
       - name: Install frontend dependencies
         run: npm ci
 
-      - name: Build app and upload bundles
+      # Decide whether to code sign. A *missing* GitHub secret is injected as an empty string, and
+      # the macOS bundler treats an empty APPLE_CERTIFICATE as "present" — it then tries to import
+      # an empty certificate and fails the whole build. So we only pass the APPLE_* vars when a real
+      # certificate secret exists; otherwise we omit them entirely and produce an unsigned build.
+      - name: Detect Apple signing
+        id: signing
+        shell: bash
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+        run: |
+          if [ -n "$APPLE_CERTIFICATE" ]; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+            echo "Apple certificate found — building signed + notarized."
+          else
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            echo "No Apple certificate — building unsigned (Gatekeeper-warned)."
+          fi
+
+      - name: Build app and upload bundles (unsigned)
+        if: ${{ steps.signing.outputs.enabled == 'false' }}
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # --- Apple code signing & notarization (optional) ---
-          # Add these repo secrets to produce signed + notarized macOS builds. While unset, the
-          # build still succeeds and produces an unsigned (Gatekeeper-warned) app. See docs/releasing.md.
+        with:
+          releaseId: ${{ needs.create-release.outputs.release_id }}
+          args: ${{ matrix.args }}
+
+      # Signing path: reached automatically once the Apple secrets are added — no workflow edits.
+      - name: Build app and upload bundles (signed + notarized)
+        if: ${{ steps.signing.outputs.enabled == 'true' }}
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
           APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
