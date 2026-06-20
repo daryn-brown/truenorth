@@ -1,6 +1,6 @@
 [package]
 name = "finance-second-brain"
-version = "0.1.0"
+version = "0.1.1"
 description = "Local-first, privacy-first desktop app for cross-border (US + Canada) personal finances."
 authors = ["Daryn Brown"]
 edition = "2021"
