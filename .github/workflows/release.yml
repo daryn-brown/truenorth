@@ -1,0 +1,150 @@
+name: Release
+
+# Builds signed/notarized-ready desktop installers for macOS (universal) and Windows (x64)
+# and attaches them to a GitHub Release.
+#
+# Triggers:
+#   * Pushing a tag like `v0.1.0`  -> release uses that tag.
+#   * Manual "Run workflow"        -> release uses `v<version>` from src-tauri/tauri.conf.json.
+#
+# The release is created as a DRAFT so the repo owner can review the assets and click
+# "Publish release". This workflow never pushes commits back to the repo — it only creates a
+# GitHub Release via the Actions token, so nothing bot-authored lands in history or the
+# contributors list (see AGENTS.md / CONTRIBUTING.md).
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      prerelease:
+        description: 'Mark the GitHub release as a pre-release'
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  # 1) Create (or reuse) a single draft release that every platform uploads its assets to.
+  create-release:
+    name: Create draft release
+    runs-on: ubuntu-latest
+    outputs:
+      release_id: ${{ steps.create-release.outputs.result }}
+      tag: ${{ steps.meta.outputs.tag }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Resolve release tag
+        id: meta
+        env:
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          if [ "$REF_TYPE" = "tag" ]; then
+            TAG="$REF_NAME"
+          else
+            VERSION="$(node -p "require('./src-tauri/tauri.conf.json').version")"
+            TAG="v${VERSION}"
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "Resolved release tag: $TAG"
+
+      - name: Create draft release
+        id: create-release
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const tag = '${{ steps.meta.outputs.tag }}';
+            // Reuse a published release for this tag if it already exists, otherwise create a draft.
+            try {
+              const existing = await github.rest.repos.getReleaseByTag({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                tag,
+              });
+              core.info(`Reusing existing release ${existing.data.id} for ${tag}`);
+              return existing.data.id;
+            } catch (err) {
+              if (err.status !== 404) throw err;
+            }
+            const created = await github.rest.repos.createRelease({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              tag_name: tag,
+              name: `Finance Second Brain ${tag}`,
+              body: [
+                'Desktop installers for macOS (universal) and Windows (x64).',
+                '',
+                'Download an installer from the assets below.',
+              ].join('\n'),
+              draft: true,
+              prerelease: ${{ inputs.prerelease == true }},
+            });
+            core.info(`Created draft release ${created.data.id} for ${tag}`);
+            return created.data.id;
+
+  # 2) Build the app on each platform and upload bundles to the draft release.
+  build-tauri:
+    name: Build ${{ matrix.label }}
+    needs: create-release
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: macOS (universal)
+            platform: macos-latest
+            args: '--target universal-apple-darwin'
+            rust-targets: 'aarch64-apple-darwin,x86_64-apple-darwin'
+          - label: Windows (x64)
+            platform: windows-latest
+            args: ''
+            rust-targets: 'x86_64-pc-windows-msvc'
+    runs-on: ${{ matrix.platform }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.rust-targets }}
+
+      - name: Cache Rust build
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+          key: ${{ matrix.platform }}
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Build app and upload bundles
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # --- Apple code signing & notarization (optional) ---
+          # Add these repo secrets to produce signed + notarized macOS builds. While unset, the
+          # build still succeeds and produces an unsigned (Gatekeeper-warned) app. See docs/releasing.md.
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        with:
+          releaseId: ${{ needs.create-release.outputs.release_id }}
+          args: ${{ matrix.args }}

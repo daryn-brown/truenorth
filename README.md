@@ -30,10 +30,17 @@ secrets in the OS keychain (`keyring`). Mirrors the TrendWave stack.
 2. Create a **new session**.
 3. Paste the prompt in [`docs/kickoff-prompt.md`](docs/kickoff-prompt.md) to drive **Phase 0 → Phase 1**.
 
+## Building & releasing
+Installers for **macOS (universal)** and **Windows (x64)** are built by GitHub Actions and
+attached to a draft GitHub Release. Tag a commit `vX.Y.Z` (or run the **Release** workflow
+manually), then review and publish the draft. Builds are **unsigned but signing-ready** — add
+the Apple/Windows signing secrets to sign automatically. See [`docs/releasing.md`](docs/releasing.md).
+
 ## Docs
 - [`docs/blueprint.md`](docs/blueprint.md) — full research report (connectors, architecture, cross-border notes, citations).
 - [`docs/plan.md`](docs/plan.md) — phased build plan.
 - [`docs/kickoff-prompt.md`](docs/kickoff-prompt.md) — ready-to-paste prompt for the first build session.
+- [`docs/releasing.md`](docs/releasing.md) — release pipeline, build targets, and code-signing setup.
 
 ## Phased roadmap
 0. Scaffold (Tauri/React/SQLite shell, encryption, keychain)
