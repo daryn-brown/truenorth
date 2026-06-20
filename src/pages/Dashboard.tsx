@@ -5,12 +5,14 @@ import type {
   AddBalanceSnapshotPayload,
   Currency,
   NetWorth,
+  NetWorthHistoryPoint,
 } from "../types/finance";
 import {
   addAccount,
   addBalanceSnapshot,
   deleteAccount,
   getNetWorth,
+  getNetWorthHistory,
   listAccounts,
   refreshFxRates,
 } from "../hooks/useFinanceApi";
@@ -27,6 +29,7 @@ type ModalState =
 export default function Dashboard() {
   const [accounts, setAccounts] = useState<Account[]>([]);
   const [netWorth, setNetWorth] = useState<NetWorth | null>(null);
+  const [history, setHistory] = useState<NetWorthHistoryPoint[]>([]);
   const [homeCurrency, setHomeCurrency] = useState<Currency>("CAD");
   const [loading, setLoading] = useState(true);
   const [modal, setModal] = useState<ModalState>({ open: false });
@@ -36,9 +39,14 @@ export default function Dashboard() {
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const [accs, nw] = await Promise.all([listAccounts(), getNetWorth()]);
+      const [accs, nw, hist] = await Promise.all([
+        listAccounts(),
+        getNetWorth(),
+        getNetWorthHistory(),
+      ]);
       setAccounts(accs);
       setNetWorth(nw);
+      setHistory(hist);
     } catch (err) {
       console.error("Failed to load dashboard data:", err);
     } finally {
@@ -79,8 +87,11 @@ export default function Dashboard() {
     }
   };
 
-  // Build chart data: aggregate net worth per snapshot date
-  const chartData = buildChartData(netWorth, homeCurrency);
+  // Net-worth-over-time series in the selected home currency.
+  const chartData = history.map((point) => ({
+    date: point.date,
+    value: homeCurrency === "CAD" ? point.total_cad : point.total_usd,
+  }));
 
   return (
     <div className="min-h-screen bg-slate-950 text-white">
@@ -164,24 +175,4 @@ export default function Dashboard() {
       )}
     </div>
   );
-}
-
-function buildChartData(
-  netWorth: NetWorth | null,
-  currency: Currency,
-): { date: string; value: number }[] {
-  if (!netWorth) return [];
-
-  // Group account snapshots by date and sum net worth in the chosen currency
-  const byDate = new Map<string, number>();
-  for (const acc of netWorth.accounts) {
-    if (!acc.snapshot_date) continue;
-    const contribution =
-      currency === "CAD" ? acc.balance_cad : acc.balance_usd;
-    byDate.set(acc.snapshot_date, (byDate.get(acc.snapshot_date) ?? 0) + contribution);
-  }
-
-  return [...byDate.entries()]
-    .sort(([a], [b]) => a.localeCompare(b))
-    .map(([date, value]) => ({ date, value }));
 }

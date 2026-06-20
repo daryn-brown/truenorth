@@ -102,6 +102,14 @@ export interface NetWorth {
   rate_date: string | null;
 }
 
+/** One point in the net-worth-over-time series. */
+export interface NetWorthHistoryPoint {
+  /** ISO date YYYY-MM-DD. */
+  date: string;
+  total_usd: number;
+  total_cad: number;
+}
+
 export interface AccountNetWorth {
   account_id: number;
   account_name: string;
