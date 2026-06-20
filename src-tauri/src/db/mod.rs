@@ -14,8 +14,12 @@ pub struct AppDb(pub Mutex<Connection>);
 
 /// Open (or create) the encrypted database, apply the schema, and register AppDb state.
 ///
-/// The database is encrypted at rest with SQLCipher. The key lives in the OS keychain;
-/// a legacy plaintext database from before encryption was enabled is migrated in place.
+/// The database is encrypted at rest with SQLCipher and the key lives in the OS keychain.
+/// On launch the existing file (if any) is reconciled with the current key:
+/// * a legacy pre-encryption plaintext database is encrypted in place;
+/// * a database that can't be decrypted with the current key (e.g. the keychain entry was
+///   lost or the file is corrupt) is set aside — not deleted — so the app starts fresh
+///   instead of aborting.
 pub fn setup_database<R: Runtime>(app: &App<R>) -> Result<(), Box<dyn std::error::Error>> {
     let data_dir = app
         .path()
@@ -27,9 +31,21 @@ pub fn setup_database<R: Runtime>(app: &App<R>) -> Result<(), Box<dyn std::error
 
     let key = crypto::get_or_create_key()?;
 
-    // Migrate a pre-encryption plaintext database, if one is present.
-    if db_path.exists() && !crypto::is_encrypted_with_key(&db_path, &key)? {
-        crypto::migrate_plaintext_to_encrypted(&db_path, &key)?;
+    // Reconcile any existing database file with the current key.
+    if db_path.exists() {
+        if crypto::is_plaintext_sqlite(&db_path)? {
+            // Legacy unencrypted database — encrypt it in place, preserving the data.
+            crypto::migrate_plaintext_to_encrypted(&db_path, &key)?;
+        } else if !crypto::is_encrypted_with_key(&db_path, &key)? {
+            // Encrypted with a key we don't have, or corrupt. We can't read it, so rather
+            // than abort on launch we move it aside (kept for recovery) and start fresh.
+            let backup = crypto::quarantine_unreadable_db(&db_path)?;
+            eprintln!(
+                "warning: existing database could not be decrypted with the current key; \
+                 preserved it at {} and starting a fresh database.",
+                backup.display()
+            );
+        }
     }
 
     let conn = Connection::open(&db_path)
