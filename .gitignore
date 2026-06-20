@@ -1,0 +1,26 @@
+# Rust / Tauri
+/target
+src-tauri/target
+
+# Node
+node_modules
+dist
+dist-ssr
+
+# Env / secrets
+.env
+.env.*
+*.pem
+
+# Local databases (financial data — never commit)
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+
+# OS / editor
+.DS_Store
+Thumbs.db
+*.log
+.idea
+.vscode
