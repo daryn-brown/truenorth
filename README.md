@@ -23,9 +23,130 @@ history. Connectors (SnapTrade/SimpleFIN) and the AI advisor are next — see th
 
 **Deferred (separate, guarded module later):** automated trading / order execution.
 
-## Planned stack
+## Stack
 Tauri v2 (Rust core) · React + TypeScript + Tailwind · SQLite (rusqlite, SQLCipher) ·
 secrets in the OS keychain (`keyring`). Mirrors the TrendWave stack.
+
+## Architecture
+Finance Second Brain is a single **Tauri v2** desktop app: a React/TypeScript **WebView**
+frontend talks to a **Rust core** over Tauri's IPC bridge. All data stays on the device in an
+**encrypted-at-rest SQLite** database (SQLCipher), with the 256-bit key held in the OS keychain.
+The only network call is an on-demand **USD↔CAD** exchange-rate lookup.
+
+```mermaid
+flowchart TB
+    user(["👤 User"])
+
+    subgraph FE["🪟 Frontend · WebView — React + TypeScript + Tailwind (Vite)"]
+        direction TB
+        pages["Dashboard page"]
+        comps["Components<br/>NetWorthCard · NetWorthChart · AccountList<br/>AccountModal · ImportModal"]
+        api["useFinanceApi.ts<br/>typed invoke bindings · finance.ts"]
+        pages --> comps --> api
+    end
+
+    subgraph CORE["🦀 Rust Core · src-tauri — Tauri v2"]
+        direction TB
+        builder["lib.rs · Tauri Builder<br/>setup · invoke_handler · managed state"]
+
+        subgraph CMD["Tauri command handlers"]
+            direction LR
+            c_acc["accounts<br/>list · add · delete<br/>add_balance_snapshot"]
+            c_nw["net_worth<br/>get_net_worth<br/>get_net_worth_history"]
+            c_imp["import<br/>import_data"]
+            c_fx["fx<br/>get_fx_rates<br/>refresh_fx_rates"]
+        end
+
+        subgraph SVC["Domain logic · services"]
+            direction LR
+            d_db["db<br/>schema · crypto"]
+            d_fx["fx<br/>Yahoo client · rate store"]
+            d_conn["connector<br/>AccountConnector trait<br/>ConnectorRegistry"]
+        end
+
+        state[["Managed state<br/>AppDb = Mutex‹Connection›<br/>ConnectorRegistry"]]
+
+        builder --> CMD
+        builder --> state
+        CMD --> SVC
+        CMD --> state
+    end
+
+    kc{{"🔐 OS Keychain · keyring<br/>macOS Keychain · Windows Credential Manager<br/>256-bit SQLCipher key"}}
+    db[("🗄️ Encrypted SQLite · SQLCipher<br/>finance-second-brain.db<br/>accounts · balance_snapshots · fx_rates<br/>holdings · transactions · goals · app_settings")]
+    yahoo(["🌐 Yahoo Finance<br/>USD/CAD FX quote"])
+
+    subgraph P2["Phase 2 connectors · planned"]
+        direction LR
+        snap["SnapTrade<br/>brokerages"]
+        sfin["SimpleFIN Bridge<br/>banks"]
+    end
+
+    user --> pages
+    api ==>|"Tauri IPC · invoke() · serde JSON"| builder
+    state ==>|"rusqlite · encrypted I/O"| db
+    d_db -->|"unlock / store key"| kc
+    d_fx -->|"HTTPS · reqwest"| yahoo
+    d_conn -.->|"trait impls"| P2
+
+    classDef feNode fill:#dbeafe,stroke:#2563eb,color:#1e3a8a;
+    classDef coreNode fill:#ffedd5,stroke:#ea580c,color:#7c2d12;
+    classDef stateNode fill:#fef3c7,stroke:#d97706,color:#78350f;
+    classDef store fill:#dcfce7,stroke:#16a34a,color:#14532d;
+    classDef os fill:#f3e8ff,stroke:#9333ea,color:#581c87;
+    classDef ext fill:#fee2e2,stroke:#dc2626,color:#7f1d1d;
+    classDef planned fill:#f1f5f9,stroke:#94a3b8,color:#475569;
+
+    class pages,comps,api feNode;
+    class builder,c_acc,c_nw,c_imp,c_fx,d_db,d_fx,d_conn coreNode;
+    class state stateNode;
+    class db store;
+    class kc os;
+    class yahoo ext;
+    class snap,sfin planned;
+```
+
+**Layers**
+- **Frontend (WebView)** — React + TypeScript + Tailwind (Vite). The `Dashboard` page and its
+  components (`NetWorthCard`, `NetWorthChart`, `AccountList`, `AccountModal`, `ImportModal`) call
+  typed `invoke()` bindings in `useFinanceApi.ts`; no business logic lives here.
+- **Rust core (`src-tauri`)** — `lib.rs` builds the Tauri app, registers managed state, and routes
+  IPC to `#[tauri::command]` handlers (`accounts`, `net_worth`, `import`, `fx`). Domain logic sits in
+  services: `db` (schema + `crypto` key management), `fx` (Yahoo client + rate store), and a
+  `connector` trait/registry that Phase 2 brokerage/bank sync plugs into.
+- **State** — a single `AppDb(Mutex<Connection>)` and the `ConnectorRegistry`, shared across commands.
+- **Persistence** — SQLite encrypted with SQLCipher (`finance-second-brain.db`); the key is generated
+  once and stored in the macOS Keychain / Windows Credential Manager via `keyring`.
+- **External** — one read-only HTTPS call to Yahoo Finance for the USD↔CAD rate; everything else is local.
+
+### Request flow — "Refresh FX"
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor U as User
+    participant UI as WebView (React)
+    participant API as useFinanceApi
+    participant IPC as Tauri IPC
+    participant CMD as fx command
+    participant SVC as fx service
+    participant Y as Yahoo Finance
+    participant DB as Encrypted SQLite
+
+    U->>UI: Click "Refresh FX"
+    UI->>API: refreshFxRates()
+    API->>IPC: invoke("refresh_fx_rates")
+    IPC->>CMD: refresh_fx_rates(db state)
+    CMD->>SVC: fetch_usd_cad(client)
+    SVC->>Y: HTTPS GET USDCAD=X
+    Y-->>SVC: rate + date
+    CMD->>DB: store_fx_rate (INSERT OR REPLACE)
+    CMD->>DB: SELECT rates (newest first)
+    DB-->>CMD: FxRateRow[]
+    CMD-->>IPC: Ok(rows)
+    IPC-->>API: Promise resolves
+    API-->>UI: update state, re-render chart and card
+```
 
 ## How to start building
 1. Open this folder as a **project** in Copilot.
