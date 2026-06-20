@@ -1,0 +1,34 @@
+#!/bin/sh
+#
+# commit-msg hook: strip AI/bot "Co-authored-by" trailers.
+#
+# Goal: non-human authors (GitHub Copilot, *[bot] accounts, common AI vendors)
+# must never appear in this repo's history or on the GitHub contributors list.
+# Human co-authors are preserved.
+#
+# Install on a fresh clone with:  git config core.hooksPath .githooks
+#
+# To bypass intentionally (not recommended):  git commit --no-verify
+
+msg_file="$1"
+[ -n "$msg_file" ] && [ -f "$msg_file" ] || exit 0
+
+tmp="$(mktemp 2>/dev/null)" || exit 0
+
+awk '
+  {
+    low = tolower($0)
+    if (low ~ /co-authored-by:/ && \
+        (low ~ /copilot/ || low ~ /\[bot\]/ || low ~ /anthropic\.com/ || low ~ /openai\.com/)) {
+      next
+    }
+    lines[++n] = $0
+  }
+  END {
+    # Drop any blank lines left dangling at the end of the message.
+    while (n > 0 && lines[n] ~ /^[[:space:]]*$/) n--
+    for (i = 1; i <= n; i++) print lines[i]
+  }
+' "$msg_file" > "$tmp" && mv "$tmp" "$msg_file"
+
+exit 0
