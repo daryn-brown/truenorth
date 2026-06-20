@@ -8,7 +8,7 @@
 //! without a KDF; the same literal must be used everywhere the DB is keyed (open and
 //! migration `ATTACH`), so the key is threaded through as a hex string.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use keyring::Entry;
 use rand::RngCore;
@@ -18,6 +18,8 @@ use rusqlite::Connection;
 const KEY_SERVICE: &str = "com.darynbrown.finance-second-brain";
 /// Keychain entry name for the database encryption key.
 const KEY_ACCOUNT: &str = "db-encryption-key";
+/// The 16-byte magic header that begins every plaintext SQLite database file.
+const SQLITE_MAGIC: &[u8; 16] = b"SQLite format 3\0";
 
 /// Errors that can occur while resolving or applying the encryption key.
 #[derive(Debug, thiserror::Error)]
@@ -107,6 +109,40 @@ pub fn migrate_plaintext_to_encrypted(db_path: &Path, key_hex: &str) -> Result<(
     Ok(())
 }
 
+/// Whether the file at `path` begins with the plaintext SQLite header. A SQLCipher
+/// (encrypted) database does not — its header bytes are part of the ciphertext — so this
+/// reliably distinguishes a legacy *unencrypted* DB from an encrypted one without a key.
+pub fn is_plaintext_sqlite(path: &Path) -> Result<bool, std::io::Error> {
+    use std::io::Read;
+    let mut head = [0u8; 16];
+    match std::fs::File::open(path)?.read_exact(&mut head) {
+        Ok(()) => Ok(&head == SQLITE_MAGIC),
+        // A file shorter than the header can't be a SQLite DB we should migrate.
+        Err(ref e) if e.kind() == std::io::ErrorKind::UnexpectedEof => Ok(false),
+        Err(e) => Err(e),
+    }
+}
+
+/// Move an unreadable database — one encrypted with a key we no longer have, or corrupt —
+/// aside so the app can start fresh instead of aborting on launch. The original bytes are
+/// preserved (renamed, never deleted) so they can be recovered if the key turns up. Any
+/// WAL/SHM sidecars are moved too. Returns the path the database was preserved at.
+pub fn quarantine_unreadable_db(db_path: &Path) -> Result<PathBuf, CryptoError> {
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let backup = db_path.with_extension(format!("db.unreadable-{ts}"));
+    std::fs::rename(db_path, &backup)?;
+    for ext in ["db-wal", "db-shm"] {
+        let side = db_path.with_extension(ext);
+        if side.exists() {
+            let _ = std::fs::rename(&side, db_path.with_extension(format!("{ext}.unreadable-{ts}")));
+        }
+    }
+    Ok(backup)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -181,5 +217,67 @@ mod tests {
         assert_eq!(name, "Legacy");
 
         let _ = std::fs::remove_file(&db_path);
+    }
+
+    fn unique_suffix() -> String {
+        format!(
+            "{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        )
+    }
+
+    #[test]
+    fn detects_plaintext_vs_encrypted_header() {
+        let dir = std::env::temp_dir();
+        let plain = dir.join(format!("fsb-plain-{}.db", unique_suffix()));
+        let enc = dir.join(format!("fsb-enc-{}.db", unique_suffix()));
+
+        {
+            let conn = Connection::open(&plain).unwrap();
+            apply_schema(&conn).unwrap();
+        }
+        assert!(is_plaintext_sqlite(&plain).unwrap());
+
+        let key = generate_key_hex();
+        {
+            let conn = Connection::open(&enc).unwrap();
+            apply_key(&conn, &key).unwrap();
+            apply_schema(&conn).unwrap();
+        }
+        assert!(!is_plaintext_sqlite(&enc).unwrap());
+
+        let _ = std::fs::remove_file(&plain);
+        let _ = std::fs::remove_file(&enc);
+    }
+
+    #[test]
+    fn unreadable_db_is_quarantined_not_deleted() {
+        let dir = std::env::temp_dir();
+        let db = dir.join(format!("fsb-foreign-{}.db", unique_suffix()));
+
+        // Encrypt with key A.
+        let key_a = generate_key_hex();
+        {
+            let conn = Connection::open(&db).unwrap();
+            apply_key(&conn, &key_a).unwrap();
+            apply_schema(&conn).unwrap();
+        }
+
+        // A different key cannot read it, and it is not plaintext — the exact state that
+        // previously crashed the app on launch.
+        let key_b = generate_key_hex();
+        assert!(!is_plaintext_sqlite(&db).unwrap());
+        assert!(!is_encrypted_with_key(&db, &key_b).unwrap());
+
+        // It is moved aside, not lost.
+        let backup = quarantine_unreadable_db(&db).unwrap();
+        assert!(!db.exists());
+        assert!(backup.exists());
+
+        let _ = std::fs::remove_file(&backup);
     }
 }
