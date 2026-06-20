@@ -4,6 +4,8 @@ import type {
   AddAccountPayload,
   AddBalanceSnapshotPayload,
   FxRate,
+  ImportPayload,
+  ImportSummary,
   NetWorth,
   NetWorthHistoryPoint,
 } from "../types/finance";
@@ -33,6 +35,9 @@ export const getFxRates = (): Promise<FxRate[]> =>
 
 export const refreshFxRates = (): Promise<FxRate[]> =>
   invoke("refresh_fx_rates");
+
+export const importData = (payload: ImportPayload): Promise<ImportSummary> =>
+  invoke("import_data", { payload });
 
 interface BalanceSnapshotResult {
   id: number;

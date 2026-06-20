@@ -137,3 +137,31 @@ export interface AddBalanceSnapshotPayload {
   balance: number;
   snapshot_date: string;
 }
+
+/** One historical balance for an imported account. */
+export interface ImportSnapshotInput {
+  snapshot_date: string;
+  balance: number;
+}
+
+/** An account (with optional history) in an import payload. */
+export interface ImportAccountInput {
+  name: string;
+  institution: string;
+  account_type: AccountTypeId;
+  currency: Currency;
+  jurisdiction: Jurisdiction;
+  notes?: string | null;
+  snapshots: ImportSnapshotInput[];
+}
+
+export interface ImportPayload {
+  accounts: ImportAccountInput[];
+}
+
+export interface ImportSummary {
+  accounts_created: number;
+  accounts_matched: number;
+  snapshots_imported: number;
+  errors: string[];
+}

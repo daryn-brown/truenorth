@@ -19,6 +19,7 @@ import {
 import NetWorthCard from "../components/NetWorthCard";
 import AccountList from "../components/AccountList";
 import AccountModal from "../components/AccountModal";
+import ImportModal from "../components/ImportModal";
 import NetWorthChart from "../components/NetWorthChart";
 
 type ModalState =
@@ -33,6 +34,7 @@ export default function Dashboard() {
   const [homeCurrency, setHomeCurrency] = useState<Currency>("CAD");
   const [loading, setLoading] = useState(true);
   const [modal, setModal] = useState<ModalState>({ open: false });
+  const [importOpen, setImportOpen] = useState(false);
   const [refreshingFx, setRefreshingFx] = useState(false);
   const [fxError, setFxError] = useState<string | null>(null);
 
@@ -105,14 +107,23 @@ export default function Dashboard() {
             Phase 1
           </span>
         </div>
-        <button
-          onClick={handleRefreshFx}
-          disabled={refreshingFx}
-          title="Refresh USD/CAD exchange rate from Yahoo Finance"
-          className="flex items-center gap-1.5 rounded-lg border border-slate-700 px-3 py-1.5 text-xs text-slate-400 hover:bg-slate-800 disabled:opacity-50 transition-colors"
-        >
-          {refreshingFx ? "Refreshing…" : "🔄 Refresh FX"}
-        </button>
+        <div className="flex items-center gap-2">
+          <button
+            onClick={() => setImportOpen(true)}
+            title="Import accounts and balance history from JSON or CSV"
+            className="flex items-center gap-1.5 rounded-lg border border-slate-700 px-3 py-1.5 text-xs text-slate-400 hover:bg-slate-800 transition-colors"
+          >
+            ⬆️ Import
+          </button>
+          <button
+            onClick={handleRefreshFx}
+            disabled={refreshingFx}
+            title="Refresh USD/CAD exchange rate from Yahoo Finance"
+            className="flex items-center gap-1.5 rounded-lg border border-slate-700 px-3 py-1.5 text-xs text-slate-400 hover:bg-slate-800 disabled:opacity-50 transition-colors"
+          >
+            {refreshingFx ? "Refreshing…" : "🔄 Refresh FX"}
+          </button>
+        </div>
       </header>
 
       <main className="mx-auto max-w-3xl px-6 py-8 space-y-6">
@@ -173,6 +184,12 @@ export default function Dashboard() {
           onUpdateBalance={handleUpdateBalance}
         />
       )}
+
+      <ImportModal
+        isOpen={importOpen}
+        onClose={() => setImportOpen(false)}
+        onImported={load}
+      />
     </div>
   );
 }
