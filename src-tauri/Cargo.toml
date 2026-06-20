@@ -21,8 +21,9 @@ tauri-plugin-shell = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
-# SQLite — bundled (upgrade path: swap "bundled" for "bundled-sqlcipher" for encryption at rest)
-rusqlite = { version = "0.37", features = ["bundled"] }
+# SQLite — bundled SQLCipher (encryption at rest). Vendored OpenSSL keeps the macOS + Windows
+# CI matrix self-contained (no system OpenSSL needed).
+rusqlite = { version = "0.37", features = ["bundled-sqlcipher-vendored-openssl"] }
 
 # Async runtime
 tokio = { version = "1", features = ["full"] }
@@ -39,8 +40,12 @@ async-trait = "0.1"
 # Time
 chrono = { version = "0.4", features = ["clock", "serde"] }
 
-# OS keychain — for storing connector secrets (Phase 2+)
+# OS keychain — for storing connector secrets (Phase 2+) and the DB encryption key
 keyring = { version = "3" }
+
+# DB encryption key generation + hex encoding
+rand = "0.8"
+hex = "0.4"
 
 [features]
 # This feature is used for production builds or when `devtools` feature is not needed.
