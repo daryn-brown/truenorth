@@ -1,0 +1,11 @@
+{
+  "$schema": "https://schema.tauri.app/config/2/acl/capabilities.schema.json",
+  "identifier": "default",
+  "description": "Default capabilities for Finance Second Brain",
+  "platforms": ["linux", "macOS", "windows"],
+  "windows": ["main"],
+  "permissions": [
+    "core:default",
+    "shell:allow-open"
+  ]
+}

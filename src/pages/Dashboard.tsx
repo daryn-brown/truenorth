@@ -1,0 +1,187 @@
+import { useCallback, useEffect, useState } from "react";
+import type {
+  Account,
+  AddAccountPayload,
+  AddBalanceSnapshotPayload,
+  Currency,
+  NetWorth,
+} from "../types/finance";
+import {
+  addAccount,
+  addBalanceSnapshot,
+  deleteAccount,
+  getNetWorth,
+  listAccounts,
+  refreshFxRates,
+} from "../hooks/useFinanceApi";
+import NetWorthCard from "../components/NetWorthCard";
+import AccountList from "../components/AccountList";
+import AccountModal from "../components/AccountModal";
+import NetWorthChart from "../components/NetWorthChart";
+
+type ModalState =
+  | { open: false }
+  | { open: true; mode: "add_account" }
+  | { open: true; mode: "update_balance"; account: Account };
+
+export default function Dashboard() {
+  const [accounts, setAccounts] = useState<Account[]>([]);
+  const [netWorth, setNetWorth] = useState<NetWorth | null>(null);
+  const [homeCurrency, setHomeCurrency] = useState<Currency>("CAD");
+  const [loading, setLoading] = useState(true);
+  const [modal, setModal] = useState<ModalState>({ open: false });
+  const [refreshingFx, setRefreshingFx] = useState(false);
+  const [fxError, setFxError] = useState<string | null>(null);
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    try {
+      const [accs, nw] = await Promise.all([listAccounts(), getNetWorth()]);
+      setAccounts(accs);
+      setNetWorth(nw);
+    } catch (err) {
+      console.error("Failed to load dashboard data:", err);
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  const handleAddAccount = async (payload: AddAccountPayload) => {
+    await addAccount(payload);
+    await load();
+  };
+
+  const handleUpdateBalance = async (payload: AddBalanceSnapshotPayload) => {
+    await addBalanceSnapshot(payload);
+    await load();
+  };
+
+  const handleDeleteAccount = async (id: number) => {
+    if (!confirm("Delete this account and all its snapshots?")) return;
+    await deleteAccount(id);
+    await load();
+  };
+
+  const handleRefreshFx = async () => {
+    setRefreshingFx(true);
+    setFxError(null);
+    try {
+      await refreshFxRates();
+      await load();
+    } catch (err) {
+      setFxError(String(err));
+    } finally {
+      setRefreshingFx(false);
+    }
+  };
+
+  // Build chart data: aggregate net worth per snapshot date
+  const chartData = buildChartData(netWorth, homeCurrency);
+
+  return (
+    <div className="min-h-screen bg-slate-950 text-white">
+      {/* Header */}
+      <header className="border-b border-slate-800 px-6 py-4 flex items-center justify-between">
+        <div className="flex items-center gap-3">
+          <span className="text-xl font-bold text-white tracking-tight">
+            💰 Finance Second Brain
+          </span>
+          <span className="rounded-full bg-indigo-900/50 border border-indigo-700/50 px-2 py-0.5 text-[11px] font-semibold text-indigo-300 uppercase tracking-wider">
+            Phase 1
+          </span>
+        </div>
+        <button
+          onClick={handleRefreshFx}
+          disabled={refreshingFx}
+          title="Refresh USD/CAD exchange rate from Yahoo Finance"
+          className="flex items-center gap-1.5 rounded-lg border border-slate-700 px-3 py-1.5 text-xs text-slate-400 hover:bg-slate-800 disabled:opacity-50 transition-colors"
+        >
+          {refreshingFx ? "Refreshing…" : "🔄 Refresh FX"}
+        </button>
+      </header>
+
+      <main className="mx-auto max-w-3xl px-6 py-8 space-y-6">
+        {fxError && (
+          <div className="rounded-lg bg-red-900/20 border border-red-700/50 px-4 py-3 text-sm text-red-400">
+            FX refresh failed: {fxError}
+          </div>
+        )}
+
+        {/* Net worth summary */}
+        <NetWorthCard
+          netWorth={netWorth}
+          homeCurrency={homeCurrency}
+          onToggleCurrency={() =>
+            setHomeCurrency((c) => (c === "CAD" ? "USD" : "CAD"))
+          }
+          loading={loading}
+        />
+
+        {/* Net worth chart */}
+        <NetWorthChart data={chartData} currency={homeCurrency} />
+
+        {/* Account list */}
+        <AccountList
+          accounts={accounts}
+          netWorthBreakdown={netWorth?.accounts ?? []}
+          onAddAccount={() => setModal({ open: true, mode: "add_account" })}
+          onDeleteAccount={handleDeleteAccount}
+          onUpdateBalance={(account) =>
+            setModal({ open: true, mode: "update_balance", account })
+          }
+        />
+
+        {accounts.length === 0 && !loading && (
+          <p className="text-center text-xs text-slate-600 pt-2">
+            All data is stored locally and encrypted. Nothing leaves your device.
+          </p>
+        )}
+      </main>
+
+      {/* Modals */}
+      {modal.open && modal.mode === "add_account" && (
+        <AccountModal
+          isOpen
+          mode="add_account"
+          onClose={() => setModal({ open: false })}
+          onAddAccount={handleAddAccount}
+          onUpdateBalance={handleUpdateBalance}
+        />
+      )}
+      {modal.open && modal.mode === "update_balance" && (
+        <AccountModal
+          isOpen
+          mode="update_balance"
+          accountToUpdate={modal.account}
+          onClose={() => setModal({ open: false })}
+          onAddAccount={handleAddAccount}
+          onUpdateBalance={handleUpdateBalance}
+        />
+      )}
+    </div>
+  );
+}
+
+function buildChartData(
+  netWorth: NetWorth | null,
+  currency: Currency,
+): { date: string; value: number }[] {
+  if (!netWorth) return [];
+
+  // Group account snapshots by date and sum net worth in the chosen currency
+  const byDate = new Map<string, number>();
+  for (const acc of netWorth.accounts) {
+    if (!acc.snapshot_date) continue;
+    const contribution =
+      currency === "CAD" ? acc.balance_cad : acc.balance_usd;
+    byDate.set(acc.snapshot_date, (byDate.get(acc.snapshot_date) ?? 0) + contribution);
+  }
+
+  return [...byDate.entries()]
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([date, value]) => ({ date, value }));
+}
