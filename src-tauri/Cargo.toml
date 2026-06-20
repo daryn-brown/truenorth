@@ -40,12 +40,24 @@ async-trait = "0.1"
 # Time
 chrono = { version = "0.4", features = ["clock", "serde"] }
 
-# OS keychain — for storing connector secrets (Phase 2+) and the DB encryption key
+# OS keychain — for storing connector secrets (Phase 2+) and the DB encryption key.
+# keyring v3 gates its OS backends behind features; with none enabled it silently falls back to a
+# non-persistent in-memory store, so the key would be lost between launches. The real backend is
+# enabled per-target below (apple-native / windows-native).
 keyring = { version = "3" }
 
 # DB encryption key generation + hex encoding
 rand = "0.8"
 hex = "0.4"
+
+# Real OS keychain backends for `keyring`, enabled per-target so the DB encryption key actually
+# persists (macOS Keychain / Windows Credential Manager). Without these the key is lost on exit and
+# the encrypted database can never be reopened.
+[target.'cfg(target_os = "macos")'.dependencies]
+keyring = { version = "3", features = ["apple-native"] }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+keyring = { version = "3", features = ["windows-native"] }
 
 [features]
 # This feature is used for production builds or when `devtools` feature is not needed.
