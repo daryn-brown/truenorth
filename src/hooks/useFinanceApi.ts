@@ -4,7 +4,10 @@ import type {
   AddAccountPayload,
   AddBalanceSnapshotPayload,
   FxRate,
+  ImportPayload,
+  ImportSummary,
   NetWorth,
+  NetWorthHistoryPoint,
 } from "../types/finance";
 
 export const listAccounts = (): Promise<Account[]> =>
@@ -24,11 +27,17 @@ export const addBalanceSnapshot = (
 export const getNetWorth = (): Promise<NetWorth> =>
   invoke("get_net_worth");
 
+export const getNetWorthHistory = (): Promise<NetWorthHistoryPoint[]> =>
+  invoke("get_net_worth_history");
+
 export const getFxRates = (): Promise<FxRate[]> =>
   invoke("get_fx_rates");
 
 export const refreshFxRates = (): Promise<FxRate[]> =>
   invoke("refresh_fx_rates");
+
+export const importData = (payload: ImportPayload): Promise<ImportSummary> =>
+  invoke("import_data", { payload });
 
 interface BalanceSnapshotResult {
   id: number;

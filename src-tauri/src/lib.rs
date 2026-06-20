@@ -1,7 +1,11 @@
 mod commands;
+// Phase 2 connector groundwork (SnapTrade/SimpleFIN); not yet exercised at runtime.
+#[allow(dead_code)]
 mod connector;
 mod db;
 mod fx;
+
+use tauri::Manager;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -10,6 +14,7 @@ pub fn run() {
         .setup(|app| {
             db::setup_database(app)
                 .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
+            app.manage(connector::ConnectorRegistry::new());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -18,6 +23,8 @@ pub fn run() {
             commands::accounts::delete_account,
             commands::accounts::add_balance_snapshot,
             commands::net_worth::get_net_worth,
+            commands::net_worth::get_net_worth_history,
+            commands::import::import_data,
             commands::fx::get_fx_rates,
             commands::fx::refresh_fx_rates,
         ])
