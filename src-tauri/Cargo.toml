@@ -1,0 +1,47 @@
+[package]
+name = "finance-second-brain"
+version = "0.1.0"
+description = "Local-first, privacy-first desktop app for cross-border (US + Canada) personal finances."
+authors = ["Daryn Brown"]
+edition = "2021"
+
+[lib]
+name = "finance_second_brain_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+# Tauri
+tauri = { version = "2", features = [] }
+tauri-plugin-shell = "2"
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# SQLite — bundled (upgrade path: swap "bundled" for "bundled-sqlcipher" for encryption at rest)
+rusqlite = { version = "0.37", features = ["bundled"] }
+
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+
+# HTTP client for Yahoo Finance / FX rates
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+
+# Error handling
+thiserror = "2"
+
+# Object-safe async trait impls
+async-trait = "0.1"
+
+# Time
+chrono = { version = "0.4", features = ["clock", "serde"] }
+
+# OS keychain — for storing connector secrets (Phase 2+)
+keyring = { version = "3" }
+
+[features]
+# This feature is used for production builds or when `devtools` feature is not needed.
+custom-protocol = ["tauri/custom-protocol"]
