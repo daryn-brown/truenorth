@@ -189,3 +189,21 @@ export interface SnapTradeSyncSummary {
   holdings_synced: number;
   synced_at: string;
 }
+
+/** SimpleFIN connection state, mirrored from the Rust `SimpleFinStatus`. */
+export interface SimpleFinStatus {
+  /** An access URL is stored (a setup token has been claimed). */
+  is_connected: boolean;
+  last_synced_at: string | null;
+  /** Number of active accounts connected via SimpleFIN. */
+  account_count: number;
+}
+
+/** Result of a SimpleFIN sync, mirrored from the Rust `SimpleFinSyncSummary`. */
+export interface SimpleFinSyncSummary {
+  accounts_synced: number;
+  holdings_synced: number;
+  synced_at: string;
+  /** Non-fatal messages SimpleFIN returned (e.g. an institution needs re-auth). */
+  warnings: string[];
+}
