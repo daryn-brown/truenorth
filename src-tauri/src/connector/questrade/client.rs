@@ -105,14 +105,9 @@ pub async fn refresh_access_token(refresh_token: &str) -> Result<QuestradeTokens
         return Err(QuestradeError::Parse("refresh token is empty".into()));
     }
 
-    let resp = reqwest::Client::new()
-        .post(TOKEN_URL)
-        .query(&[
-            ("grant_type", "refresh_token"),
-            ("refresh_token", refresh_token),
-        ])
-        .send()
-        .await?;
+    let client = reqwest::Client::new();
+    let request = build_token_request(&client, refresh_token)?;
+    let resp = client.execute(request).await?;
     let status = resp.status();
     let text = resp.text().await?;
     if !status.is_success() {
@@ -123,6 +118,25 @@ pub async fn refresh_access_token(refresh_token: &str) -> Result<QuestradeTokens
     }
     let v: Value = serde_json::from_str(&text).map_err(|e| QuestradeError::Parse(e.to_string()))?;
     parse_tokens(&v)
+}
+
+/// Build the OAuth2 refresh-token request.
+///
+/// Questrade's login server rejects a body-less `POST` with **HTTP 411 (Length Required)**, so the
+/// parameters must be sent as a form-encoded **body** (which carries a `Content-Length`) rather than
+/// in the query string. Sending them via `.query(...)` produces a body-less POST and the 411 that
+/// previously surfaced as a misleading "refresh token expired / already used" error.
+fn build_token_request(
+    client: &reqwest::Client,
+    refresh_token: &str,
+) -> Result<reqwest::Request, reqwest::Error> {
+    client
+        .post(TOKEN_URL)
+        .form(&[
+            ("grant_type", "refresh_token"),
+            ("refresh_token", refresh_token),
+        ])
+        .build()
 }
 
 pub struct QuestradeClient {
@@ -296,6 +310,35 @@ fn extract_error_message(text: &str) -> String {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn token_request_is_form_encoded_not_query() {
+        // Regression guard for the HTTP 411 bug: the refresh-token params must travel in a
+        // form-encoded body (with a Content-Length), never in the query string. A body-less POST
+        // is rejected by Questrade's server with "411 Length Required" before the token is checked.
+        let client = reqwest::Client::new();
+        let req = build_token_request(&client, "my-refresh-token").unwrap();
+
+        assert_eq!(req.method(), reqwest::Method::POST);
+        assert_eq!(req.url().as_str(), TOKEN_URL);
+        assert!(
+            req.url().query().is_none(),
+            "params must not be in the query string"
+        );
+        assert_eq!(
+            req.headers()
+                .get(reqwest::header::CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok()),
+            Some("application/x-www-form-urlencoded"),
+        );
+        let body = req
+            .body()
+            .and_then(|b| b.as_bytes())
+            .map(|b| String::from_utf8_lossy(b).into_owned())
+            .expect("request must carry a body");
+        assert!(body.contains("grant_type=refresh_token"), "body: {body}");
+        assert!(body.contains("refresh_token=my-refresh-token"), "body: {body}");
+    }
 
     #[test]
     fn parses_token_response_and_keeps_rotated_refresh_token() {
