@@ -64,6 +64,10 @@ export const getFxRates = (): Promise<FxRate[]> =>
 export const refreshFxRates = (): Promise<FxRate[]> =>
   invoke("refresh_fx_rates");
 
+/** Refresh FX only when the stored rates aren't from today — a best-effort daily auto-refresh. */
+export const refreshFxRatesIfStale = (): Promise<FxRate[]> =>
+  invoke("refresh_fx_rates_if_stale");
+
 export const importData = (payload: ImportPayload): Promise<ImportSummary> =>
   invoke("import_data", { payload });
 

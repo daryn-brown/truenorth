@@ -22,6 +22,7 @@ import {
   getSeattleProjection,
   listAccounts,
   refreshFxRates,
+  refreshFxRatesIfStale,
   setSeattleAssumptions,
 } from "../hooks/useFinanceApi";
 import NetWorthCard from "../components/NetWorthCard";
@@ -56,6 +57,14 @@ export default function Dashboard() {
   const load = useCallback(async () => {
     setLoading(true);
     try {
+      // Keep conversions current without a manual click: refresh FX at most once per day. This is
+      // a no-op (DB check only) when today's rates are already stored, and stays best-effort so an
+      // offline launch still renders with the last known rates.
+      try {
+        await refreshFxRatesIfStale();
+      } catch (err) {
+        console.error("Auto FX refresh failed:", err);
+      }
       const [accs, nw, nwDelta, goalProgress, proj, hist] = await Promise.all([
         listAccounts(),
         getNetWorth(),
@@ -205,6 +214,7 @@ export default function Dashboard() {
         <AccountList
           accounts={accounts}
           netWorthBreakdown={netWorth?.accounts ?? []}
+          homeCurrency={homeCurrency}
           onAddAccount={() => setModal({ open: true, mode: "add_account" })}
           onDeleteAccount={handleDeleteAccount}
           onUpdateBalance={(account) =>

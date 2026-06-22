@@ -41,6 +41,7 @@ pub fn run() {
             commands::import::import_data,
             commands::fx::get_fx_rates,
             commands::fx::refresh_fx_rates,
+            commands::fx::refresh_fx_rates_if_stale,
             commands::snaptrade::snaptrade_get_status,
             commands::snaptrade::snaptrade_save_credentials,
             commands::snaptrade::snaptrade_list_users,
