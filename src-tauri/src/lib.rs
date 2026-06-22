@@ -35,6 +35,10 @@ pub fn run() {
             commands::snaptrade::snaptrade_get_login_link,
             commands::snaptrade::snaptrade_sync,
             commands::snaptrade::snaptrade_disconnect,
+            commands::simplefin::simplefin_get_status,
+            commands::simplefin::simplefin_connect,
+            commands::simplefin::simplefin_sync,
+            commands::simplefin::simplefin_disconnect,
         ])
         .run(tauri::generate_context!())
         .expect("TrueNorth failed to start");
