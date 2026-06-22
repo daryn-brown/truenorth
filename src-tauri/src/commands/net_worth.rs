@@ -210,7 +210,9 @@ pub fn get_net_worth_history(db: State<AppDb>) -> Result<Vec<NetWorthHistoryPoin
     compute_net_worth_history(&conn).map_err(|e| e.to_string())
 }
 
-fn compute_net_worth_history(conn: &Connection) -> rusqlite::Result<Vec<NetWorthHistoryPoint>> {
+pub(crate) fn compute_net_worth_history(
+    conn: &Connection,
+) -> rusqlite::Result<Vec<NetWorthHistoryPoint>> {
     let usd_rates = load_usd_rates(conn)?;
 
     // account_id -> currency (active accounts only)

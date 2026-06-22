@@ -132,6 +132,28 @@ export interface NetWorthDelta {
   has_previous: boolean;
 }
 
+/**
+ * Progress toward the headline net-worth milestone (USD) with a projected hit-date.
+ * Mirrors the Rust `GoalProgress`.
+ */
+export interface GoalProgress {
+  target_usd: number;
+  current_usd: number;
+  gap_usd: number;
+  /** Fraction complete, 0..1. */
+  progress: number;
+  already_met: boolean;
+  /** Net-worth change per day over the trailing ~30 days, or null with too little history. */
+  daily_rate_usd: number | null;
+  /** That pace per 30 days, for display. */
+  monthly_rate_usd: number | null;
+  /** Actual span (days) the pace was measured over. */
+  window_days: number | null;
+  /** Projected date net worth reaches the target (YYYY-MM-DD), or null when unprojectable. */
+  projected_date: string | null;
+  days_to_goal: number | null;
+}
+
 export interface AccountNetWorth {
   account_id: number;
   account_name: string;

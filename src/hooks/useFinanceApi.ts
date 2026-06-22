@@ -4,6 +4,7 @@ import type {
   AddAccountPayload,
   AddBalanceSnapshotPayload,
   FxRate,
+  GoalProgress,
   ImportPayload,
   ImportSummary,
   NetWorth,
@@ -37,6 +38,13 @@ export const getNetWorthHistory = (): Promise<NetWorthHistoryPoint[]> =>
 
 export const getNetWorthDelta = (): Promise<NetWorthDelta> =>
   invoke("get_net_worth_delta");
+
+export const getGoalProgress = (): Promise<GoalProgress> =>
+  invoke("get_goal_progress");
+
+/** Update the headline net-worth milestone (USD); returns recomputed progress. */
+export const setGoalTarget = (targetUsd: number): Promise<GoalProgress> =>
+  invoke("set_goal_target", { targetUsd });
 
 export const getFxRates = (): Promise<FxRate[]> =>
   invoke("get_fx_rates");

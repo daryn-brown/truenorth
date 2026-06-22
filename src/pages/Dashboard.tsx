@@ -4,6 +4,7 @@ import type {
   AddAccountPayload,
   AddBalanceSnapshotPayload,
   Currency,
+  GoalProgress,
   NetWorth,
   NetWorthDelta,
   NetWorthHistoryPoint,
@@ -12,6 +13,7 @@ import {
   addAccount,
   addBalanceSnapshot,
   deleteAccount,
+  getGoalProgress,
   getNetWorth,
   getNetWorthDelta,
   getNetWorthHistory,
@@ -19,6 +21,7 @@ import {
   refreshFxRates,
 } from "../hooks/useFinanceApi";
 import NetWorthCard from "../components/NetWorthCard";
+import GoalCountdownCard from "../components/GoalCountdownCard";
 import AccountList from "../components/AccountList";
 import AccountModal from "../components/AccountModal";
 import ImportModal from "../components/ImportModal";
@@ -34,6 +37,7 @@ export default function Dashboard() {
   const [accounts, setAccounts] = useState<Account[]>([]);
   const [netWorth, setNetWorth] = useState<NetWorth | null>(null);
   const [delta, setDelta] = useState<NetWorthDelta | null>(null);
+  const [goal, setGoal] = useState<GoalProgress | null>(null);
   const [history, setHistory] = useState<NetWorthHistoryPoint[]>([]);
   const [homeCurrency, setHomeCurrency] = useState<Currency>("CAD");
   const [loading, setLoading] = useState(true);
@@ -46,15 +50,17 @@ export default function Dashboard() {
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const [accs, nw, nwDelta, hist] = await Promise.all([
+      const [accs, nw, nwDelta, goalProgress, hist] = await Promise.all([
         listAccounts(),
         getNetWorth(),
         getNetWorthDelta(),
+        getGoalProgress(),
         getNetWorthHistory(),
       ]);
       setAccounts(accs);
       setNetWorth(nw);
       setDelta(nwDelta);
+      setGoal(goalProgress);
       setHistory(hist);
     } catch (err) {
       console.error("Failed to load dashboard data:", err);
@@ -168,6 +174,9 @@ export default function Dashboard() {
           }
           loading={loading}
         />
+
+        {/* $100k countdown / CoastFIRE */}
+        <GoalCountdownCard goal={goal} loading={loading} />
 
         {/* Net worth chart */}
         <NetWorthChart data={chartData} currency={homeCurrency} />

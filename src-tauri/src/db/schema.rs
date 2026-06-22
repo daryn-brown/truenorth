@@ -114,6 +114,12 @@ pub fn seed_defaults(conn: &Connection) -> SqlResult<()> {
         "INSERT OR IGNORE INTO app_settings (key, value) VALUES (?1, ?2)",
         params!["home_currency", "CAD"],
     )?;
+    // The headline "master net worth" milestone, in USD (the benchmark currency). Surfaced by the
+    // $100k countdown; editable via set_goal_target.
+    conn.execute(
+        "INSERT OR IGNORE INTO app_settings (key, value) VALUES (?1, ?2)",
+        params!["goal_target_usd", "100000"],
+    )?;
     Ok(())
 }
 
