@@ -172,6 +172,11 @@ export interface SnapTradeStatus {
   has_credentials: boolean;
   /** A brokerage is connected (SnapTrade user exists). */
   is_connected: boolean;
+  /**
+   * The clientId is a personal SnapTrade key (`PERS-…`): its user is auto-provisioned at
+   * signup, so the user links a userId + userSecret instead of the app registering one.
+   */
+  is_personal: boolean;
   /** Public clientId, for display. Never the secret consumerKey. */
   client_id: string | null;
   last_synced_at: string | null;

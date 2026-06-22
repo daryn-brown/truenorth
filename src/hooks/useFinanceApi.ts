@@ -52,6 +52,17 @@ export const snaptradeSaveCredentials = (
 ): Promise<SnapTradeStatus> =>
   invoke("snaptrade_save_credentials", { clientId, consumerKey });
 
+/** List SnapTrade user IDs registered under the saved key (one, for personal keys). */
+export const snaptradeListUsers = (): Promise<string[]> =>
+  invoke("snaptrade_list_users");
+
+/** Link a personal SnapTrade user with credentials copied from the dashboard. */
+export const snaptradeLinkUser = (
+  userId: string,
+  userSecret: string,
+): Promise<SnapTradeStatus> =>
+  invoke("snaptrade_link_user", { userId, userSecret });
+
 export const snaptradeGetLoginLink = (): Promise<string> =>
   invoke("snaptrade_get_login_link");
 

@@ -5,6 +5,8 @@ import {
   snaptradeDisconnect,
   snaptradeGetLoginLink,
   snaptradeGetStatus,
+  snaptradeLinkUser,
+  snaptradeListUsers,
   snaptradeSaveCredentials,
   snaptradeSync,
 } from "../hooks/useFinanceApi";
@@ -25,9 +27,12 @@ export default function ConnectionsModal({ isOpen, onClose, onChanged }: Props) 
   const [status, setStatus] = useState<SnapTradeStatus | null>(null);
   const [clientId, setClientId] = useState("");
   const [consumerKey, setConsumerKey] = useState("");
-  const [busy, setBusy] = useState<null | "save" | "connect" | "sync" | "disconnect">(
-    null,
-  );
+  const [userId, setUserId] = useState("");
+  const [userSecret, setUserSecret] = useState("");
+  const [relinking, setRelinking] = useState(false);
+  const [busy, setBusy] = useState<
+    null | "save" | "lookup" | "link" | "connect" | "sync" | "disconnect"
+  >(null);
   const [error, setError] = useState<string | null>(null);
   const [info, setInfo] = useState<string | null>(null);
   const [summary, setSummary] = useState<SnapTradeSyncSummary | null>(null);
@@ -45,6 +50,8 @@ export default function ConnectionsModal({ isOpen, onClose, onChanged }: Props) 
     setError(null);
     setInfo(null);
     setSummary(null);
+    setUserSecret("");
+    setRelinking(false);
     void refreshStatus();
   }, [isOpen, refreshStatus]);
 
@@ -59,6 +66,46 @@ export default function ConnectionsModal({ isOpen, onClose, onChanged }: Props) 
       setStatus(next);
       setConsumerKey("");
       setInfo("API key saved and verified.");
+    } catch (err) {
+      setError(messageOf(err));
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const handleLookupUser = async () => {
+    setBusy("lookup");
+    setError(null);
+    setInfo(null);
+    try {
+      const users = await snaptradeListUsers();
+      if (users.length > 0) {
+        setUserId(users[0]);
+        setInfo(
+          users.length === 1
+            ? "Found your SnapTrade User ID. Now paste your User Secret."
+            : `Found ${users.length} users — filled in the first. Edit if needed.`,
+        );
+      } else {
+        setError("No SnapTrade user is registered to this key yet.");
+      }
+    } catch (err) {
+      setError(messageOf(err));
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const handleLinkUser = async () => {
+    setBusy("link");
+    setError(null);
+    setInfo(null);
+    try {
+      const next = await snaptradeLinkUser(userId, userSecret);
+      setStatus(next);
+      setUserSecret("");
+      setRelinking(false);
+      setInfo("SnapTrade user linked. You can sync now.");
     } catch (err) {
       setError(messageOf(err));
     } finally {
@@ -127,6 +174,8 @@ export default function ConnectionsModal({ isOpen, onClose, onChanged }: Props) 
 
   const hasCredentials = status?.has_credentials ?? false;
   const isConnected = status?.is_connected ?? false;
+  const isPersonal = status?.is_personal ?? false;
+  const showLinkForm = isPersonal && (!isConnected || relinking);
 
   return (
     <div
@@ -212,20 +261,107 @@ export default function ConnectionsModal({ isOpen, onClose, onChanged }: Props) 
           )}
         </Section>
 
-        {/* Step 2 — Authorize a brokerage */}
+        {/* Step 2 — SnapTrade user */}
+        <Section step={2} title="SnapTrade user" done={isConnected} disabled={!hasCredentials}>
+          {showLinkForm ? (
+            <div className="space-y-3">
+              <p className="text-xs text-slate-500">
+                Personal SnapTrade keys (
+                <span className="font-mono text-slate-400">PERS-…</span>) come with a user that's
+                created for you. Copy your <span className="text-slate-300">User ID</span> and{" "}
+                <span className="text-slate-300">User Secret</span> from the{" "}
+                <button
+                  type="button"
+                  onClick={() => void openUrl(SNAPTRADE_DASHBOARD)}
+                  className="text-indigo-400 underline hover:text-indigo-300"
+                >
+                  SnapTrade dashboard
+                </button>
+                .
+              </p>
+              <div className="flex gap-2">
+                <input
+                  value={userId}
+                  onChange={(e) => setUserId(e.target.value)}
+                  placeholder="User ID"
+                  spellCheck={false}
+                  className={inputClass}
+                />
+                <button
+                  type="button"
+                  onClick={handleLookupUser}
+                  disabled={busy !== null}
+                  title="Look up the User ID registered to your key"
+                  className="shrink-0 rounded-lg border border-slate-600 px-3 text-xs font-medium text-slate-200 hover:bg-slate-700 disabled:opacity-50 transition-colors"
+                >
+                  {busy === "lookup" ? "…" : "Find mine"}
+                </button>
+              </div>
+              <input
+                value={userSecret}
+                onChange={(e) => setUserSecret(e.target.value)}
+                placeholder="User Secret"
+                type="password"
+                spellCheck={false}
+                className={inputClass}
+              />
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={handleLinkUser}
+                  disabled={busy !== null || !userId.trim() || !userSecret.trim()}
+                  className="flex-1 rounded-lg bg-indigo-600 py-2 text-sm font-semibold text-white hover:bg-indigo-500 disabled:opacity-50 transition-colors"
+                >
+                  {busy === "link" ? "Linking…" : "Link user"}
+                </button>
+                {relinking && (
+                  <button
+                    type="button"
+                    onClick={() => setRelinking(false)}
+                    className="rounded-lg border border-slate-600 px-4 py-2 text-sm font-medium text-slate-300 hover:bg-slate-700 transition-colors"
+                  >
+                    Cancel
+                  </button>
+                )}
+              </div>
+            </div>
+          ) : isConnected ? (
+            <div className="flex items-center justify-between gap-3 text-sm text-slate-300">
+              <span className="truncate">Linked to SnapTrade</span>
+              {isPersonal && (
+                <button
+                  type="button"
+                  onClick={() => setRelinking(true)}
+                  className="shrink-0 text-xs text-slate-400 underline hover:text-slate-200"
+                >
+                  Update secret
+                </button>
+              )}
+            </div>
+          ) : (
+            <p className="text-xs text-slate-500">
+              A SnapTrade user is created automatically when you connect a brokerage below.
+            </p>
+          )}
+        </Section>
+
+        {/* Step 3 — Authorize a brokerage */}
         <Section
-          step={2}
+          step={3}
           title="Authorize your brokerage"
-          done={isConnected}
-          disabled={!hasCredentials}
+          done={(status?.account_count ?? 0) > 0}
+          disabled={isPersonal ? !isConnected : !hasCredentials}
         >
           <p className="mb-3 text-xs text-slate-500">
             Opens SnapTrade's secure connection portal in your browser to link an institution.
+            {isPersonal
+              ? " Already linked a brokerage in the SnapTrade dashboard? You can skip straight to Sync."
+              : ""}
           </p>
           <button
             type="button"
             onClick={handleConnect}
-            disabled={busy !== null || !hasCredentials}
+            disabled={busy !== null || (isPersonal ? !isConnected : !hasCredentials)}
             className="w-full rounded-lg border border-slate-600 py-2 text-sm font-medium text-slate-200 hover:bg-slate-700 disabled:opacity-50 transition-colors"
           >
             {busy === "connect"
@@ -236,9 +372,9 @@ export default function ConnectionsModal({ isOpen, onClose, onChanged }: Props) 
           </button>
         </Section>
 
-        {/* Step 3 — Sync */}
+        {/* Step 4 — Sync */}
         <Section
-          step={3}
+          step={4}
           title="Sync balances"
           disabled={!isConnected}
           last
