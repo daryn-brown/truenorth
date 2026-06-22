@@ -1,4 +1,4 @@
-use rusqlite::{params, Connection, Result as SqlResult};
+use rusqlite::{params, Connection, OptionalExtension, Result as SqlResult};
 
 /// The full DDL for TrueNorth's Phase 1 schema.
 ///
@@ -70,7 +70,19 @@ CREATE TABLE IF NOT EXISTS transactions (
     category      TEXT,
     memo          TEXT,
     connector_ref TEXT,
+    -- Manual fixed/variable/income/transfer override; wins over rule-based classification and
+    -- is preserved across re-syncs (the connector upsert never touches this column).
+    flow_override TEXT,
     created_at    TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+);
+
+-- Rules that auto-classify a transaction by case-insensitive substring of its description.
+-- flow_type is one of 'income' | 'fixed' | 'variable' | 'transfer'. Earlier rows win.
+CREATE TABLE IF NOT EXISTS txn_rules (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    pattern    TEXT NOT NULL,
+    flow_type  TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
 );
 
 CREATE TABLE IF NOT EXISTS goals (
@@ -99,20 +111,100 @@ CREATE INDEX IF NOT EXISTS idx_fx_rates_pair_date
 
 CREATE INDEX IF NOT EXISTS idx_transactions_account_date
     ON transactions (account_id, txn_date DESC);
+
+-- Dedup key for connector-sourced transactions. connector_ref is NULL for manual rows, and
+-- SQLite treats NULLs as distinct, so manual entries never collide on this index.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_transactions_connector
+    ON transactions (account_id, connector_ref);
 "#;
 
 /// Apply the schema DDL and ensure WAL mode for better concurrency.
 pub fn apply_schema(conn: &Connection) -> SqlResult<()> {
     conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;")?;
     conn.execute_batch(SCHEMA)?;
+    // Lightweight migrations for databases created before a column existed. CREATE TABLE
+    // IF NOT EXISTS never alters an existing table, so additive columns are added here.
+    add_column_if_missing(conn, "transactions", "flow_override", "TEXT")?;
     Ok(())
 }
+
+/// Add `column` to `table` when it isn't already present. Idempotent: a no-op once the column
+/// exists, so it's safe to run on every launch.
+fn add_column_if_missing(
+    conn: &Connection,
+    table: &str,
+    column: &str,
+    decl: &str,
+) -> SqlResult<()> {
+    let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})"))?;
+    let exists = stmt
+        .query_map([], |r| r.get::<_, String>(1))?
+        .filter_map(Result::ok)
+        .any(|name| name == column);
+    if !exists {
+        conn.execute(
+            &format!("ALTER TABLE {table} ADD COLUMN {column} {decl}"),
+            [],
+        )?;
+    }
+    Ok(())
+}
+
+/// Default transaction-classification rules. Earlier entries win, so specific payees (the mom
+/// support transfer) precede the generic transfer patterns that would otherwise swallow them.
+/// `transfer` rows are excluded from income/expense so internal moves and card payments don't
+/// double-count; the user can edit or delete any of these.
+const DEFAULT_TXN_RULES: &[(&str, &str)] = &[
+    // The $800/mo support sent to mom is a real fixed expense, not lifestyle creep — and not an
+    // internal transfer. Rename the pattern to the exact payee your bank reports if needed.
+    ("mom", "fixed"),
+    ("rent", "fixed"),
+    // Credit-card payments and account-to-account moves: not spending, not income.
+    ("payment - thank you", "transfer"),
+    ("payment thank you", "transfer"),
+    ("bill payment", "transfer"),
+    ("e-transfer", "transfer"),
+    ("transfer", "transfer"),
+];
 
 /// Seed the reference account types into app_settings if not already present.
 pub fn seed_defaults(conn: &Connection) -> SqlResult<()> {
     conn.execute(
         "INSERT OR IGNORE INTO app_settings (key, value) VALUES (?1, ?2)",
         params!["home_currency", "CAD"],
+    )?;
+    // The headline "master net worth" milestone, in USD (the benchmark currency). Surfaced by the
+    // $100k countdown; editable via set_goal_target.
+    conn.execute(
+        "INSERT OR IGNORE INTO app_settings (key, value) VALUES (?1, ?2)",
+        params!["goal_target_usd", "100000"],
+    )?;
+    seed_txn_rules(conn)?;
+    Ok(())
+}
+
+/// Insert the default classification rules exactly once. Guarded by a flag so deleting a seeded
+/// rule doesn't resurrect it on the next launch.
+fn seed_txn_rules(conn: &Connection) -> SqlResult<()> {
+    let already: Option<String> = conn
+        .query_row(
+            "SELECT value FROM app_settings WHERE key = 'txn_rules_seeded'",
+            [],
+            |r| r.get(0),
+        )
+        .optional()?;
+    if already.is_some() {
+        return Ok(());
+    }
+    for (pattern, flow_type) in DEFAULT_TXN_RULES {
+        conn.execute(
+            "INSERT INTO txn_rules (pattern, flow_type) VALUES (?1, ?2)",
+            params![pattern, flow_type],
+        )?;
+    }
+    conn.execute(
+        "INSERT OR IGNORE INTO app_settings (key, value) VALUES ('txn_rules_seeded', '1')",
+        [],
     )?;
     Ok(())
 }
@@ -184,5 +276,60 @@ mod tests {
             )
             .unwrap();
         assert_eq!(balance, 2000.0);
+    }
+
+    #[test]
+    fn seeds_default_txn_rules_once() {
+        let conn = open_test_db();
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM txn_rules", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count, DEFAULT_TXN_RULES.len() as i64);
+        // The mom support transfer is seeded as a fixed expense, ahead of the generic
+        // transfer rules so it isn't excluded as an internal move.
+        let mom: String = conn
+            .query_row(
+                "SELECT flow_type FROM txn_rules WHERE pattern = 'mom'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(mom, "fixed");
+
+        // Re-seeding is a no-op (deleting a rule must not resurrect it).
+        conn.execute("DELETE FROM txn_rules WHERE pattern = 'mom'", [])
+            .unwrap();
+        seed_defaults(&conn).unwrap();
+        let after: i64 = conn
+            .query_row("SELECT COUNT(*) FROM txn_rules", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(after, DEFAULT_TXN_RULES.len() as i64 - 1);
+    }
+
+    #[test]
+    fn migrates_flow_override_onto_legacy_transactions() {
+        // Simulate a pre-tagging database: the transactions table without flow_override.
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE transactions (\
+                id INTEGER PRIMARY KEY AUTOINCREMENT, account_id INTEGER NOT NULL, \
+                txn_date TEXT NOT NULL, description TEXT NOT NULL, amount REAL NOT NULL, \
+                currency TEXT NOT NULL, category TEXT, memo TEXT, connector_ref TEXT, \
+                created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')));",
+        )
+        .unwrap();
+
+        apply_schema(&conn).unwrap();
+        let has_column = conn
+            .prepare("PRAGMA table_info(transactions)")
+            .unwrap()
+            .query_map([], |r| r.get::<_, String>(1))
+            .unwrap()
+            .filter_map(Result::ok)
+            .any(|name| name == "flow_override");
+        assert!(has_column);
+
+        // Idempotent: running the migration again must not error.
+        apply_schema(&conn).unwrap();
     }
 }

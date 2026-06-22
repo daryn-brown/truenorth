@@ -1,7 +1,10 @@
 pub mod accounts;
+pub mod cashflow;
 pub mod fx;
+pub mod goals;
 pub mod import;
 pub mod net_worth;
 pub mod questrade;
 pub mod simplefin;
+pub mod simulator;
 pub mod snaptrade;

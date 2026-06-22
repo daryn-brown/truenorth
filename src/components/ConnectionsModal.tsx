@@ -666,8 +666,9 @@ function SimpleFinPanel({ onChanged }: { onChanged: () => void }) {
           <div className="mt-3 space-y-2">
             <p className="rounded-lg bg-emerald-900/20 border border-emerald-700/40 px-3 py-2 text-xs text-emerald-300">
               Synced {summary.accounts_synced} account
-              {summary.accounts_synced === 1 ? "" : "s"} and {summary.holdings_synced} holding
-              {summary.holdings_synced === 1 ? "" : "s"}. Net worth is up to date.
+              {summary.accounts_synced === 1 ? "" : "s"}, {summary.holdings_synced} holding
+              {summary.holdings_synced === 1 ? "" : "s"}, and {summary.transactions_synced}{" "}
+              transaction{summary.transactions_synced === 1 ? "" : "s"}. Net worth is up to date.
             </p>
             {summary.warnings.length > 0 && (
               <ul className="rounded-lg bg-amber-900/20 border border-amber-700/40 px-3 py-2 text-xs text-amber-300 space-y-1">

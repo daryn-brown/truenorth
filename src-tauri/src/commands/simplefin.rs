@@ -11,7 +11,7 @@ use tauri::State;
 
 use crate::connector::simplefin::{
     claim_access_url, SimpleFinAccount, SimpleFinAccountSet, SimpleFinClient, SimpleFinError,
-    SimpleFinHolding,
+    SimpleFinHolding, SimpleFinTransaction,
 };
 use crate::db::secrets::{self, SIMPLEFIN_ACCESS_URL};
 use crate::db::AppDb;
@@ -35,6 +35,7 @@ pub struct SimpleFinStatus {
 pub struct SimpleFinSyncSummary {
     pub accounts_synced: usize,
     pub holdings_synced: usize,
+    pub transactions_synced: usize,
     pub synced_at: String,
     /// Non-fatal messages SimpleFIN returned (e.g. one institution needs to be re-authenticated).
     pub warnings: Vec<String>,
@@ -237,9 +238,49 @@ fn replace_holdings(
     Ok(count)
 }
 
-// ---------------------------------------------------------------------------
-// Commands
-// ---------------------------------------------------------------------------
+/// Convert a UNIX epoch (seconds) to an ISO `YYYY-MM-DD` date, falling back to `fallback` when the
+/// timestamp is missing or out of range.
+fn epoch_to_date(epoch: Option<i64>, fallback: &str) -> String {
+    epoch
+        .and_then(|secs| chrono::DateTime::from_timestamp(secs, 0))
+        .map(|dt| dt.format("%Y-%m-%d").to_string())
+        .unwrap_or_else(|| fallback.to_string())
+}
+
+/// Upsert a set of transactions, keyed by `(account_id, connector_ref)` so re-syncs update in
+/// place instead of duplicating. The user's classification (`category`, `flow_override`) is left
+/// untouched on update. Returns the number processed.
+fn reconcile_transactions(
+    conn: &Connection,
+    account_id: i64,
+    transactions: &[SimpleFinTransaction],
+    currency: &str,
+    today: &str,
+) -> rusqlite::Result<usize> {
+    let mut count = 0usize;
+    for t in transactions {
+        let date = epoch_to_date(t.posted, today);
+        conn.execute(
+            "INSERT INTO transactions \
+             (account_id, txn_date, description, amount, currency, memo, connector_ref) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7) \
+             ON CONFLICT(account_id, connector_ref) DO UPDATE SET \
+                 txn_date = excluded.txn_date, description = excluded.description, \
+                 amount = excluded.amount, currency = excluded.currency, memo = excluded.memo",
+            params![
+                account_id,
+                date,
+                t.description,
+                t.amount,
+                currency,
+                t.memo,
+                t.id
+            ],
+        )?;
+        count += 1;
+    }
+    Ok(count)
+}
 
 /// Report whether SimpleFIN is connected, plus last-synced time and connected-account count.
 #[tauri::command]
@@ -308,6 +349,7 @@ pub async fn simplefin_sync(db: State<'_, AppDb>) -> Result<SimpleFinSyncSummary
 
     let mut accounts_synced = 0usize;
     let mut holdings_synced = 0usize;
+    let mut transactions_synced = 0usize;
 
     {
         let mut conn = db.0.lock().map_err(|e| e.to_string())?;
@@ -319,6 +361,14 @@ pub async fn simplefin_sync(db: State<'_, AppDb>) -> Result<SimpleFinSyncSummary
             accounts_synced += 1;
             holdings_synced +=
                 replace_holdings(&tx, account_id, account, &now).map_err(|e| e.to_string())?;
+            transactions_synced += reconcile_transactions(
+                &tx,
+                account_id,
+                &account.transactions,
+                &account.currency,
+                &today,
+            )
+            .map_err(|e| e.to_string())?;
         }
 
         set_setting(&tx, SETTING_LAST_SYNCED, &now).map_err(|e| e.to_string())?;
@@ -328,6 +378,7 @@ pub async fn simplefin_sync(db: State<'_, AppDb>) -> Result<SimpleFinSyncSummary
     Ok(SimpleFinSyncSummary {
         accounts_synced,
         holdings_synced,
+        transactions_synced,
         synced_at: now,
         warnings: account_set.errors,
     })
@@ -411,6 +462,7 @@ mod tests {
                 cost_basis: Some(1000.0),
                 currency: Some("USD".into()),
             }],
+            transactions: vec![],
         }
     }
 
@@ -482,6 +534,109 @@ mod tests {
             )
             .unwrap();
         assert_eq!(holding_rows, 0);
+    }
+
+    fn account_with_transactions() -> SimpleFinAccount {
+        SimpleFinAccount {
+            id: "act-9".into(),
+            name: "Everyday Chequing".into(),
+            currency: "CAD".into(),
+            balance: Some(500.0),
+            balance_date: None,
+            institution: Some("Scotiabank".into()),
+            holdings: vec![],
+            transactions: vec![
+                SimpleFinTransaction {
+                    id: "txn-1".into(),
+                    amount: -42.50,
+                    description: "GROCERY STORE".into(),
+                    posted: Some(1_700_000_000),
+                    memo: None,
+                },
+                SimpleFinTransaction {
+                    id: "txn-2".into(),
+                    amount: 2500.0,
+                    description: "MICROSOFT PAYROLL".into(),
+                    posted: None,
+                    memo: Some("bi-weekly".into()),
+                },
+            ],
+        }
+    }
+
+    #[test]
+    fn epoch_to_date_converts_or_falls_back() {
+        assert_eq!(epoch_to_date(Some(1_700_000_000), "2025-01-01"), "2023-11-14");
+        assert_eq!(epoch_to_date(None, "2025-01-01"), "2025-01-01");
+    }
+
+    #[test]
+    fn reconcile_transactions_dedups_and_preserves_user_tags() {
+        let conn = Connection::open_in_memory().unwrap();
+        crate::db::apply_schema(&conn).unwrap();
+
+        let account = account_with_transactions();
+        let id = upsert_account(&conn, &account, "2025-01-01", "2025-01-01T00:00:00Z").unwrap();
+        let n = reconcile_transactions(
+            &conn,
+            id,
+            &account.transactions,
+            &account.currency,
+            "2025-01-01",
+        )
+        .unwrap();
+        assert_eq!(n, 2);
+
+        // The missing-posted transaction falls back to today's date; the dated one is converted.
+        let date: String = conn
+            .query_row(
+                "SELECT txn_date FROM transactions WHERE connector_ref = 'txn-1'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(date, "2023-11-14");
+
+        // The user manually retags the payroll row.
+        conn.execute(
+            "UPDATE transactions SET flow_override = 'income' WHERE connector_ref = 'txn-2'",
+            [],
+        )
+        .unwrap();
+
+        // A second sync updates amounts in place (no duplicates) and keeps the override.
+        let mut updated = account_with_transactions();
+        updated.transactions[0].amount = -50.0;
+        let n2 = reconcile_transactions(
+            &conn,
+            id,
+            &updated.transactions,
+            &updated.currency,
+            "2025-01-02",
+        )
+        .unwrap();
+        assert_eq!(n2, 2);
+
+        let rows: i64 = conn
+            .query_row("SELECT COUNT(*) FROM transactions", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(rows, 2);
+        let amount: f64 = conn
+            .query_row(
+                "SELECT amount FROM transactions WHERE connector_ref = 'txn-1'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(amount, -50.0);
+        let override_kept: Option<String> = conn
+            .query_row(
+                "SELECT flow_override FROM transactions WHERE connector_ref = 'txn-2'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(override_kept.as_deref(), Some("income"));
     }
 
     #[test]

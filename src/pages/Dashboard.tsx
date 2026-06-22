@@ -3,21 +3,35 @@ import type {
   Account,
   AddAccountPayload,
   AddBalanceSnapshotPayload,
+  CashflowSummary,
   Currency,
+  GoalProgress,
   NetWorth,
+  NetWorthDelta,
   NetWorthHistoryPoint,
+  SeattleAssumptions,
+  SeattleProjection,
 } from "../types/finance";
 import {
   addAccount,
   addBalanceSnapshot,
   deleteAccount,
+  getCashflowSummary,
+  getGoalProgress,
   getNetWorth,
+  getNetWorthDelta,
   getNetWorthHistory,
+  getSeattleProjection,
   listAccounts,
   refreshFxRates,
+  refreshFxRatesIfStale,
+  setSeattleAssumptions,
   updateAccountCurrency,
 } from "../hooks/useFinanceApi";
 import NetWorthCard from "../components/NetWorthCard";
+import GoalCountdownCard from "../components/GoalCountdownCard";
+import SeattleSimulatorCard from "../components/SeattleSimulatorCard";
+import CashflowCard from "../components/CashflowCard";
 import AccountList from "../components/AccountList";
 import AccountModal from "../components/AccountModal";
 import ImportModal from "../components/ImportModal";
@@ -39,6 +53,10 @@ export default function Dashboard({
 } = {}) {
   const [accounts, setAccounts] = useState<Account[]>([]);
   const [netWorth, setNetWorth] = useState<NetWorth | null>(null);
+  const [delta, setDelta] = useState<NetWorthDelta | null>(null);
+  const [goal, setGoal] = useState<GoalProgress | null>(null);
+  const [projection, setProjection] = useState<SeattleProjection | null>(null);
+  const [cashflow, setCashflow] = useState<CashflowSummary | null>(null);
   const [history, setHistory] = useState<NetWorthHistoryPoint[]>([]);
   const [homeCurrency, setHomeCurrency] = useState<Currency>("CAD");
   const [loading, setLoading] = useState(true);
@@ -51,13 +69,29 @@ export default function Dashboard({
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const [accs, nw, hist] = await Promise.all([
+      // Keep conversions current without a manual click: refresh FX at most once per day. This is
+      // a no-op (DB check only) when today's rates are already stored, and stays best-effort so an
+      // offline launch still renders with the last known rates.
+      try {
+        await refreshFxRatesIfStale();
+      } catch (err) {
+        console.error("Auto FX refresh failed:", err);
+      }
+      const [accs, nw, nwDelta, goalProgress, proj, cf, hist] = await Promise.all([
         listAccounts(),
         getNetWorth(),
+        getNetWorthDelta(),
+        getGoalProgress(),
+        getSeattleProjection(),
+        getCashflowSummary(),
         getNetWorthHistory(),
       ]);
       setAccounts(accs);
       setNetWorth(nw);
+      setDelta(nwDelta);
+      setGoal(goalProgress);
+      setProjection(proj);
+      setCashflow(cf);
       setHistory(hist);
     } catch (err) {
       console.error("Failed to load dashboard data:", err);
@@ -98,6 +132,19 @@ export default function Dashboard({
       setRefreshingFx(false);
     }
   };
+
+  const handleUpdateAssumptions = useCallback(async (a: SeattleAssumptions) => {
+    const updated = await setSeattleAssumptions(a);
+    setProjection(updated);
+  }, []);
+
+  const refreshCashflow = useCallback(async () => {
+    try {
+      setCashflow(await getCashflowSummary());
+    } catch (err) {
+      console.error("Failed to refresh cashflow:", err);
+    }
+  }, []);
 
   const handleConnectorChanged = useCallback(async () => {
     // A sync may have added accounts in new currencies (e.g. JMD) — refresh FX so they
@@ -183,11 +230,30 @@ export default function Dashboard({
         {/* Net worth summary */}
         <NetWorthCard
           netWorth={netWorth}
+          delta={delta}
           homeCurrency={homeCurrency}
           onToggleCurrency={() =>
             setHomeCurrency((c) => (c === "CAD" ? "USD" : "CAD"))
           }
           loading={loading}
+        />
+
+        {/* $100k countdown / CoastFIRE */}
+        <GoalCountdownCard goal={goal} loading={loading} />
+
+        {/* Seattle transition simulator */}
+        <SeattleSimulatorCard
+          projection={projection}
+          loading={loading}
+          onUpdate={handleUpdateAssumptions}
+        />
+
+        {/* Monthly cashflow + fixed/variable tagging */}
+        <CashflowCard
+          summary={cashflow}
+          homeCurrency={homeCurrency}
+          loading={loading}
+          onChanged={refreshCashflow}
         />
 
         {/* Net worth chart */}
@@ -197,6 +263,7 @@ export default function Dashboard({
         <AccountList
           accounts={accounts}
           netWorthBreakdown={netWorth?.accounts ?? []}
+          homeCurrency={homeCurrency}
           onAddAccount={() => setModal({ open: true, mode: "add_account" })}
           onDeleteAccount={handleDeleteAccount}
           onUpdateBalance={(account) =>

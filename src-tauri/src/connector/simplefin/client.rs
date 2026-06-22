@@ -59,6 +59,20 @@ pub struct SimpleFinHolding {
     pub currency: Option<String>,
 }
 
+/// One transaction within a SimpleFIN account. SimpleFIN reports `amount` as a signed string:
+/// negative is money out (spending), positive is money in (income/refunds).
+#[derive(Debug, Clone, PartialEq)]
+pub struct SimpleFinTransaction {
+    /// SimpleFIN transaction id — stored as `connector_ref` for dedup across syncs.
+    pub id: String,
+    /// Signed amount in the account's currency (negative = outflow).
+    pub amount: f64,
+    pub description: String,
+    /// `posted` (or `transacted_at`) as a UNIX epoch timestamp (seconds).
+    pub posted: Option<i64>,
+    pub memo: Option<String>,
+}
+
 /// One account as reported by SimpleFIN.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SimpleFinAccount {
@@ -73,6 +87,7 @@ pub struct SimpleFinAccount {
     /// Institution / connection name, best-effort.
     pub institution: Option<String>,
     pub holdings: Vec<SimpleFinHolding>,
+    pub transactions: Vec<SimpleFinTransaction>,
 }
 
 /// The parsed `/accounts` response: the accounts plus any user-facing errors SimpleFIN returned.
@@ -136,15 +151,20 @@ impl SimpleFinClient {
         }
     }
 
-    /// Fetch accounts (balances + holdings). Transactions are skipped via `balances-only` since
-    /// TrueNorth only needs balances for net worth and holdings for the positions view.
+    /// Fetch accounts with balances, holdings, and recent transactions. A `start-date` bounds the
+    /// transaction window (the trailing ~120 days) so payloads stay small; balances and holdings
+    /// are always current regardless of the window.
     pub async fn fetch_accounts(&self) -> Result<SimpleFinAccountSet, SimpleFinError> {
         let (endpoint, user, pass) = accounts_endpoint(&self.access_url)?;
+        // SimpleFIN expects `start-date` as UNIX epoch seconds.
+        let start_date = (chrono::Utc::now() - chrono::Duration::days(120))
+            .timestamp()
+            .to_string();
         let resp = self
             .http
             .get(&endpoint)
             .basic_auth(user, (!pass.is_empty()).then_some(pass))
-            .query(&[("balances-only", "1")])
+            .query(&[("start-date", start_date.as_str())])
             .send()
             .await?;
         let status = resp.status();
@@ -276,6 +296,12 @@ fn parse_account(v: &Value, conn_names: &HashMap<String, String>) -> Option<Simp
         .map(|arr| arr.iter().filter_map(parse_holding).collect())
         .unwrap_or_default();
 
+    let transactions = v
+        .get("transactions")
+        .and_then(Value::as_array)
+        .map(|arr| arr.iter().filter_map(parse_transaction).collect())
+        .unwrap_or_default();
+
     Some(SimpleFinAccount {
         id,
         name,
@@ -284,6 +310,33 @@ fn parse_account(v: &Value, conn_names: &HashMap<String, String>) -> Option<Simp
         balance_date: v.get("balance-date").and_then(Value::as_i64),
         institution,
         holdings,
+        transactions,
+    })
+}
+
+/// Parse one SimpleFIN transaction. Requires an `id` and a numeric `amount`; the description
+/// falls back to `payee` and then a placeholder, and the date prefers `posted` over
+/// `transacted_at`.
+fn parse_transaction(v: &Value) -> Option<SimpleFinTransaction> {
+    let id = v.get("id").and_then(Value::as_str)?.to_string();
+    let amount = v.get("amount").and_then(parse_decimal)?;
+    let description = v
+        .get("description")
+        .and_then(Value::as_str)
+        .or_else(|| v.get("payee").and_then(Value::as_str))
+        .unwrap_or("Transaction")
+        .to_string();
+    let posted = v
+        .get("posted")
+        .and_then(Value::as_i64)
+        .or_else(|| v.get("transacted_at").and_then(Value::as_i64));
+    let memo = v.get("memo").and_then(Value::as_str).map(str::to_string);
+    Some(SimpleFinTransaction {
+        id,
+        amount,
+        description,
+        posted,
+        memo,
     })
 }
 
@@ -429,5 +482,46 @@ mod tests {
     fn account_missing_id_is_skipped() {
         let v = json!({ "accounts": [{ "name": "no id" }] });
         assert!(parse_account_set(&v).accounts.is_empty());
+    }
+
+    #[test]
+    fn parses_account_transactions_with_signed_amounts() {
+        let v = json!({
+            "accounts": [{
+                "id": "act-1",
+                "name": "Everyday Chequing",
+                "currency": "CAD",
+                "balance": "100.00",
+                "transactions": [
+                    {
+                        "id": "txn-1",
+                        "posted": 1700000000i64,
+                        "amount": "-42.50",
+                        "description": "GROCERY STORE"
+                    },
+                    {
+                        // No `description` — falls back to `payee`; `transacted_at` dates it.
+                        "id": "txn-2",
+                        "transacted_at": 1700100000i64,
+                        "amount": "2500.00",
+                        "payee": "MICROSOFT PAYROLL",
+                        "memo": "bi-weekly"
+                    },
+                    // Missing amount — skipped.
+                    { "id": "txn-3", "description": "no amount" }
+                ]
+            }]
+        });
+        let set = parse_account_set(&v);
+        let txns = &set.accounts[0].transactions;
+        assert_eq!(txns.len(), 2);
+        assert_eq!(txns[0].id, "txn-1");
+        assert_eq!(txns[0].amount, -42.50);
+        assert_eq!(txns[0].description, "GROCERY STORE");
+        assert_eq!(txns[0].posted, Some(1700000000));
+        assert_eq!(txns[1].description, "MICROSOFT PAYROLL");
+        assert_eq!(txns[1].amount, 2500.00);
+        assert_eq!(txns[1].posted, Some(1700100000));
+        assert_eq!(txns[1].memo.as_deref(), Some("bi-weekly"));
     }
 }
