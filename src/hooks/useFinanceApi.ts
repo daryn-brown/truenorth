@@ -23,6 +23,12 @@ export const addAccount = (payload: AddAccountPayload): Promise<Account> =>
 export const deleteAccount = (accountId: number): Promise<void> =>
   invoke("delete_account", { accountId });
 
+/** Override an account's currency (e.g. correct a connector that mislabels a JMD account as CAD). */
+export const updateAccountCurrency = (
+  accountId: number,
+  currency: string,
+): Promise<void> => invoke("update_account_currency", { accountId, currency });
+
 export const addBalanceSnapshot = (
   payload: AddBalanceSnapshotPayload,
 ): Promise<BalanceSnapshotResult> =>

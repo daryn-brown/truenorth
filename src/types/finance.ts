@@ -31,7 +31,8 @@ export interface Account {
   name: string;
   institution: string;
   account_type: AccountTypeId;
-  currency: Currency;
+  /** ISO-4217 code. Usually USD/CAD, but a connected account can be any currency (e.g. JMD). */
+  currency: string;
   jurisdiction: Jurisdiction;
   connector_kind: ConnectorKind;
   connector_ref: string | null;
@@ -49,7 +50,7 @@ export interface BalanceSnapshot {
   account_id: number;
   snapshot_date: string;
   balance: number;
-  currency: Currency;
+  currency: string;
   source: string;
   created_at: string;
 }
@@ -117,7 +118,7 @@ export interface AccountNetWorth {
   account_type: AccountTypeId;
   jurisdiction: Jurisdiction;
   balance: number;
-  currency: Currency;
+  currency: string;
   balance_usd: number;
   balance_cad: number;
   snapshot_date: string | null;
