@@ -208,3 +208,21 @@ export interface SimpleFinSyncSummary {
   /** Non-fatal messages SimpleFIN returned (e.g. an institution needs re-auth). */
   warnings: string[];
 }
+
+/** Questrade direct-connection state, mirrored from the Rust `QuestradeStatus`. */
+export interface QuestradeStatus {
+  /** A refresh token is stored (the Questrade API app is connected). */
+  is_connected: boolean;
+  last_synced_at: string | null;
+  /** Number of active accounts connected directly via Questrade. */
+  account_count: number;
+}
+
+/** Result of a Questrade sync, mirrored from the Rust `QuestradeSyncSummary`. */
+export interface QuestradeSyncSummary {
+  accounts_synced: number;
+  holdings_synced: number;
+  /** Redundant aggregator duplicates (same account via SimpleFIN/SnapTrade) that were hidden. */
+  duplicates_hidden: number;
+  synced_at: string;
+}
