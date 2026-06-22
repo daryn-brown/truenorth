@@ -64,6 +64,12 @@ keyring = { version = "3", features = ["apple-native"] }
 [target.'cfg(target_os = "windows")'.dependencies]
 keyring = { version = "3", features = ["windows-native"] }
 
+# Desktop-only Tauri plugins. `updater` checks GitHub Releases for a newer *signed* build and lets
+# the app prompt the user; `process` relaunches the app after an update is installed.
+[target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
+tauri-plugin-updater = "2"
+tauri-plugin-process = "2"
+
 [features]
 # This feature is used for production builds or when `devtools` feature is not needed.
 custom-protocol = ["tauri/custom-protocol"]

@@ -14,6 +14,14 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
         .setup(|app| {
+            // Desktop auto-update: check GitHub Releases for a newer signed build and relaunch
+            // after install. Guarded to desktop since the updater plugin is desktop-only.
+            #[cfg(desktop)]
+            {
+                app.handle()
+                    .plugin(tauri_plugin_updater::Builder::new().build())?;
+                app.handle().plugin(tauri_plugin_process::init())?;
+            }
             db::setup_database(app).map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
             app.manage(connector::ConnectorRegistry::new());
             Ok(())
