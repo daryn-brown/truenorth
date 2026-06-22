@@ -161,6 +161,22 @@ impl SnapTradeClient {
         Ok(())
     }
 
+    /// List the SnapTrade user IDs registered under this API key. For a personal (`PERS-`) key
+    /// this is the single user auto-provisioned at signup; the UI uses it to prefill the User ID
+    /// so the user only needs to paste their User Secret.
+    pub async fn list_users(&self) -> Result<Vec<String>, SnapTradeError> {
+        let v = self
+            .send(Method::GET, "/api/v1/snapTrade/listUsers", &[], None)
+            .await?;
+        let arr = v
+            .as_array()
+            .ok_or_else(|| SnapTradeError::Parse("listUsers: expected an array".into()))?;
+        Ok(arr
+            .iter()
+            .filter_map(|u| u.as_str().map(str::to_string))
+            .collect())
+    }
+
     /// Register `user_id` and return the generated `userSecret`.
     pub async fn register_user(&self, user_id: &str) -> Result<String, SnapTradeError> {
         let body = json!({ "userId": user_id });

@@ -30,6 +30,8 @@ pub fn run() {
             commands::fx::refresh_fx_rates,
             commands::snaptrade::snaptrade_get_status,
             commands::snaptrade::snaptrade_save_credentials,
+            commands::snaptrade::snaptrade_list_users,
+            commands::snaptrade::snaptrade_link_user,
             commands::snaptrade::snaptrade_get_login_link,
             commands::snaptrade::snaptrade_sync,
             commands::snaptrade::snaptrade_disconnect,

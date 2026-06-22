@@ -32,6 +32,9 @@ pub struct SnapTradeStatus {
     pub has_credentials: bool,
     /// A SnapTrade user exists (userId in settings + userSecret in keychain).
     pub is_connected: bool,
+    /// The clientId is a SnapTrade *personal* key (`PERS-…`): its user is auto-provisioned at
+    /// signup and `registerUser` is unavailable, so the user links userId + userSecret manually.
+    pub is_personal: bool,
     /// The public clientId, for display. Never includes the secret consumerKey.
     pub client_id: Option<String>,
     pub last_synced_at: Option<String>,
@@ -136,6 +139,18 @@ fn generate_user_id() -> String {
     format!("truenorth-{}", hex::encode(bytes))
 }
 
+/// SnapTrade "personal" API keys have a `PERS-` clientId prefix. Their single user is
+/// auto-provisioned at signup and `registerUser` returns 400, so the connect flow branches on
+/// this: personal keys link an existing userId + userSecret instead of registering one.
+fn is_personal_key(client_id: &str) -> bool {
+    client_id.trim().to_ascii_uppercase().starts_with("PERS-")
+}
+
+/// Shown when a personal key has no linked user yet and the user tries to open the login portal.
+const PERSONAL_LINK_HINT: &str =
+    "This is a personal SnapTrade key. Open the SnapTrade dashboard, copy your User ID and User \
+     Secret, and paste them in the “SnapTrade user” step before connecting a brokerage.";
+
 // ---------------------------------------------------------------------------
 // Commands
 // ---------------------------------------------------------------------------
@@ -164,6 +179,7 @@ pub fn snaptrade_get_status(db: State<AppDb>) -> Result<SnapTradeStatus, String>
     Ok(SnapTradeStatus {
         has_credentials: client_id.is_some() && consumer_key.is_some(),
         is_connected: user_id.is_some() && user_secret.is_some(),
+        is_personal: client_id.as_deref().map(is_personal_key).unwrap_or(false),
         client_id,
         last_synced_at,
         account_count,
@@ -198,8 +214,76 @@ pub async fn snaptrade_save_credentials(
     snaptrade_get_status(db)
 }
 
-/// Get a connection-portal URL where the user authorizes a brokerage (read-only). Registers
-/// the SnapTrade user on first use, and self-heals if the stored user secret was lost.
+/// List the SnapTrade user IDs registered under the saved API key. For a personal key this is
+/// the single user SnapTrade auto-provisioned at signup; the UI uses it to prefill the User ID.
+#[tauri::command]
+pub async fn snaptrade_list_users(db: State<'_, AppDb>) -> Result<Vec<String>, String> {
+    let client_id = {
+        let conn = db.0.lock().map_err(|e| e.to_string())?;
+        get_setting(&conn, SETTING_CLIENT_ID).map_err(|e| e.to_string())?
+    }
+    .ok_or("Save your SnapTrade API credentials first.")?;
+    let consumer_key = secrets::get_secret(SNAPTRADE_CONSUMER_KEY)
+        .map_err(|e| e.to_string())?
+        .ok_or("Save your SnapTrade API credentials first.")?;
+    SnapTradeClient::new(client_id, consumer_key)
+        .list_users()
+        .await
+        .map_err(friendly)
+}
+
+/// Link a SnapTrade user by `userId` + `userSecret`. This is the connect path for personal keys:
+/// their user is created automatically at signup (so `registerUser` is unavailable), and the
+/// user copies both values from the SnapTrade dashboard. We validate them by listing accounts
+/// (401/403 → wrong values) before storing the secret in the keychain and the userId in settings.
+#[tauri::command]
+pub async fn snaptrade_link_user(
+    db: State<'_, AppDb>,
+    user_id: String,
+    user_secret: String,
+) -> Result<SnapTradeStatus, String> {
+    let user_id = user_id.trim().to_string();
+    let user_secret = user_secret.trim().to_string();
+    if user_id.is_empty() || user_secret.is_empty() {
+        return Err("User ID and User Secret are both required.".into());
+    }
+
+    let client_id = {
+        let conn = db.0.lock().map_err(|e| e.to_string())?;
+        get_setting(&conn, SETTING_CLIENT_ID).map_err(|e| e.to_string())?
+    }
+    .ok_or("Save your SnapTrade API credentials first.")?;
+    let consumer_key = secrets::get_secret(SNAPTRADE_CONSUMER_KEY)
+        .map_err(|e| e.to_string())?
+        .ok_or("Save your SnapTrade API credentials first.")?;
+
+    // Validate the pair before persisting. A user with no connections yet returns an empty list
+    // (still HTTP 200), which is fine — it just means nothing is linked at SnapTrade yet.
+    SnapTradeClient::new(client_id, consumer_key)
+        .list_accounts(&user_id, &user_secret)
+        .await
+        .map_err(|e| {
+            if e.is_auth() {
+                "SnapTrade rejected those credentials. Double-check the User ID and User Secret \
+                 from your dashboard."
+                    .to_string()
+            } else {
+                friendly(e)
+            }
+        })?;
+
+    secrets::set_secret(SNAPTRADE_USER_SECRET, &user_secret).map_err(|e| e.to_string())?;
+    {
+        let conn = db.0.lock().map_err(|e| e.to_string())?;
+        set_setting(&conn, SETTING_USER_ID, &user_id).map_err(|e| e.to_string())?;
+    }
+
+    snaptrade_get_status(db)
+}
+
+/// Get a connection-portal URL where the user authorizes a brokerage (read-only). For commercial
+/// keys this registers the SnapTrade user on first use (self-healing a lost secret). For personal
+/// keys the user must link their userId + userSecret first (see `snaptrade_link_user`).
 #[tauri::command]
 pub async fn snaptrade_get_login_link(db: State<'_, AppDb>) -> Result<String, String> {
     let (client_id, existing_user_id) = {
@@ -210,6 +294,7 @@ pub async fn snaptrade_get_login_link(db: State<'_, AppDb>) -> Result<String, St
         )
     };
     let client_id = client_id.ok_or("Save your SnapTrade API credentials first.")?;
+    let personal = is_personal_key(&client_id);
     let consumer_key = secrets::get_secret(SNAPTRADE_CONSUMER_KEY)
         .map_err(|e| e.to_string())?
         .ok_or("Save your SnapTrade API credentials first.")?;
@@ -219,14 +304,17 @@ pub async fn snaptrade_get_login_link(db: State<'_, AppDb>) -> Result<String, St
 
     let (user_id, user_secret) = match (existing_user_id, existing_secret) {
         (Some(uid), Some(secret)) => (uid, secret),
+        // Personal keys can't registerUser: the user must paste userId + userSecret first.
+        _ if personal => return Err(PERSONAL_LINK_HINT.into()),
         (Some(uid), None) => {
-            // We kept the userId but lost its secret — delete (best-effort) and re-register.
+            // Commercial key: we kept the userId but lost its secret — re-register.
             let _ = client.delete_user(&uid).await;
             let secret = client.register_user(&uid).await.map_err(friendly)?;
             secrets::set_secret(SNAPTRADE_USER_SECRET, &secret).map_err(|e| e.to_string())?;
             (uid, secret)
         }
         (None, _) => {
+            // Commercial key: first connect — register a fresh user.
             let uid = generate_user_id();
             let secret = client.register_user(&uid).await.map_err(friendly)?;
             secrets::set_secret(SNAPTRADE_USER_SECRET, &secret).map_err(|e| e.to_string())?;
@@ -403,9 +491,13 @@ pub async fn snaptrade_disconnect(db: State<'_, AppDb>) -> Result<SnapTradeStatu
     };
     let consumer_key = secrets::get_secret(SNAPTRADE_CONSUMER_KEY).map_err(|e| e.to_string())?;
 
-    // Best-effort remote delete; proceed with local cleanup regardless.
+    // Best-effort remote delete — commercial keys only. A personal key's user is provisioned at
+    // signup and owns the user's own brokerage connections (managed in the SnapTrade dashboard),
+    // so deleting it would wipe their real connections. For personal keys we clear local state only.
     if let (Some(cid), Some(uid), Some(ck)) = (client_id, user_id, consumer_key) {
-        let _ = SnapTradeClient::new(cid, ck).delete_user(&uid).await;
+        if !is_personal_key(&cid) {
+            let _ = SnapTradeClient::new(cid, ck).delete_user(&uid).await;
+        }
     }
 
     secrets::delete_secret(SNAPTRADE_USER_SECRET).map_err(|e| e.to_string())?;
@@ -466,6 +558,14 @@ mod tests {
         let b = generate_user_id();
         assert!(a.starts_with("truenorth-"));
         assert_ne!(a, b);
+    }
+
+    #[test]
+    fn detects_personal_keys_by_prefix() {
+        assert!(is_personal_key("PERS-5IH4YWHEHYX9G70CZELD"));
+        assert!(is_personal_key("  pers-lowercase-trimmed  "));
+        assert!(!is_personal_key("CLIENTID-COMMERCIAL"));
+        assert!(!is_personal_key("truenorth"));
     }
 
     #[test]
