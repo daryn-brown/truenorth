@@ -9,8 +9,8 @@ questions about your own data.
 
 ## Status
 ✅ **Phase 1 shipped — manual multi-currency MVP.** A Tauri + React/SQLite desktop app with an
-**encrypted-at-rest** database (SQLCipher; key in the OS keychain), **multi-currency (USD + CAD)
-net worth**, a **net-worth-over-time** chart, and **JSON/CSV import** to seed accounts and balance
+**encrypted-at-rest** database (SQLCipher; key in the OS keychain), **multi-currency net worth**
+(any currency converted into USD + CAD totals), a **net-worth-over-time** chart, and **JSON/CSV import** to seed accounts and balance
 history.
 
 🔄 **Phase 2–3 in progress — real account sync.** Connect Robinhood, Questrade, Wealthsimple and
@@ -23,7 +23,7 @@ the roadmap below. Setup lives in [`docs/snaptrade.md`](docs/snaptrade.md) and
 **Financial transparency + easy decision-making.** Everything is **read-only**.
 - Aggregation: brokerages via **SnapTrade** (free single-user), banks via **SimpleFIN Bridge**
   (one ~$15/yr connector covers Chase + Bask + Scotiabank), plus **manual/CSV** fallback.
-- **Multi-currency net worth** (USD + CAD) with history chart + dashboard.
+- **Multi-currency net worth** — any account currency converted into USD + CAD totals — with history chart + dashboard.
 - Transaction review (search/filter/categorize) + goals.
 - **Model-agnostic AI** (GitHub Models / Ollama / Azure) with a local-only privacy mode.
 
@@ -37,7 +37,7 @@ secrets in the OS keychain (`keyring`). Mirrors the TrendWave stack.
 Finance Second Brain — **TrueNorth** — is a single **Tauri v2** desktop app: a React/TypeScript **WebView**
 frontend talks to a **Rust core** over Tauri's IPC bridge. All data stays on the device in an
 **encrypted-at-rest SQLite** database (SQLCipher), with the 256-bit key held in the OS keychain.
-Network calls are limited to an on-demand **USD↔CAD** exchange-rate lookup and **read-only**
+Network calls are limited to on-demand **exchange-rate lookups** (USD pivot) and **read-only**
 brokerage sync via the **SnapTrade** API.
 
 ```mermaid
@@ -83,7 +83,7 @@ flowchart TB
 
     kc{{"🔐 OS Keychain · keyring<br/>macOS Keychain · Windows Credential Manager<br/>256-bit SQLCipher key"}}
     db[("🗄️ Encrypted SQLite · SQLCipher<br/>finance-second-brain.db<br/>accounts · balance_snapshots · fx_rates<br/>holdings · transactions · goals · app_settings")]
-    yahoo(["🌐 Yahoo Finance<br/>USD/CAD FX quote"])
+    yahoo(["🌐 Yahoo Finance<br/>FX quotes · USD pivot"])
     snaptrade(["🌐 SnapTrade API<br/>read-only brokerage sync"])
     simplefin(["🌐 SimpleFIN Bridge<br/>read-only bank sync"])
 
@@ -144,10 +144,10 @@ sequenceDiagram
     UI->>API: refreshFxRates()
     API->>IPC: invoke("refresh_fx_rates")
     IPC->>CMD: refresh_fx_rates(db state)
-    CMD->>SVC: fetch_usd_cad(client)
-    SVC->>Y: HTTPS GET USDCAD=X
+    CMD->>SVC: fetch_usd_rate(client, currency)
+    SVC->>Y: HTTPS GET USDcur=X
     Y-->>SVC: rate + date
-    CMD->>DB: store_fx_rate (INSERT OR REPLACE)
+    CMD->>DB: store_usd_rate (INSERT OR REPLACE)
     CMD->>DB: SELECT rates (newest first)
     DB-->>CMD: FxRateRow[]
     CMD-->>IPC: Ok(rows)

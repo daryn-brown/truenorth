@@ -39,7 +39,7 @@ A bare array of account objects (without the `accounts` wrapper) is also accepte
 | `name` | yes | Account name; rows with an empty name/institution are skipped. |
 | `institution` | yes | Used with `name` to match/reuse existing accounts. |
 | `account_type` | yes | e.g. `chequing`, `savings`, `brokerage`, `tfsa`, `rrsp`, `fhsa`, `401k`, `ira`, `roth_ira`, `credit`, `crypto`, `other`. |
-| `currency` | yes | `USD` or `CAD` (other currencies are stored but contribute 0 to net worth). |
+| `currency` | yes | Any ISO code (e.g. `USD`, `CAD`, `JMD`). Converted into the USD + CAD totals via the latest USD-pivot FX rate — run **🔄 Refresh FX** so a newly added currency is fetched. |
 | `jurisdiction` | yes | `US` or `CA`. |
 | `notes` | no | Free text. |
 | `snapshots` | no | Array of `{ snapshot_date: "YYYY-MM-DD", balance: number }`. |
@@ -67,8 +67,9 @@ which any account has a snapshot, each account's **most recent balance as of tha
 forward** (an account contributes 0 before its first snapshot). Each balance is converted to USD and
 CAD and summed.
 
-**FX simplification:** history uses the **latest stored USD/CAD rate** for every point, so the trend
-reflects your balance changes rather than day-to-day currency noise. Per-date historical FX rates
-are a future (Phase 2+) enhancement. Refresh the current rate any time with **🔄 Refresh FX**.
+**FX simplification:** history uses the **latest stored FX rates** (USD as the pivot currency) for
+every point, so the trend reflects your balance changes rather than day-to-day currency noise.
+Per-date historical FX rates are a future (Phase 2+) enhancement. Refresh current rates any time
+with **🔄 Refresh FX** — it fetches a rate for every currency your accounts use.
 
 Only **active** accounts are included, consistent with the net-worth summary card.
