@@ -110,6 +110,28 @@ export interface NetWorthHistoryPoint {
   total_cad: number;
 }
 
+/** A money figure in both reporting currencies, mirrored from the Rust `MoneyPair`. */
+export interface MoneyPair {
+  usd: number;
+  cad: number;
+}
+
+/**
+ * Change in net worth since the previous snapshot date, split into spendable cash vs.
+ * investments. Powers the "Anxiety Buffer" reassurance line. Mirrors the Rust `NetWorthDelta`.
+ */
+export interface NetWorthDelta {
+  current_date: string | null;
+  previous_date: string | null;
+  total: MoneyPair;
+  liquid: MoneyPair;
+  invested: MoneyPair;
+  total_delta: MoneyPair;
+  liquid_delta: MoneyPair;
+  invested_delta: MoneyPair;
+  has_previous: boolean;
+}
+
 export interface AccountNetWorth {
   account_id: number;
   account_name: string;

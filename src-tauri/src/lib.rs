@@ -33,6 +33,7 @@ pub fn run() {
             commands::accounts::add_balance_snapshot,
             commands::net_worth::get_net_worth,
             commands::net_worth::get_net_worth_history,
+            commands::net_worth::get_net_worth_delta,
             commands::import::import_data,
             commands::fx::get_fx_rates,
             commands::fx::refresh_fx_rates,

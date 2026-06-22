@@ -30,6 +30,49 @@ pub struct NetWorthResponse {
     pub rate_date: Option<String>,
 }
 
+/// A money figure carried in both reporting currencies so the frontend can render either side
+/// of the USD/CAD toggle without a second round-trip.
+#[derive(Debug, Serialize, PartialEq, Default, Clone, Copy)]
+pub struct MoneyPair {
+    pub usd: f64,
+    pub cad: f64,
+}
+
+impl MoneyPair {
+    fn add(&mut self, usd: f64, cad: f64) {
+        self.usd += usd;
+        self.cad += cad;
+    }
+
+    fn minus(self, other: MoneyPair) -> MoneyPair {
+        MoneyPair {
+            usd: self.usd - other.usd,
+            cad: self.cad - other.cad,
+        }
+    }
+}
+
+/// How an account contributes to the "Anxiety Buffer" split. `Liquid` is spendable cash
+/// (chequing/savings) — the balance that drops after paying a credit card and triggers panic.
+/// `Invested` is the long-horizon pile that usually offsets it. Liabilities (credit) and anything
+/// else still count toward the net-worth total but aren't broken out.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum AccountClass {
+    Liquid,
+    Invested,
+    Other,
+}
+
+fn account_class(account_type: &str) -> AccountClass {
+    match account_type {
+        "chequing" | "savings" => AccountClass::Liquid,
+        "brokerage" | "tfsa" | "rrsp" | "fhsa" | "401k" | "ira" | "roth_ira" | "crypto" => {
+            AccountClass::Invested
+        }
+        _ => AccountClass::Other,
+    }
+}
+
 /// Compute the current net worth across all active accounts.
 ///
 /// Uses the most recent FX rate in the database. If no rate is available,
@@ -233,6 +276,159 @@ fn compute_net_worth_history(conn: &Connection) -> rusqlite::Result<Vec<NetWorth
     Ok(points)
 }
 
+// ---------------------------------------------------------------------------
+// Net-worth delta — the "Anxiety Buffer"
+// ---------------------------------------------------------------------------
+
+/// The change in net worth since the previous snapshot date, split so the UI can reassure the
+/// user that a dip in spendable cash hasn't actually shrunk their net worth.
+#[derive(Debug, Serialize, PartialEq)]
+pub struct NetWorthDelta {
+    /// The most recent snapshot date the totals reflect (YYYY-MM-DD), or None when there's no data.
+    pub current_date: Option<String>,
+    /// The prior snapshot date the deltas are measured against, or None when only one date exists.
+    pub previous_date: Option<String>,
+    /// Current totals.
+    pub total: MoneyPair,
+    pub liquid: MoneyPair,
+    pub invested: MoneyPair,
+    /// Change versus `previous_date`. Zero when there is no prior date to compare against.
+    pub total_delta: MoneyPair,
+    pub liquid_delta: MoneyPair,
+    pub invested_delta: MoneyPair,
+    /// True when a prior snapshot date exists, i.e. the deltas are meaningful.
+    pub has_previous: bool,
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+struct ClassBreakdown {
+    total: MoneyPair,
+    liquid: MoneyPair,
+    invested: MoneyPair,
+}
+
+/// Current net worth split into spendable cash vs. investments, plus the delta against the
+/// previous snapshot date. Powers the dashboard's reassurance line ("cash down, net worth up").
+#[tauri::command]
+pub fn get_net_worth_delta(db: State<AppDb>) -> Result<NetWorthDelta, String> {
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    compute_net_worth_delta(&conn).map_err(|e| e.to_string())
+}
+
+fn compute_net_worth_delta(conn: &Connection) -> rusqlite::Result<NetWorthDelta> {
+    let series = compute_classed_series(conn)?;
+
+    let (current_date, current) = match series.last() {
+        Some((date, bd)) => (Some(date.clone()), *bd),
+        None => (None, ClassBreakdown::default()),
+    };
+
+    let (previous_date, previous, has_previous) = if series.len() >= 2 {
+        let (date, bd) = &series[series.len() - 2];
+        (Some(date.clone()), *bd, true)
+    } else {
+        (None, ClassBreakdown::default(), false)
+    };
+
+    let (total_delta, liquid_delta, invested_delta) = if has_previous {
+        (
+            current.total.minus(previous.total),
+            current.liquid.minus(previous.liquid),
+            current.invested.minus(previous.invested),
+        )
+    } else {
+        (
+            MoneyPair::default(),
+            MoneyPair::default(),
+            MoneyPair::default(),
+        )
+    };
+
+    Ok(NetWorthDelta {
+        current_date,
+        previous_date,
+        total: current.total,
+        liquid: current.liquid,
+        invested: current.invested,
+        total_delta,
+        liquid_delta,
+        invested_delta,
+        has_previous,
+    })
+}
+
+/// Walk the snapshot dates (carrying each account's latest balance forward, exactly like the
+/// history series) and, at every date, sum balances into total/liquid/invested buckets in both
+/// USD and CAD.
+fn compute_classed_series(conn: &Connection) -> rusqlite::Result<Vec<(String, ClassBreakdown)>> {
+    let usd_rates = load_usd_rates(conn)?;
+
+    // account_id -> (currency, class) for active accounts.
+    let mut meta: HashMap<i64, (String, AccountClass)> = HashMap::new();
+    {
+        let mut stmt =
+            conn.prepare("SELECT id, currency, account_type FROM accounts WHERE is_active = 1")?;
+        let rows = stmt.query_map([], |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+            ))
+        })?;
+        for row in rows {
+            let (id, currency, account_type) = row?;
+            meta.insert(id, (currency, account_class(&account_type)));
+        }
+    }
+
+    let snapshots: Vec<(i64, String, f64)> = {
+        let mut stmt = conn.prepare(
+            "SELECT bs.account_id, bs.snapshot_date, bs.balance \
+             FROM balance_snapshots bs \
+             JOIN accounts a ON a.id = bs.account_id \
+             WHERE a.is_active = 1 \
+             ORDER BY bs.snapshot_date ASC, bs.account_id ASC",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, f64>(2)?,
+            ))
+        })?;
+        rows.collect::<Result<Vec<_>, _>>()?
+    };
+
+    let mut current: HashMap<i64, f64> = HashMap::new();
+    let mut points: Vec<(String, ClassBreakdown)> = Vec::new();
+    let mut idx = 0;
+    while idx < snapshots.len() {
+        let date = snapshots[idx].1.clone();
+        while idx < snapshots.len() && snapshots[idx].1 == date {
+            current.insert(snapshots[idx].0, snapshots[idx].2);
+            idx += 1;
+        }
+
+        let mut bd = ClassBreakdown::default();
+        for (account_id, balance) in &current {
+            let (currency, class) = match meta.get(account_id) {
+                Some((c, cls)) => (c.as_str(), *cls),
+                None => ("USD", AccountClass::Other),
+            };
+            let (usd, cad) = convert_balance(*balance, currency, &usd_rates);
+            bd.total.add(usd, cad);
+            match class {
+                AccountClass::Liquid => bd.liquid.add(usd, cad),
+                AccountClass::Invested => bd.invested.add(usd, cad),
+                AccountClass::Other => {}
+            }
+        }
+        points.push((date, bd));
+    }
+
+    Ok(points)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -250,6 +446,16 @@ mod tests {
             "INSERT INTO accounts (name, institution, account_type, currency, jurisdiction) \
              VALUES (?1, 'Inst', 'savings', ?2, 'CA')",
             rusqlite::params![name, currency],
+        )
+        .unwrap();
+        conn.last_insert_rowid()
+    }
+
+    fn add_typed_account(conn: &Connection, name: &str, currency: &str, account_type: &str) -> i64 {
+        conn.execute(
+            "INSERT INTO accounts (name, institution, account_type, currency, jurisdiction) \
+             VALUES (?1, 'Inst', ?3, ?2, 'CA')",
+            rusqlite::params![name, currency, account_type],
         )
         .unwrap();
         conn.last_insert_rowid()
@@ -356,5 +562,78 @@ mod tests {
         // 15_500 JMD = 100 USD = 130 CAD.
         assert!((series[0].total_usd - 100.0).abs() < 1e-9);
         assert!((series[0].total_cad - 130.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn delta_splits_cash_from_investments_and_compares_last_two_dates() {
+        let conn = setup();
+        // USD -> CAD = 2.0 so the CAD mirror is just double the USD figure.
+        conn.execute(
+            "INSERT INTO fx_rates (from_currency, to_currency, rate, rate_date) \
+             VALUES ('USD', 'CAD', 2.0, '2025-01-01')",
+            [],
+        )
+        .unwrap();
+
+        let chequing = add_typed_account(&conn, "Chase Checking", "USD", "chequing");
+        let brokerage = add_typed_account(&conn, "Robinhood", "USD", "brokerage");
+
+        // Day 1: cash 1000, invested 500 -> net worth 1500.
+        add_snapshot(&conn, chequing, "2025-01-01", 1000.0, "USD");
+        add_snapshot(&conn, brokerage, "2025-01-01", 500.0, "USD");
+        // Day 2: paid the credit card so cash drops to 600, but investments climb to 950.
+        // Net worth still ticks up to 1550 — the exact "anxiety buffer" reassurance case.
+        add_snapshot(&conn, chequing, "2025-02-01", 600.0, "USD");
+        add_snapshot(&conn, brokerage, "2025-02-01", 950.0, "USD");
+
+        let d = compute_net_worth_delta(&conn).unwrap();
+        assert!(d.has_previous);
+        assert_eq!(d.current_date.as_deref(), Some("2025-02-01"));
+        assert_eq!(d.previous_date.as_deref(), Some("2025-01-01"));
+
+        // Current split.
+        assert_eq!(d.total.usd, 1550.0);
+        assert_eq!(d.liquid.usd, 600.0);
+        assert_eq!(d.invested.usd, 950.0);
+
+        // Cash fell 400 but net worth rose 50 (investments +450).
+        assert_eq!(d.liquid_delta.usd, -400.0);
+        assert_eq!(d.invested_delta.usd, 450.0);
+        assert_eq!(d.total_delta.usd, 50.0);
+
+        // CAD mirror is exactly double at this rate.
+        assert_eq!(d.liquid_delta.cad, -800.0);
+        assert_eq!(d.total_delta.cad, 100.0);
+    }
+
+    #[test]
+    fn delta_has_no_previous_with_a_single_date() {
+        let conn = setup();
+        conn.execute(
+            "INSERT INTO fx_rates (from_currency, to_currency, rate, rate_date) \
+             VALUES ('USD', 'CAD', 2.0, '2025-01-01')",
+            [],
+        )
+        .unwrap();
+
+        let savings = add_typed_account(&conn, "Bask Savings", "USD", "savings");
+        add_snapshot(&conn, savings, "2025-01-01", 100.0, "USD");
+
+        let d = compute_net_worth_delta(&conn).unwrap();
+        assert!(!d.has_previous);
+        assert_eq!(d.liquid.usd, 100.0);
+        // With nothing to compare against, deltas are zero rather than the full balance.
+        assert_eq!(d.total_delta, MoneyPair::default());
+        assert_eq!(d.liquid_delta, MoneyPair::default());
+    }
+
+    #[test]
+    fn delta_is_empty_without_any_snapshots() {
+        let conn = setup();
+        add_typed_account(&conn, "Empty", "USD", "chequing");
+        let d = compute_net_worth_delta(&conn).unwrap();
+        assert!(!d.has_previous);
+        assert_eq!(d.current_date, None);
+        assert_eq!(d.total, MoneyPair::default());
     }
 }

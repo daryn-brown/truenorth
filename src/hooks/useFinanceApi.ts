@@ -7,6 +7,7 @@ import type {
   ImportPayload,
   ImportSummary,
   NetWorth,
+  NetWorthDelta,
   NetWorthHistoryPoint,
   SimpleFinStatus,
   SimpleFinSyncSummary,
@@ -33,6 +34,9 @@ export const getNetWorth = (): Promise<NetWorth> =>
 
 export const getNetWorthHistory = (): Promise<NetWorthHistoryPoint[]> =>
   invoke("get_net_worth_history");
+
+export const getNetWorthDelta = (): Promise<NetWorthDelta> =>
+  invoke("get_net_worth_delta");
 
 export const getFxRates = (): Promise<FxRate[]> =>
   invoke("get_fx_rates");

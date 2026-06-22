@@ -5,6 +5,7 @@ import type {
   AddBalanceSnapshotPayload,
   Currency,
   NetWorth,
+  NetWorthDelta,
   NetWorthHistoryPoint,
 } from "../types/finance";
 import {
@@ -12,6 +13,7 @@ import {
   addBalanceSnapshot,
   deleteAccount,
   getNetWorth,
+  getNetWorthDelta,
   getNetWorthHistory,
   listAccounts,
   refreshFxRates,
@@ -31,6 +33,7 @@ type ModalState =
 export default function Dashboard() {
   const [accounts, setAccounts] = useState<Account[]>([]);
   const [netWorth, setNetWorth] = useState<NetWorth | null>(null);
+  const [delta, setDelta] = useState<NetWorthDelta | null>(null);
   const [history, setHistory] = useState<NetWorthHistoryPoint[]>([]);
   const [homeCurrency, setHomeCurrency] = useState<Currency>("CAD");
   const [loading, setLoading] = useState(true);
@@ -43,13 +46,15 @@ export default function Dashboard() {
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const [accs, nw, hist] = await Promise.all([
+      const [accs, nw, nwDelta, hist] = await Promise.all([
         listAccounts(),
         getNetWorth(),
+        getNetWorthDelta(),
         getNetWorthHistory(),
       ]);
       setAccounts(accs);
       setNetWorth(nw);
+      setDelta(nwDelta);
       setHistory(hist);
     } catch (err) {
       console.error("Failed to load dashboard data:", err);
@@ -156,6 +161,7 @@ export default function Dashboard() {
         {/* Net worth summary */}
         <NetWorthCard
           netWorth={netWorth}
+          delta={delta}
           homeCurrency={homeCurrency}
           onToggleCurrency={() =>
             setHomeCurrency((c) => (c === "CAD" ? "USD" : "CAD"))
