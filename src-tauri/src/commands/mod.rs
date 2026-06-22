@@ -1,4 +1,5 @@
 pub mod accounts;
+pub mod cashflow;
 pub mod fx;
 pub mod goals;
 pub mod import;

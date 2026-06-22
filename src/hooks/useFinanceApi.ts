@@ -3,6 +3,9 @@ import type {
   Account,
   AddAccountPayload,
   AddBalanceSnapshotPayload,
+  CashflowSummary,
+  ClassifiedTransaction,
+  FlowType,
   FxRate,
   GoalProgress,
   ImportPayload,
@@ -16,6 +19,7 @@ import type {
   SimpleFinSyncSummary,
   SnapTradeStatus,
   SnapTradeSyncSummary,
+  TxnRule,
 } from "../types/finance";
 
 export const listAccounts = (): Promise<Account[]> =>
@@ -51,12 +55,44 @@ export const setGoalTarget = (targetUsd: number): Promise<GoalProgress> =>
 /** Forward net-worth projection: status quo vs. dropping Job 2 in the Seattle move. */
 export const getSeattleProjection = (): Promise<SeattleProjection> =>
   invoke("get_seattle_projection");
-
 /** Persist edited Seattle assumptions; returns the recomputed projection. */
 export const setSeattleAssumptions = (
   assumptions: SeattleAssumptions,
 ): Promise<SeattleProjection> =>
   invoke("set_seattle_assumptions", { assumptions });
+
+// --- Cashflow + fixed/variable tagging (Step 5) ----------------------------
+
+/** Income vs. fixed vs. variable spending + savings rate over the trailing window (default 30d). */
+export const getCashflowSummary = (
+  windowDays?: number,
+): Promise<CashflowSummary> =>
+  invoke("get_cashflow_summary", { windowDays });
+
+/** Recent transactions with their resolved flow type, for review and retagging. */
+export const listRecentTransactions = (
+  limit?: number,
+): Promise<ClassifiedTransaction[]> =>
+  invoke("list_recent_transactions", { limit });
+
+/** Set (or clear, with null) a transaction's manual fixed/variable/income/transfer override. */
+export const setTransactionFlow = (
+  transactionId: number,
+  flowType: FlowType | null,
+): Promise<void> =>
+  invoke("set_transaction_flow", { transactionId, flowType });
+
+export const listTxnRules = (): Promise<TxnRule[]> =>
+  invoke("list_txn_rules");
+
+export const addTxnRule = (
+  pattern: string,
+  flowType: FlowType,
+): Promise<TxnRule> =>
+  invoke("add_txn_rule", { pattern, flowType });
+
+export const deleteTxnRule = (ruleId: number): Promise<void> =>
+  invoke("delete_txn_rule", { ruleId });
 
 export const getFxRates = (): Promise<FxRate[]> =>
   invoke("get_fx_rates");

@@ -3,6 +3,7 @@ import type {
   Account,
   AddAccountPayload,
   AddBalanceSnapshotPayload,
+  CashflowSummary,
   Currency,
   GoalProgress,
   NetWorth,
@@ -15,6 +16,7 @@ import {
   addAccount,
   addBalanceSnapshot,
   deleteAccount,
+  getCashflowSummary,
   getGoalProgress,
   getNetWorth,
   getNetWorthDelta,
@@ -28,6 +30,7 @@ import {
 import NetWorthCard from "../components/NetWorthCard";
 import GoalCountdownCard from "../components/GoalCountdownCard";
 import SeattleSimulatorCard from "../components/SeattleSimulatorCard";
+import CashflowCard from "../components/CashflowCard";
 import AccountList from "../components/AccountList";
 import AccountModal from "../components/AccountModal";
 import ImportModal from "../components/ImportModal";
@@ -45,6 +48,7 @@ export default function Dashboard() {
   const [delta, setDelta] = useState<NetWorthDelta | null>(null);
   const [goal, setGoal] = useState<GoalProgress | null>(null);
   const [projection, setProjection] = useState<SeattleProjection | null>(null);
+  const [cashflow, setCashflow] = useState<CashflowSummary | null>(null);
   const [history, setHistory] = useState<NetWorthHistoryPoint[]>([]);
   const [homeCurrency, setHomeCurrency] = useState<Currency>("CAD");
   const [loading, setLoading] = useState(true);
@@ -65,12 +69,13 @@ export default function Dashboard() {
       } catch (err) {
         console.error("Auto FX refresh failed:", err);
       }
-      const [accs, nw, nwDelta, goalProgress, proj, hist] = await Promise.all([
+      const [accs, nw, nwDelta, goalProgress, proj, cf, hist] = await Promise.all([
         listAccounts(),
         getNetWorth(),
         getNetWorthDelta(),
         getGoalProgress(),
         getSeattleProjection(),
+        getCashflowSummary(),
         getNetWorthHistory(),
       ]);
       setAccounts(accs);
@@ -78,6 +83,7 @@ export default function Dashboard() {
       setDelta(nwDelta);
       setGoal(goalProgress);
       setProjection(proj);
+      setCashflow(cf);
       setHistory(hist);
     } catch (err) {
       console.error("Failed to load dashboard data:", err);
@@ -122,6 +128,14 @@ export default function Dashboard() {
   const handleUpdateAssumptions = useCallback(async (a: SeattleAssumptions) => {
     const updated = await setSeattleAssumptions(a);
     setProjection(updated);
+  }, []);
+
+  const refreshCashflow = useCallback(async () => {
+    try {
+      setCashflow(await getCashflowSummary());
+    } catch (err) {
+      console.error("Failed to refresh cashflow:", err);
+    }
   }, []);
 
   const handleConnectorChanged = useCallback(async () => {
@@ -205,6 +219,14 @@ export default function Dashboard() {
           projection={projection}
           loading={loading}
           onUpdate={handleUpdateAssumptions}
+        />
+
+        {/* Monthly cashflow + fixed/variable tagging */}
+        <CashflowCard
+          summary={cashflow}
+          homeCurrency={homeCurrency}
+          loading={loading}
+          onChanged={refreshCashflow}
         />
 
         {/* Net worth chart */}

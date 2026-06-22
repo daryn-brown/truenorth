@@ -9,5 +9,5 @@
 mod client;
 pub use client::{
     claim_access_url, SimpleFinAccount, SimpleFinAccountSet, SimpleFinClient, SimpleFinError,
-    SimpleFinHolding,
+    SimpleFinHolding, SimpleFinTransaction,
 };

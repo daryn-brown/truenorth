@@ -284,7 +284,51 @@ export interface SimpleFinStatus {
 export interface SimpleFinSyncSummary {
   accounts_synced: number;
   holdings_synced: number;
+  transactions_synced: number;
   synced_at: string;
   /** Non-fatal messages SimpleFIN returned (e.g. an institution needs re-auth). */
   warnings: string[];
+}
+
+/** How a transaction is counted toward cashflow. Mirrors the Rust `FlowType`. */
+export type FlowType = "income" | "fixed" | "variable" | "transfer";
+
+/** A classification rule (case-insensitive substring of a description). Mirrors `TxnRule`. */
+export interface TxnRule {
+  id: number;
+  pattern: string;
+  flow_type: FlowType;
+}
+
+/** A transaction with its resolved flow type. Mirrors the Rust `ClassifiedTransaction`. */
+export interface ClassifiedTransaction {
+  id: number;
+  account_id: number;
+  account_name: string;
+  txn_date: string;
+  description: string;
+  amount: number;
+  currency: Currency;
+  flow_type: FlowType;
+  /** True when the flow type comes from a manual override rather than a rule/sign default. */
+  is_override: boolean;
+}
+
+/**
+ * Rolling-window cashflow totals separating fixed commitments from variable "lifestyle"
+ * spending, with transfers excluded. Mirrors the Rust `CashflowSummary`.
+ */
+export interface CashflowSummary {
+  window_days: number;
+  since: string;
+  income: MoneyPair;
+  fixed: MoneyPair;
+  variable: MoneyPair;
+  net_savings: MoneyPair;
+  /** net_savings / income (USD basis), 0 when there was no income. */
+  savings_rate: number;
+  transfer_count: number;
+  txn_count: number;
+  /** True when some transaction's currency had no FX rate (counted as 0). */
+  currency_warning: boolean;
 }

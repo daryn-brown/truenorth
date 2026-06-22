@@ -168,7 +168,7 @@ pub fn get_net_worth(db: State<AppDb>) -> Result<NetWorthResponse, String> {
 /// If we have no rate for `currency`, it contributes 0 (we can't place it on the books yet —
 /// refreshing FX will pick the currency up). CAD falls back to 0 only when no USD→CAD rate
 /// is stored.
-fn convert_balance(
+pub(crate) fn convert_balance(
     balance: f64,
     currency: &str,
     usd_rates: &HashMap<String, f64>,
