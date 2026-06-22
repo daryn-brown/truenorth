@@ -4,4 +4,5 @@ pub mod goals;
 pub mod import;
 pub mod net_worth;
 pub mod simplefin;
+pub mod simulator;
 pub mod snaptrade;

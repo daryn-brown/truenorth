@@ -154,6 +154,43 @@ export interface GoalProgress {
   days_to_goal: number | null;
 }
 
+/** Editable levers behind the Seattle projection. Mirrors the Rust `SeattleAssumptions`. */
+export interface SeattleAssumptions {
+  current_net_monthly_usd: number;
+  current_expenses_monthly_usd: number;
+  seattle_net_monthly_usd: number;
+  seattle_expenses_monthly_usd: number;
+  transition_months: number;
+  horizon_months: number;
+  annual_return_pct: number;
+}
+
+/** One month on the Seattle projection. Month 0 is "today" (both scenarios start equal). */
+export interface ProjectionPoint {
+  month: number;
+  date: string;
+  current_usd: number;
+  seattle_usd: number;
+}
+
+/**
+ * Forward net-worth projection under the status-quo vs. Seattle (drop Job 2) scenarios.
+ * Mirrors the Rust `SeattleProjection`.
+ */
+export interface SeattleProjection {
+  start_usd: number;
+  start_date: string;
+  transition_date: string;
+  current_monthly_contribution_usd: number;
+  seattle_monthly_contribution_usd: number;
+  current_end_usd: number;
+  seattle_end_usd: number;
+  /** seattle_end − current_end (negative = the cost of dropping Job 2 over the horizon). */
+  end_gap_usd: number;
+  points: ProjectionPoint[];
+  assumptions: SeattleAssumptions;
+}
+
 export interface AccountNetWorth {
   account_id: number;
   account_name: string;

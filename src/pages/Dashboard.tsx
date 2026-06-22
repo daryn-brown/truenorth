@@ -8,6 +8,8 @@ import type {
   NetWorth,
   NetWorthDelta,
   NetWorthHistoryPoint,
+  SeattleAssumptions,
+  SeattleProjection,
 } from "../types/finance";
 import {
   addAccount,
@@ -17,11 +19,14 @@ import {
   getNetWorth,
   getNetWorthDelta,
   getNetWorthHistory,
+  getSeattleProjection,
   listAccounts,
   refreshFxRates,
+  setSeattleAssumptions,
 } from "../hooks/useFinanceApi";
 import NetWorthCard from "../components/NetWorthCard";
 import GoalCountdownCard from "../components/GoalCountdownCard";
+import SeattleSimulatorCard from "../components/SeattleSimulatorCard";
 import AccountList from "../components/AccountList";
 import AccountModal from "../components/AccountModal";
 import ImportModal from "../components/ImportModal";
@@ -38,6 +43,7 @@ export default function Dashboard() {
   const [netWorth, setNetWorth] = useState<NetWorth | null>(null);
   const [delta, setDelta] = useState<NetWorthDelta | null>(null);
   const [goal, setGoal] = useState<GoalProgress | null>(null);
+  const [projection, setProjection] = useState<SeattleProjection | null>(null);
   const [history, setHistory] = useState<NetWorthHistoryPoint[]>([]);
   const [homeCurrency, setHomeCurrency] = useState<Currency>("CAD");
   const [loading, setLoading] = useState(true);
@@ -50,17 +56,19 @@ export default function Dashboard() {
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const [accs, nw, nwDelta, goalProgress, hist] = await Promise.all([
+      const [accs, nw, nwDelta, goalProgress, proj, hist] = await Promise.all([
         listAccounts(),
         getNetWorth(),
         getNetWorthDelta(),
         getGoalProgress(),
+        getSeattleProjection(),
         getNetWorthHistory(),
       ]);
       setAccounts(accs);
       setNetWorth(nw);
       setDelta(nwDelta);
       setGoal(goalProgress);
+      setProjection(proj);
       setHistory(hist);
     } catch (err) {
       console.error("Failed to load dashboard data:", err);
@@ -101,6 +109,11 @@ export default function Dashboard() {
       setRefreshingFx(false);
     }
   };
+
+  const handleUpdateAssumptions = useCallback(async (a: SeattleAssumptions) => {
+    const updated = await setSeattleAssumptions(a);
+    setProjection(updated);
+  }, []);
 
   const handleConnectorChanged = useCallback(async () => {
     // A sync may have added accounts in new currencies (e.g. JMD) — refresh FX so they
@@ -177,6 +190,13 @@ export default function Dashboard() {
 
         {/* $100k countdown / CoastFIRE */}
         <GoalCountdownCard goal={goal} loading={loading} />
+
+        {/* Seattle transition simulator */}
+        <SeattleSimulatorCard
+          projection={projection}
+          loading={loading}
+          onUpdate={handleUpdateAssumptions}
+        />
 
         {/* Net worth chart */}
         <NetWorthChart data={chartData} currency={homeCurrency} />

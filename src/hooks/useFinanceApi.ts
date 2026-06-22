@@ -10,6 +10,8 @@ import type {
   NetWorth,
   NetWorthDelta,
   NetWorthHistoryPoint,
+  SeattleAssumptions,
+  SeattleProjection,
   SimpleFinStatus,
   SimpleFinSyncSummary,
   SnapTradeStatus,
@@ -45,6 +47,16 @@ export const getGoalProgress = (): Promise<GoalProgress> =>
 /** Update the headline net-worth milestone (USD); returns recomputed progress. */
 export const setGoalTarget = (targetUsd: number): Promise<GoalProgress> =>
   invoke("set_goal_target", { targetUsd });
+
+/** Forward net-worth projection: status quo vs. dropping Job 2 in the Seattle move. */
+export const getSeattleProjection = (): Promise<SeattleProjection> =>
+  invoke("get_seattle_projection");
+
+/** Persist edited Seattle assumptions; returns the recomputed projection. */
+export const setSeattleAssumptions = (
+  assumptions: SeattleAssumptions,
+): Promise<SeattleProjection> =>
+  invoke("set_seattle_assumptions", { assumptions });
 
 export const getFxRates = (): Promise<FxRate[]> =>
   invoke("get_fx_rates");
