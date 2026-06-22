@@ -1,12 +1,18 @@
 import { useCallback, useEffect, useState } from "react";
 import { open as openUrl } from "@tauri-apps/plugin-shell";
 import type {
+  QuestradeStatus,
+  QuestradeSyncSummary,
   SimpleFinStatus,
   SimpleFinSyncSummary,
   SnapTradeStatus,
   SnapTradeSyncSummary,
 } from "../types/finance";
 import {
+  questradeConnect,
+  questradeDisconnect,
+  questradeGetStatus,
+  questradeSync,
   simplefinConnect,
   simplefinDisconnect,
   simplefinGetStatus,
@@ -27,10 +33,11 @@ interface Props {
   onChanged: () => void;
 }
 
-type Provider = "snaptrade" | "simplefin";
+type Provider = "snaptrade" | "simplefin" | "direct";
 
 const SNAPTRADE_DASHBOARD = "https://dashboard.snaptrade.com";
 const SIMPLEFIN_BRIDGE = "https://bridge.simplefin.org";
+const QUESTRADE_API_CENTRE = "https://login.questrade.com/APIAccess/UserApps.aspx";
 
 const inputClass =
   "w-full rounded-lg border border-slate-600 bg-slate-800 px-3 py-2 text-sm text-slate-200 placeholder-slate-600 focus:outline-none focus:ring-2 focus:ring-indigo-500";
@@ -53,12 +60,12 @@ export default function ConnectionsModal({ isOpen, onClose, onChanged }: Props) 
           move money. Secrets are stored in your OS keychain, never on disk.
         </p>
 
-        <div className="mb-5 grid grid-cols-2 gap-1 rounded-lg border border-slate-700 bg-slate-800/60 p-1">
+        <div className="mb-5 grid grid-cols-3 gap-1 rounded-lg border border-slate-700 bg-slate-800/60 p-1">
           <TabButton
             active={provider === "snaptrade"}
             onClick={() => setProvider("snaptrade")}
             label="Brokerages"
-            hint="Robinhood · Questrade · Wealthsimple"
+            hint="via SnapTrade"
           />
           <TabButton
             active={provider === "simplefin"}
@@ -66,12 +73,20 @@ export default function ConnectionsModal({ isOpen, onClose, onChanged }: Props) 
             label="Banks"
             hint="via SimpleFIN"
           />
+          <TabButton
+            active={provider === "direct"}
+            onClick={() => setProvider("direct")}
+            label="Direct"
+            hint="Institution APIs"
+          />
         </div>
 
         {provider === "snaptrade" ? (
           <SnapTradePanel onChanged={onChanged} />
-        ) : (
+        ) : provider === "simplefin" ? (
           <SimpleFinPanel onChanged={onChanged} />
+        ) : (
+          <DirectConnectionsPanel onChanged={onChanged} />
         )}
 
         <div className="flex justify-end pt-5">
@@ -680,6 +695,255 @@ function SimpleFinPanel({ onChanged }: { onChanged: () => void }) {
         </div>
       )}
     </>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Direct — individual institution APIs
+// ---------------------------------------------------------------------------
+
+/**
+ * A home for institutions you connect through their own API instead of an aggregator. Each one is a
+ * self-contained card; add another institution by dropping a new card alongside `QuestradeConnection`.
+ */
+function DirectConnectionsPanel({ onChanged }: { onChanged: () => void }) {
+  return (
+    <>
+      <p className="mb-4 text-xs text-slate-400">
+        Connect an institution’s own API directly — no aggregator in between. Use this when a broker
+        or bank offers a personal API, or when an aggregator can’t see your full balance (for
+        example, SimpleFIN reports only the cash in a Questrade account, not the stock equity). Each
+        connection is <span className="font-semibold text-slate-300">read-only</span> and its secret
+        lives in your OS keychain.
+      </p>
+
+      <QuestradeConnection onChanged={onChanged} />
+    </>
+  );
+}
+
+function QuestradeConnection({ onChanged }: { onChanged: () => void }) {
+  const [status, setStatus] = useState<QuestradeStatus | null>(null);
+  const [refreshToken, setRefreshToken] = useState("");
+  const [reconnecting, setReconnecting] = useState(false);
+  const [busy, setBusy] = useState<null | "connect" | "sync" | "disconnect">(null);
+  const [error, setError] = useState<string | null>(null);
+  const [info, setInfo] = useState<string | null>(null);
+  const [summary, setSummary] = useState<QuestradeSyncSummary | null>(null);
+
+  const refreshStatus = useCallback(async () => {
+    try {
+      setStatus(await questradeGetStatus());
+    } catch (err) {
+      setError(messageOf(err));
+    }
+  }, []);
+
+  useEffect(() => {
+    void refreshStatus();
+  }, [refreshStatus]);
+
+  const handleConnect = async () => {
+    setBusy("connect");
+    setError(null);
+    setInfo(null);
+    try {
+      const next = await questradeConnect(refreshToken);
+      setStatus(next);
+      setRefreshToken("");
+      setReconnecting(false);
+      setInfo("Questrade connected. Click “Sync now” to pull balances and holdings.");
+    } catch (err) {
+      setError(messageOf(err));
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const handleSync = async () => {
+    setBusy("sync");
+    setError(null);
+    setInfo(null);
+    setSummary(null);
+    try {
+      const result = await questradeSync();
+      setSummary(result);
+      await refreshStatus();
+      onChanged();
+    } catch (err) {
+      setError(messageOf(err));
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const handleDisconnect = async () => {
+    if (
+      !confirm(
+        "Disconnect Questrade? Connected accounts will be hidden and synced balances stop updating. Your history is kept.",
+      )
+    ) {
+      return;
+    }
+    setBusy("disconnect");
+    setError(null);
+    setInfo(null);
+    try {
+      const next = await questradeDisconnect();
+      setStatus(next);
+      setSummary(null);
+      onChanged();
+      setInfo("Questrade disconnected.");
+    } catch (err) {
+      setError(messageOf(err));
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const isConnected = status?.is_connected ?? false;
+  const showTokenForm = !isConnected || reconnecting;
+
+  return (
+    <div className="rounded-xl border border-slate-700 bg-slate-800/40 p-4">
+      <div className="mb-3 flex items-center justify-between">
+        <div>
+          <h3 className="text-sm font-semibold text-white">Questrade</h3>
+          <p className="text-[11px] text-slate-500">Direct API · pulls cash and stock equity</p>
+        </div>
+        <span
+          className={`shrink-0 rounded-full px-2 py-0.5 text-[11px] font-medium ${
+            isConnected
+              ? "bg-emerald-900/40 text-emerald-300"
+              : "border border-slate-600 text-slate-400"
+          }`}
+        >
+          {isConnected ? "Connected" : "Not connected"}
+        </span>
+      </div>
+
+      {/* Step 1 — Refresh token */}
+      <Section step={1} title="Questrade refresh token" done={isConnected}>
+        {showTokenForm ? (
+          <div className="space-y-3">
+            <p className="text-xs text-slate-500">
+              In your{" "}
+              <button
+                type="button"
+                onClick={() => void openUrl(QUESTRADE_API_CENTRE)}
+                className="text-indigo-400 underline hover:text-indigo-300"
+              >
+                Questrade API Centre
+              </button>
+              , register a personal app, run a manual authorization, and paste the refresh token
+              here. Questrade rotates it on every sync and TrueNorth stores the latest one; if it
+              goes unused for ~7 days, generate a new one.
+            </p>
+            <textarea
+              value={refreshToken}
+              onChange={(e) => setRefreshToken(e.target.value)}
+              placeholder="Paste your refresh token (a short string of letters and numbers)"
+              spellCheck={false}
+              rows={2}
+              className={`${inputClass} resize-none font-mono text-xs`}
+            />
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={handleConnect}
+                disabled={busy !== null || !refreshToken.trim()}
+                className="flex-1 rounded-lg bg-indigo-600 py-2 text-sm font-semibold text-white hover:bg-indigo-500 disabled:opacity-50 transition-colors"
+              >
+                {busy === "connect" ? "Connecting…" : "Connect"}
+              </button>
+              {reconnecting && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setReconnecting(false);
+                    setRefreshToken("");
+                  }}
+                  className="rounded-lg border border-slate-600 px-4 py-2 text-sm font-medium text-slate-300 hover:bg-slate-700 transition-colors"
+                >
+                  Cancel
+                </button>
+              )}
+            </div>
+          </div>
+        ) : (
+          <div className="flex items-center justify-between gap-3 text-sm text-slate-300">
+            <span className="truncate">Connected to Questrade</span>
+            <button
+              type="button"
+              onClick={() => setReconnecting(true)}
+              className="shrink-0 text-xs text-slate-400 underline hover:text-slate-200"
+            >
+              Use a new token
+            </button>
+          </div>
+        )}
+      </Section>
+
+      {/* Step 2 — Sync */}
+      <Section step={2} title="Sync balances" disabled={!isConnected} last>
+        <div className="flex items-center justify-between gap-3">
+          <p className="text-xs text-slate-500">
+            {status?.account_count
+              ? `${status.account_count} account${status.account_count === 1 ? "" : "s"} connected`
+              : "No accounts synced yet"}
+            {status?.last_synced_at ? ` · last synced ${formatStamp(status.last_synced_at)}` : ""}
+          </p>
+          <button
+            type="button"
+            onClick={handleSync}
+            disabled={busy !== null || !isConnected}
+            className="shrink-0 rounded-lg bg-indigo-600 px-4 py-2 text-sm font-semibold text-white hover:bg-indigo-500 disabled:opacity-50 transition-colors"
+          >
+            {busy === "sync" ? "Syncing…" : "Sync now"}
+          </button>
+        </div>
+
+        {isConnected && (
+          <p className="mt-2 text-[11px] text-slate-600">
+            Full equity (cash + market value) flows into net worth. A duplicate cash-only Questrade
+            account from another connection is hidden automatically; if one remains, hide it from the
+            Accounts list.
+          </p>
+        )}
+
+        {summary && (
+          <div className="mt-3 space-y-2">
+            <p className="rounded-lg bg-emerald-900/20 border border-emerald-700/40 px-3 py-2 text-xs text-emerald-300">
+              Synced {summary.accounts_synced} account
+              {summary.accounts_synced === 1 ? "" : "s"} and {summary.holdings_synced} holding
+              {summary.holdings_synced === 1 ? "" : "s"}. Net worth is up to date.
+            </p>
+            {summary.duplicates_hidden > 0 && (
+              <p className="rounded-lg bg-slate-700/30 border border-slate-600/50 px-3 py-2 text-xs text-slate-300">
+                Hid {summary.duplicates_hidden} duplicate Questrade account
+                {summary.duplicates_hidden === 1 ? "" : "s"} that another connection (e.g. SimpleFIN)
+                was importing with cash only, so net worth isn’t double-counted.
+              </p>
+            )}
+          </div>
+        )}
+      </Section>
+
+      <Feedback info={info} error={error} />
+
+      {isConnected && (
+        <div className="pt-4">
+          <button
+            type="button"
+            onClick={handleDisconnect}
+            disabled={busy !== null}
+            className="text-xs font-medium text-red-400 hover:text-red-300 disabled:opacity-50"
+          >
+            {busy === "disconnect" ? "Disconnecting…" : "Disconnect Questrade"}
+          </button>
+        </div>
+      )}
+    </div>
   );
 }
 

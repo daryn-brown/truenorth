@@ -47,6 +47,10 @@ pub fn run() {
             commands::simplefin::simplefin_connect,
             commands::simplefin::simplefin_sync,
             commands::simplefin::simplefin_disconnect,
+            commands::questrade::questrade_get_status,
+            commands::questrade::questrade_connect,
+            commands::questrade::questrade_sync,
+            commands::questrade::questrade_disconnect,
         ])
         .run(tauri::generate_context!())
         .expect("TrueNorth failed to start");

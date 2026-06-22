@@ -8,6 +8,8 @@ import type {
   ImportSummary,
   NetWorth,
   NetWorthHistoryPoint,
+  QuestradeStatus,
+  QuestradeSyncSummary,
   SimpleFinStatus,
   SimpleFinSyncSummary,
   SnapTradeStatus,
@@ -88,6 +90,23 @@ export const simplefinSync = (): Promise<SimpleFinSyncSummary> =>
 
 export const simplefinDisconnect = (): Promise<SimpleFinStatus> =>
   invoke("simplefin_disconnect");
+
+// --- Questrade (direct API) ------------------------------------------------
+
+export const questradeGetStatus = (): Promise<QuestradeStatus> =>
+  invoke("questrade_get_status");
+
+/** Exchange a Questrade refresh token and store the rotated token in the keychain. */
+export const questradeConnect = (
+  refreshToken: string,
+): Promise<QuestradeStatus> =>
+  invoke("questrade_connect", { refreshToken });
+
+export const questradeSync = (): Promise<QuestradeSyncSummary> =>
+  invoke("questrade_sync");
+
+export const questradeDisconnect = (): Promise<QuestradeStatus> =>
+  invoke("questrade_disconnect");
 
 interface BalanceSnapshotResult {
   id: number;
