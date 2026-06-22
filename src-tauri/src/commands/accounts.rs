@@ -220,3 +220,69 @@ pub fn add_balance_snapshot(
         currency,
     })
 }
+
+/// Normalise a user-entered currency code to an uppercase, 3-letter ISO-4217-style code,
+/// rejecting anything that isn't exactly three ASCII letters.
+fn normalize_currency(input: &str) -> Result<String, String> {
+    let code = input.trim().to_uppercase();
+    if code.len() == 3 && code.chars().all(|c| c.is_ascii_alphabetic()) {
+        Ok(code)
+    } else {
+        Err(format!(
+            "'{input}' is not a valid 3-letter currency code (e.g. USD, CAD, JMD)."
+        ))
+    }
+}
+
+/// Override an account's currency. Connector-synced accounts can carry the wrong currency from an
+/// upstream aggregator (e.g. SimpleFIN reporting a Jamaican account as CAD); this lets the user
+/// correct it. The connectors preserve a stored currency on later syncs, so the fix sticks.
+/// Existing balance snapshots are relabelled too, keeping the history consistent.
+#[tauri::command]
+pub fn update_account_currency(
+    db: State<AppDb>,
+    account_id: i64,
+    currency: String,
+) -> Result<(), String> {
+    let code = normalize_currency(&currency)?;
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+
+    let affected = conn
+        .execute(
+            "UPDATE accounts SET currency = ?1, \
+             updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') WHERE id = ?2",
+            params![code, account_id],
+        )
+        .map_err(|e| e.to_string())?;
+    if affected == 0 {
+        return Err(format!("Account {account_id} not found."));
+    }
+
+    conn.execute(
+        "UPDATE balance_snapshots SET currency = ?1 WHERE account_id = ?2",
+        params![code, account_id],
+    )
+    .map_err(|e| e.to_string())?;
+
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn normalize_currency_accepts_three_letters_and_uppercases() {
+        assert_eq!(normalize_currency("jmd").unwrap(), "JMD");
+        assert_eq!(normalize_currency("  usd ").unwrap(), "USD");
+        assert_eq!(normalize_currency("CAD").unwrap(), "CAD");
+    }
+
+    #[test]
+    fn normalize_currency_rejects_bad_codes() {
+        assert!(normalize_currency("US").is_err());
+        assert!(normalize_currency("DOLLAR").is_err());
+        assert!(normalize_currency("US1").is_err());
+        assert!(normalize_currency("").is_err());
+    }
+}

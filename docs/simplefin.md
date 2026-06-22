@@ -55,6 +55,13 @@ If SimpleFIN reports a per-connection problem (for example, an institution needs
 re-authenticated at the bridge), the sync still succeeds for everything else and surfaces the
 message as a **warning** under the sync summary.
 
+> **Brokerages may report cash only.** For some investment accounts, the SimpleFIN bridge returns
+> just the **uninvested cash** balance and not the stock equity (market value) — Questrade is a known
+> case. If a brokerage balance looks too low, connect that broker directly instead: see
+> [**Questrade (direct API)**](questrade.md), under the **Direct** tab. The direct connector pulls
+> the full account value (cash **and** equity) and automatically hides the redundant cash-only
+> SimpleFIN duplicate so net worth isn't double-counted.
+
 Sync is **manual** ("Sync now"). Automatic/background sync is deferred to a later phase.
 
 ## Disconnecting
@@ -93,5 +100,6 @@ revoke access, also disable or delete the token in your SimpleFIN bridge.
 
 - [`README.md`](../README.md) — architecture diagram and roadmap.
 - [`docs/snaptrade.md`](snaptrade.md) — connecting brokerages via SnapTrade (read-only).
+- [`docs/questrade.md`](questrade.md) — connecting Questrade directly (full cash + equity).
 - [`docs/import.md`](import.md) — manual / CSV import and how net-worth history is computed.
 - [`docs/blueprint.md`](blueprint.md) — connector research, including SimpleFIN vs. alternatives.

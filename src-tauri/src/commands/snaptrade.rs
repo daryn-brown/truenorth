@@ -379,11 +379,11 @@ pub async fn snaptrade_sync(db: State<'_, AppDb>) -> Result<SnapTradeSyncSummary
         let tx = conn.transaction().map_err(|e| e.to_string())?;
 
         for (account, positions) in &synced {
-            let currency = account
+            let reported_currency = account
                 .currency
                 .clone()
                 .unwrap_or_else(|| "USD".to_string());
-            let jurisdiction = jurisdiction_for(&currency);
+            let jurisdiction = jurisdiction_for(&reported_currency);
             let account_type =
                 map_account_type(account.raw_type.as_deref(), account.name.as_deref());
             let display_name = account
@@ -396,33 +396,35 @@ pub async fn snaptrade_sync(db: State<'_, AppDb>) -> Result<SnapTradeSyncSummary
                 .clone()
                 .unwrap_or_else(|| "SnapTrade".to_string());
 
-            // Upsert the account, keyed by (connector_kind, connector_ref).
-            let existing_id: Option<i64> = tx
+            // Upsert the account, keyed by (connector_kind, connector_ref). On an existing account
+            // we preserve the stored currency/jurisdiction so a user correction (see
+            // `update_account_currency`) isn't clobbered by what the aggregator reports.
+            let existing: Option<(i64, String)> = tx
                 .query_row(
-                    "SELECT id FROM accounts WHERE connector_kind = 'snaptrade' AND connector_ref = ?1",
+                    "SELECT id, currency FROM accounts WHERE connector_kind = 'snaptrade' AND connector_ref = ?1",
                     params![account.id],
-                    |r| r.get(0),
+                    |r| Ok((r.get(0)?, r.get(1)?)),
                 )
                 .optional()
                 .map_err(|e| e.to_string())?;
 
-            let account_id = if let Some(id) = existing_id {
+            let (account_id, account_currency) = if let Some((id, stored_currency)) = existing {
                 tx.execute(
                     "UPDATE accounts SET name = ?1, institution = ?2, account_type = ?3, \
-                     currency = ?4, jurisdiction = ?5, is_active = 1, updated_at = ?6 WHERE id = ?7",
-                    params![display_name, institution, account_type, currency, jurisdiction, now, id],
+                     is_active = 1, updated_at = ?4 WHERE id = ?5",
+                    params![display_name, institution, account_type, now, id],
                 )
                 .map_err(|e| e.to_string())?;
-                id
+                (id, stored_currency)
             } else {
                 tx.execute(
                     "INSERT INTO accounts \
                      (name, institution, account_type, currency, jurisdiction, connector_kind, connector_ref) \
                      VALUES (?1, ?2, ?3, ?4, ?5, 'snaptrade', ?6)",
-                    params![display_name, institution, account_type, currency, jurisdiction, account.id],
+                    params![display_name, institution, account_type, reported_currency, jurisdiction, account.id],
                 )
                 .map_err(|e| e.to_string())?;
-                tx.last_insert_rowid()
+                (tx.last_insert_rowid(), reported_currency.clone())
             };
             accounts_synced += 1;
 
@@ -432,7 +434,7 @@ pub async fn snaptrade_sync(db: State<'_, AppDb>) -> Result<SnapTradeSyncSummary
                     "INSERT OR REPLACE INTO balance_snapshots \
                      (account_id, snapshot_date, balance, currency, source) \
                      VALUES (?1, ?2, ?3, ?4, 'snaptrade')",
-                    params![account_id, today, total, currency],
+                    params![account_id, today, total, account_currency],
                 )
                 .map_err(|e| e.to_string())?;
             }
@@ -444,7 +446,7 @@ pub async fn snaptrade_sync(db: State<'_, AppDb>) -> Result<SnapTradeSyncSummary
             )
             .map_err(|e| e.to_string())?;
             for pos in positions {
-                let holding_currency = pos.currency.clone().unwrap_or_else(|| currency.clone());
+                let holding_currency = pos.currency.clone().unwrap_or_else(|| reported_currency.clone());
                 let last_price_at = pos.price.map(|_| now.clone());
                 tx.execute(
                     "INSERT OR REPLACE INTO holdings \

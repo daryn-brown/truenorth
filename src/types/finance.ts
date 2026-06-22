@@ -31,7 +31,8 @@ export interface Account {
   name: string;
   institution: string;
   account_type: AccountTypeId;
-  currency: Currency;
+  /** ISO-4217 code. Usually USD/CAD, but a connected account can be any currency (e.g. JMD). */
+  currency: string;
   jurisdiction: Jurisdiction;
   connector_kind: ConnectorKind;
   connector_ref: string | null;
@@ -49,7 +50,7 @@ export interface BalanceSnapshot {
   account_id: number;
   snapshot_date: string;
   balance: number;
-  currency: Currency;
+  currency: string;
   source: string;
   created_at: string;
 }
@@ -198,7 +199,7 @@ export interface AccountNetWorth {
   account_type: AccountTypeId;
   jurisdiction: Jurisdiction;
   balance: number;
-  currency: Currency;
+  currency: string;
   balance_usd: number;
   balance_cad: number;
   snapshot_date: string | null;
@@ -331,4 +332,22 @@ export interface CashflowSummary {
   txn_count: number;
   /** True when some transaction's currency had no FX rate (counted as 0). */
   currency_warning: boolean;
+}
+
+/** Questrade direct-connection state, mirrored from the Rust `QuestradeStatus`. */
+export interface QuestradeStatus {
+  /** A refresh token is stored (the Questrade API app is connected). */
+  is_connected: boolean;
+  last_synced_at: string | null;
+  /** Number of active accounts connected directly via Questrade. */
+  account_count: number;
+}
+
+/** Result of a Questrade sync, mirrored from the Rust `QuestradeSyncSummary`. */
+export interface QuestradeSyncSummary {
+  accounts_synced: number;
+  holdings_synced: number;
+  /** Redundant aggregator duplicates (same account via SimpleFIN/SnapTrade) that were hidden. */
+  duplicates_hidden: number;
+  synced_at: string;
 }

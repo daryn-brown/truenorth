@@ -26,6 +26,7 @@ import {
   refreshFxRates,
   refreshFxRatesIfStale,
   setSeattleAssumptions,
+  updateAccountCurrency,
 } from "../hooks/useFinanceApi";
 import NetWorthCard from "../components/NetWorthCard";
 import GoalCountdownCard from "../components/GoalCountdownCard";
@@ -40,9 +41,16 @@ import NetWorthChart from "../components/NetWorthChart";
 type ModalState =
   | { open: false }
   | { open: true; mode: "add_account" }
-  | { open: true; mode: "update_balance"; account: Account };
+  | { open: true; mode: "update_balance"; account: Account }
+  | { open: true; mode: "edit_currency"; account: Account };
 
-export default function Dashboard() {
+export default function Dashboard({
+  onCheckForUpdates,
+  checkingUpdate = false,
+}: {
+  onCheckForUpdates?: () => void;
+  checkingUpdate?: boolean;
+} = {}) {
   const [accounts, setAccounts] = useState<Account[]>([]);
   const [netWorth, setNetWorth] = useState<NetWorth | null>(null);
   const [delta, setDelta] = useState<NetWorthDelta | null>(null);
@@ -149,6 +157,15 @@ export default function Dashboard() {
     await load();
   }, [load]);
 
+  const handleUpdateCurrency = useCallback(
+    async (accountId: number, currency: string) => {
+      await updateAccountCurrency(accountId, currency);
+      // The corrected currency may need a fresh rate (e.g. JMD) to convert into net worth.
+      await handleConnectorChanged();
+    },
+    [handleConnectorChanged],
+  );
+
   // Net-worth-over-time series in the selected home currency.
   const chartData = history.map((point) => ({
     date: point.date,
@@ -190,6 +207,16 @@ export default function Dashboard() {
           >
             {refreshingFx ? "Refreshing…" : "🔄 Refresh FX"}
           </button>
+          {onCheckForUpdates && (
+            <button
+              onClick={onCheckForUpdates}
+              disabled={checkingUpdate}
+              title="Check for a new version of TrueNorth"
+              className="flex items-center gap-1.5 rounded-lg border border-slate-700 px-3 py-1.5 text-xs text-slate-400 hover:bg-slate-800 disabled:opacity-50 transition-colors"
+            >
+              {checkingUpdate ? "Checking…" : "⬇️ Updates"}
+            </button>
+          )}
         </div>
       </header>
 
@@ -242,6 +269,9 @@ export default function Dashboard() {
           onUpdateBalance={(account) =>
             setModal({ open: true, mode: "update_balance", account })
           }
+          onEditCurrency={(account) =>
+            setModal({ open: true, mode: "edit_currency", account })
+          }
         />
 
         {accounts.length === 0 && !loading && (
@@ -269,6 +299,17 @@ export default function Dashboard() {
           onClose={() => setModal({ open: false })}
           onAddAccount={handleAddAccount}
           onUpdateBalance={handleUpdateBalance}
+        />
+      )}
+      {modal.open && modal.mode === "edit_currency" && (
+        <AccountModal
+          isOpen
+          mode="edit_currency"
+          accountToUpdate={modal.account}
+          onClose={() => setModal({ open: false })}
+          onAddAccount={handleAddAccount}
+          onUpdateBalance={handleUpdateBalance}
+          onUpdateCurrency={handleUpdateCurrency}
         />
       )}
 

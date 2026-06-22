@@ -13,6 +13,8 @@ import type {
   NetWorth,
   NetWorthDelta,
   NetWorthHistoryPoint,
+  QuestradeStatus,
+  QuestradeSyncSummary,
   SeattleAssumptions,
   SeattleProjection,
   SimpleFinStatus,
@@ -30,6 +32,12 @@ export const addAccount = (payload: AddAccountPayload): Promise<Account> =>
 
 export const deleteAccount = (accountId: number): Promise<void> =>
   invoke("delete_account", { accountId });
+
+/** Override an account's currency (e.g. correct a connector that mislabels a JMD account as CAD). */
+export const updateAccountCurrency = (
+  accountId: number,
+  currency: string,
+): Promise<void> => invoke("update_account_currency", { accountId, currency });
 
 export const addBalanceSnapshot = (
   payload: AddBalanceSnapshotPayload,
@@ -152,6 +160,23 @@ export const simplefinSync = (): Promise<SimpleFinSyncSummary> =>
 
 export const simplefinDisconnect = (): Promise<SimpleFinStatus> =>
   invoke("simplefin_disconnect");
+
+// --- Questrade (direct API) ------------------------------------------------
+
+export const questradeGetStatus = (): Promise<QuestradeStatus> =>
+  invoke("questrade_get_status");
+
+/** Exchange a Questrade refresh token and store the rotated token in the keychain. */
+export const questradeConnect = (
+  refreshToken: string,
+): Promise<QuestradeStatus> =>
+  invoke("questrade_connect", { refreshToken });
+
+export const questradeSync = (): Promise<QuestradeSyncSummary> =>
+  invoke("questrade_sync");
+
+export const questradeDisconnect = (): Promise<QuestradeStatus> =>
+  invoke("questrade_disconnect");
 
 interface BalanceSnapshotResult {
   id: number;

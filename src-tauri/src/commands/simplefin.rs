@@ -140,37 +140,41 @@ fn upsert_account(
     today: &str,
     now: &str,
 ) -> rusqlite::Result<i64> {
-    let currency = &account.currency;
-    let jurisdiction = jurisdiction_for(currency);
+    let reported_currency = &account.currency;
+    let jurisdiction = jurisdiction_for(reported_currency);
     let account_type = map_account_type(&account.name, !account.holdings.is_empty());
     let institution = account
         .institution
         .clone()
         .unwrap_or_else(|| "SimpleFIN".to_string());
 
-    let existing_id: Option<i64> = conn
+    // Keyed by connector_ref. On an existing account we deliberately do NOT overwrite the stored
+    // currency/jurisdiction: aggregators sometimes mislabel a foreign account's currency (e.g.
+    // SimpleFIN reporting a Jamaican JMD account as CAD). The user can correct it via
+    // `update_account_currency`, and preserving the stored value keeps that fix across syncs.
+    let existing: Option<(i64, String)> = conn
         .query_row(
-            "SELECT id FROM accounts WHERE connector_kind = 'simplefin' AND connector_ref = ?1",
+            "SELECT id, currency FROM accounts WHERE connector_kind = 'simplefin' AND connector_ref = ?1",
             params![account.id],
-            |r| r.get(0),
+            |r| Ok((r.get(0)?, r.get(1)?)),
         )
         .optional()?;
 
-    let account_id = if let Some(id) = existing_id {
+    let (account_id, currency) = if let Some((id, stored_currency)) = existing {
         conn.execute(
             "UPDATE accounts SET name = ?1, institution = ?2, account_type = ?3, \
-             currency = ?4, jurisdiction = ?5, is_active = 1, updated_at = ?6 WHERE id = ?7",
-            params![account.name, institution, account_type, currency, jurisdiction, now, id],
+             is_active = 1, updated_at = ?4 WHERE id = ?5",
+            params![account.name, institution, account_type, now, id],
         )?;
-        id
+        (id, stored_currency)
     } else {
         conn.execute(
             "INSERT INTO accounts \
              (name, institution, account_type, currency, jurisdiction, connector_kind, connector_ref) \
              VALUES (?1, ?2, ?3, ?4, ?5, 'simplefin', ?6)",
-            params![account.name, institution, account_type, currency, jurisdiction, account.id],
+            params![account.name, institution, account_type, reported_currency, jurisdiction, account.id],
         )?;
-        conn.last_insert_rowid()
+        (conn.last_insert_rowid(), reported_currency.clone())
     };
 
     if let Some(total) = account.balance {
@@ -633,6 +637,46 @@ mod tests {
             )
             .unwrap();
         assert_eq!(override_kept.as_deref(), Some("income"));
+    }
+
+    #[test]
+    fn reconcile_preserves_a_user_corrected_currency() {
+        let conn = Connection::open_in_memory().unwrap();
+        crate::db::apply_schema(&conn).unwrap();
+
+        // First sync: SimpleFIN mislabels this Jamaican account as CAD.
+        let mut account = brokerage_account();
+        account.id = "act-jm".into();
+        account.currency = "CAD".into();
+        account.balance = Some(75000.0);
+        account.holdings.clear();
+        let id = upsert_account(&conn, &account, "2025-01-01", "2025-01-01T00:00:00Z").unwrap();
+
+        // The user corrects it to JMD (as `update_account_currency` would).
+        conn.execute(
+            "UPDATE accounts SET currency = 'JMD' WHERE id = ?1",
+            params![id],
+        )
+        .unwrap();
+
+        // A later sync still reports CAD, but the correction must stick and the new snapshot
+        // must inherit the stored JMD currency.
+        let id2 = upsert_account(&conn, &account, "2025-01-02", "2025-01-02T00:00:00Z").unwrap();
+        assert_eq!(id2, id);
+
+        let currency: String = conn
+            .query_row("SELECT currency FROM accounts WHERE id = ?1", params![id], |r| r.get(0))
+            .unwrap();
+        assert_eq!(currency, "JMD");
+
+        let snapshot_currency: String = conn
+            .query_row(
+                "SELECT currency FROM balance_snapshots WHERE account_id = ?1 AND snapshot_date = '2025-01-02'",
+                params![id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(snapshot_currency, "JMD");
     }
 
     #[test]

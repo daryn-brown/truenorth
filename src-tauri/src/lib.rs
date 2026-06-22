@@ -31,6 +31,7 @@ pub fn run() {
             commands::accounts::add_account,
             commands::accounts::delete_account,
             commands::accounts::add_balance_snapshot,
+            commands::accounts::update_account_currency,
             commands::net_worth::get_net_worth,
             commands::net_worth::get_net_worth_history,
             commands::net_worth::get_net_worth_delta,
@@ -59,6 +60,10 @@ pub fn run() {
             commands::simplefin::simplefin_connect,
             commands::simplefin::simplefin_sync,
             commands::simplefin::simplefin_disconnect,
+            commands::questrade::questrade_get_status,
+            commands::questrade::questrade_connect,
+            commands::questrade::questrade_sync,
+            commands::questrade::questrade_disconnect,
         ])
         .run(tauri::generate_context!())
         .expect("TrueNorth failed to start");
