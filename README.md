@@ -13,10 +13,11 @@ questions about your own data.
 net worth**, a **net-worth-over-time** chart, and **JSON/CSV import** to seed accounts and balance
 history.
 
-🔄 **Phase 2 in progress — SnapTrade brokerage sync.** Connect Robinhood, Questrade, Wealthsimple
-and more through **SnapTrade** (free for a single user) to pull **real, read-only balances +
-holdings** straight into your net worth. SimpleFIN bank sync and the AI advisor are next — see the
-roadmap below. Setup lives in [`docs/snaptrade.md`](docs/snaptrade.md).
+🔄 **Phase 2–3 in progress — real account sync.** Connect Robinhood, Questrade, Wealthsimple and
+more through **SnapTrade** (free for a single user), and banks through **SimpleFIN** — both pull
+**real, read-only balances + holdings** straight into your net worth. The AI advisor is next — see
+the roadmap below. Setup lives in [`docs/snaptrade.md`](docs/snaptrade.md) and
+[`docs/simplefin.md`](docs/simplefin.md).
 
 ## Scope (now)
 **Financial transparency + easy decision-making.** Everything is **read-only**.
@@ -62,13 +63,14 @@ flowchart TB
             c_imp["import<br/>import_data"]
             c_fx["fx<br/>get_fx_rates<br/>refresh_fx_rates"]
             c_snap["snaptrade<br/>status · save_credentials<br/>login · sync · disconnect"]
+            c_sf["simplefin<br/>status · connect<br/>sync · disconnect"]
         end
 
         subgraph SVC["Domain logic · services"]
             direction LR
             d_db["db<br/>schema · crypto · secrets"]
             d_fx["fx<br/>Yahoo client · rate store"]
-            d_conn["connector<br/>AccountConnector trait · registry<br/>snaptrade: signing + client"]
+            d_conn["connector<br/>AccountConnector trait · registry<br/>snaptrade: signing + client<br/>simplefin: bridge client"]
         end
 
         state[["Managed state<br/>AppDb = Mutex‹Connection›<br/>ConnectorRegistry"]]
@@ -83,11 +85,7 @@ flowchart TB
     db[("🗄️ Encrypted SQLite · SQLCipher<br/>finance-second-brain.db<br/>accounts · balance_snapshots · fx_rates<br/>holdings · transactions · goals · app_settings")]
     yahoo(["🌐 Yahoo Finance<br/>USD/CAD FX quote"])
     snaptrade(["🌐 SnapTrade API<br/>read-only brokerage sync"])
-
-    subgraph P3["Phase 3 connectors · planned"]
-        direction LR
-        sfin["SimpleFIN Bridge<br/>banks"]
-    end
+    simplefin(["🌐 SimpleFIN Bridge<br/>read-only bank sync"])
 
     user --> pages
     api ==>|"Tauri IPC · invoke() · serde JSON"| builder
@@ -95,7 +93,7 @@ flowchart TB
     d_db -->|"unlock / store key · secrets"| kc
     d_fx -->|"HTTPS · reqwest"| yahoo
     d_conn -->|"HTTPS · reqwest · signed"| snaptrade
-    d_conn -.->|"trait impls"| P3
+    d_conn -->|"HTTPS · reqwest · Basic auth"| simplefin
 
     classDef feNode fill:#dbeafe,stroke:#2563eb,color:#1e3a8a;
     classDef coreNode fill:#ffedd5,stroke:#ea580c,color:#7c2d12;
@@ -103,15 +101,13 @@ flowchart TB
     classDef store fill:#dcfce7,stroke:#16a34a,color:#14532d;
     classDef os fill:#f3e8ff,stroke:#9333ea,color:#581c87;
     classDef ext fill:#fee2e2,stroke:#dc2626,color:#7f1d1d;
-    classDef planned fill:#f1f5f9,stroke:#94a3b8,color:#475569;
 
     class pages,comps,api feNode;
-    class builder,c_acc,c_nw,c_imp,c_fx,c_snap,d_db,d_fx,d_conn coreNode;
+    class builder,c_acc,c_nw,c_imp,c_fx,c_snap,c_sf,d_db,d_fx,d_conn coreNode;
     class state stateNode;
     class db store;
     class kc os;
-    class yahoo,snaptrade ext;
-    class sfin planned;
+    class yahoo,snaptrade,simplefin ext;
 ```
 
 **Layers**
@@ -176,13 +172,14 @@ the Apple/Windows signing secrets to sign automatically. See [`docs/releasing.md
 - [`docs/kickoff-prompt.md`](docs/kickoff-prompt.md) — ready-to-paste prompt for the first build session.
 - [`docs/import.md`](docs/import.md) — importing accounts + balance history (JSON/CSV) and how net-worth history is computed.
 - [`docs/snaptrade.md`](docs/snaptrade.md) — connecting brokerages via SnapTrade (read-only) and how sync feeds net worth.
+- [`docs/simplefin.md`](docs/simplefin.md) — connecting banks via SimpleFIN (read-only) and how sync feeds net worth.
 - [`docs/releasing.md`](docs/releasing.md) — release pipeline, build targets, and code-signing setup.
 
 ## Phased roadmap
 0. ✅ Scaffold (Tauri/React/SQLite shell, encryption, keychain)
 1. ✅ Manual multi-currency net-worth MVP (+ JSON/CSV import)
-2. 🔄 SnapTrade brokerage sync (read-only balances + holdings)
-3. SimpleFIN bank sync
+2. ✅ SnapTrade brokerage sync (read-only balances + holdings)
+3. 🔄 SimpleFIN bank sync (read-only balances + holdings)
 4. Transactions & goals
 5. Model-agnostic AI "second brain"
 6. Hardening & polish
