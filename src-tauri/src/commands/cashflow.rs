@@ -16,6 +16,7 @@
 
 use rusqlite::{params, Connection};
 use serde::Serialize;
+use std::collections::HashMap;
 use tauri::State;
 
 use super::net_worth::{convert_balance, MoneyPair};
@@ -143,6 +144,11 @@ fn classify(
 /// How many days apart the two legs of an internal transfer may post and still be matched.
 const TRANSFER_PAIR_WINDOW_DAYS: i64 = 5;
 
+/// Cross-currency transfer legs (e.g. a USD debit funding a CAD deposit) rarely convert to exactly
+/// the same USD value: the bank takes an FX spread, and our stored daily rate differs from the
+/// transaction-time rate. Allow the converted magnitudes to differ by up to this fraction.
+const CROSS_CURRENCY_TOLERANCE: f64 = 0.03;
+
 /// The fields needed to resolve a transaction's flow across the whole window. Transfer detection
 /// has to look at every row at once, not one at a time.
 struct FlowInput {
@@ -174,12 +180,53 @@ fn day_gap(a: &str, b: &str) -> Option<i64> {
     Some((da - db).num_days().abs())
 }
 
+/// Absolute value of a transaction converted to USD, or 0 when its currency has no rate.
+fn usd_magnitude(amount: f64, currency: &str, usd_rates: &HashMap<String, f64>) -> f64 {
+    convert_balance(amount, currency, usd_rates).0.abs()
+}
+
+/// Decide whether an outflow and an inflow look like the two legs of one internal transfer,
+/// returning a closeness score (lower is tighter) when they do. Legs must sit in different accounts
+/// and post within the pairing window. Same-currency legs must match to the cent (internal moves
+/// are exact); cross-currency legs only need their USD-converted magnitudes to agree within
+/// `CROSS_CURRENCY_TOLERANCE`, which is what lets US<->Canada account moves be detected.
+fn transfer_match(
+    out: &FlowInput,
+    inflow: &FlowInput,
+    usd_rates: &HashMap<String, f64>,
+) -> Option<f64> {
+    if out.account_id == inflow.account_id {
+        return None;
+    }
+    match day_gap(&out.date, &inflow.date) {
+        Some(gap) if gap <= TRANSFER_PAIR_WINDOW_DAYS => {}
+        _ => return None,
+    }
+    if out.currency == inflow.currency {
+        (cents(out.amount).abs() == cents(inflow.amount).abs()).then_some(0.0)
+    } else {
+        let mo = usd_magnitude(out.amount, &out.currency, usd_rates);
+        let mi = usd_magnitude(inflow.amount, &inflow.currency, usd_rates);
+        if mo <= 0.0 || mi <= 0.0 {
+            return None;
+        }
+        let rel = (mo - mi).abs() / mo.max(mi);
+        (rel <= CROSS_CURRENCY_TOLERANCE).then_some(rel)
+    }
+}
+
 /// Resolve every transaction's flow type, additionally detecting internal transfers between the
-/// user's own accounts — a debit in one account matched by an equal credit in another within a few
-/// days — that no keyword rule caught. Manual overrides and rule matches always win; auto-matching
-/// only reclassifies rows that would otherwise fall to the income/variable sign default, so money
-/// moved between accounts (and card payments) stops inflating income or spending.
-fn resolve_flow_types(txns: &[FlowInput], rules: &[(String, FlowType)]) -> Vec<FlowType> {
+/// user's own accounts — a debit in one account matched by a credit in another within a few days —
+/// that no keyword rule caught. Pairs may be same-currency (matched to the cent) or cross-currency
+/// (matched by USD-converted value), so moving money between US and Canadian accounts no longer
+/// inflates income and spending. Manual overrides and rule matches always win; auto-matching only
+/// reclassifies rows that would otherwise fall to the income/variable sign default (plus the
+/// un-keyworded partner of a keyworded transfer leg).
+fn resolve_flow_types(
+    txns: &[FlowInput],
+    rules: &[(String, FlowType)],
+    usd_rates: &HashMap<String, f64>,
+) -> Vec<FlowType> {
     let n = txns.len();
     let mut flows: Vec<FlowType> = txns
         .iter()
@@ -202,26 +249,44 @@ fn resolve_flow_types(txns: &[FlowInput], rules: &[(String, FlowType)]) -> Vec<F
         .map(|i| !pinned[i] || flows[i] == FlowType::Transfer)
         .collect();
 
+    // Match the largest outflows first so a big transfer claims its true partner before a smaller
+    // coincidental amount can.
+    let mut outflows: Vec<usize> = (0..n)
+        .filter(|&i| eligible[i] && txns[i].amount < 0.0)
+        .collect();
+    outflows.sort_by(|&a, &b| {
+        let ma = usd_magnitude(txns[a].amount, &txns[a].currency, usd_rates);
+        let mb = usd_magnitude(txns[b].amount, &txns[b].currency, usd_rates);
+        mb.partial_cmp(&ma).unwrap_or(std::cmp::Ordering::Equal)
+    });
+
     let mut used = vec![false; n];
-    for i in 0..n {
-        if used[i] || !eligible[i] || txns[i].amount >= 0.0 {
+    for i in outflows {
+        if used[i] {
             continue;
         }
+        // Among the eligible unclaimed inflows, take the closest match (then the nearest in time).
+        let mut best: Option<(usize, f64, i64)> = None;
         for j in 0..n {
-            if used[j]
-                || j == i
-                || !eligible[j]
-                || txns[j].amount <= 0.0
-                || txns[i].account_id == txns[j].account_id
-                || txns[i].currency != txns[j].currency
-                || cents(txns[i].amount).abs() != cents(txns[j].amount).abs()
-            {
+            if used[j] || j == i || !eligible[j] || txns[j].amount <= 0.0 {
                 continue;
             }
-            match day_gap(&txns[i].date, &txns[j].date) {
-                Some(gap) if gap <= TRANSFER_PAIR_WINDOW_DAYS => {}
-                _ => continue,
+            let Some(closeness) = transfer_match(&txns[i], &txns[j], usd_rates) else {
+                continue;
+            };
+            let gap = day_gap(&txns[i].date, &txns[j].date).unwrap_or(i64::MAX);
+            let improves = match best {
+                None => true,
+                Some((_, best_close, best_gap)) => {
+                    closeness < best_close - f64::EPSILON
+                        || ((closeness - best_close).abs() <= f64::EPSILON && gap < best_gap)
+                }
+            };
+            if improves {
+                best = Some((j, closeness, gap));
             }
+        }
+        if let Some((j, _, _)) = best {
             // Matched pair: exclude both legs. Pinned legs keep their flow (already transfer);
             // sign-default legs flip to transfer so the inflow no longer reads as income.
             if !pinned[i] {
@@ -232,7 +297,6 @@ fn resolve_flow_types(txns: &[FlowInput], rules: &[(String, FlowType)]) -> Vec<F
             }
             used[i] = true;
             used[j] = true;
-            break;
         }
     }
 
@@ -290,7 +354,7 @@ fn compute_cashflow(conn: &Connection, window_days: i64) -> rusqlite::Result<Cas
         })?
         .collect::<Result<Vec<_>, _>>()?;
 
-    let flows = resolve_flow_types(&txns, &rules);
+    let flows = resolve_flow_types(&txns, &rules, &usd_rates);
 
     let mut income = MoneyPair::default();
     let mut fixed = MoneyPair::default();
@@ -350,6 +414,7 @@ fn compute_cashflow(conn: &Connection, window_days: i64) -> rusqlite::Result<Cas
 fn fetch_classified(conn: &Connection, limit: i64) -> rusqlite::Result<Vec<ClassifiedTransaction>> {
     let limit = limit.clamp(1, 1000);
     let rules = load_rules(conn)?;
+    let usd_rates = load_usd_rates(conn)?;
 
     let mut stmt = conn.prepare(
         "SELECT t.id, t.account_id, a.name, t.txn_date, t.description, t.amount, t.currency, \
@@ -375,7 +440,7 @@ fn fetch_classified(conn: &Connection, limit: i64) -> rusqlite::Result<Vec<Class
         });
     }
 
-    let flows = resolve_flow_types(&inputs, &rules);
+    let flows = resolve_flow_types(&inputs, &rules, &usd_rates);
 
     let out = inputs
         .into_iter()
@@ -759,5 +824,57 @@ mod tests {
         assert_eq!(s.transfer_count, 0);
         assert_eq!(s.variable.cad, 750.0);
         assert_eq!(s.income.cad, 750.0);
+    }
+
+    #[test]
+    fn auto_detects_cross_currency_internal_transfer() {
+        let conn = Connection::open_in_memory().unwrap();
+        crate::db::apply_schema(&conn).unwrap();
+        crate::db::seed_defaults(&conn).unwrap();
+        // 1 USD = 1.36 CAD.
+        conn.execute(
+            "INSERT INTO fx_rates (from_currency, to_currency, rate, rate_date) \
+             VALUES ('USD', 'CAD', 1.36, '2025-01-01')",
+            [],
+        )
+        .unwrap();
+        let usd_acct = seed_account(&conn, "USD");
+        let cad_acct = seed_account(&conn, "CAD");
+        let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
+        // Move 5000 USD out of the US account; 6800 CAD (= 5000 USD at 1.36) lands in the CA account.
+        insert_txn(&conn, usd_acct, &today, "OUTGOING WIRE", -5000.0, "USD");
+        insert_txn(&conn, cad_acct, &today, "INCOMING WIRE", 6800.0, "CAD");
+        // Real income and spending that must survive untouched.
+        insert_txn(&conn, cad_acct, &today, "ACME PAYROLL", 3000.0, "CAD");
+        insert_txn(&conn, usd_acct, &today, "CORNER STORE", -100.0, "USD");
+
+        let s = compute_cashflow(&conn, 30).unwrap();
+        assert_eq!(s.transfer_count, 2); // both legs of the cross-currency move excluded
+        assert!((s.income.cad - 3000.0).abs() < 0.01); // payroll only, not 9800
+        assert!((s.variable.cad - 136.0).abs() < 0.01); // 100 USD of groceries only, not 6936
+    }
+
+    #[test]
+    fn does_not_pair_cross_currency_beyond_tolerance() {
+        let conn = Connection::open_in_memory().unwrap();
+        crate::db::apply_schema(&conn).unwrap();
+        crate::db::seed_defaults(&conn).unwrap();
+        conn.execute(
+            "INSERT INTO fx_rates (from_currency, to_currency, rate, rate_date) \
+             VALUES ('USD', 'CAD', 1.36, '2025-01-01')",
+            [],
+        )
+        .unwrap();
+        let usd_acct = seed_account(&conn, "USD");
+        let cad_acct = seed_account(&conn, "CAD");
+        let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
+        // 9000 CAD is ~6618 USD — nowhere near the 5000 USD debit, so these are not one transfer.
+        insert_txn(&conn, usd_acct, &today, "OUTGOING WIRE", -5000.0, "USD");
+        insert_txn(&conn, cad_acct, &today, "PAYCHEQUE", 9000.0, "CAD");
+
+        let s = compute_cashflow(&conn, 30).unwrap();
+        assert_eq!(s.transfer_count, 0);
+        assert!((s.income.cad - 9000.0).abs() < 0.01); // the deposit is counted as income
+        assert!((s.variable.cad - 6800.0).abs() < 0.01); // 5000 USD debit counted as spending
     }
 }
