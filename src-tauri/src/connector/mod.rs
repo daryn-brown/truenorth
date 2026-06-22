@@ -5,6 +5,7 @@ use thiserror::Error;
 mod manual;
 pub use manual::ManualConnector;
 
+pub mod simplefin;
 pub mod snaptrade;
 
 // ---------------------------------------------------------------------------

@@ -91,6 +91,17 @@ export default function Dashboard() {
     }
   };
 
+  const handleConnectorChanged = useCallback(async () => {
+    // A sync may have added accounts in new currencies (e.g. JMD) — refresh FX so they
+    // convert into the totals. A rate-fetch failure shouldn't hide the freshly synced balances.
+    try {
+      await refreshFxRates();
+    } catch (err) {
+      console.error("FX refresh after connector sync failed:", err);
+    }
+    await load();
+  }, [load]);
+
   // Net-worth-over-time series in the selected home currency.
   const chartData = history.map((point) => ({
     date: point.date,
@@ -106,13 +117,13 @@ export default function Dashboard() {
             🧭 TrueNorth
           </span>
           <span className="rounded-full bg-indigo-900/50 border border-indigo-700/50 px-2 py-0.5 text-[11px] font-semibold text-indigo-300 uppercase tracking-wider">
-            Phase 2
+            Phase 3
           </span>
         </div>
         <div className="flex items-center gap-2">
           <button
             onClick={() => setConnectOpen(true)}
-            title="Connect a brokerage and sync real balances via SnapTrade"
+            title="Connect brokerages (SnapTrade) and banks (SimpleFIN) to sync real balances"
             className="flex items-center gap-1.5 rounded-lg border border-indigo-700/60 bg-indigo-900/30 px-3 py-1.5 text-xs text-indigo-200 hover:bg-indigo-900/60 transition-colors"
           >
             🔗 Connect
@@ -203,7 +214,7 @@ export default function Dashboard() {
       <ConnectionsModal
         isOpen={connectOpen}
         onClose={() => setConnectOpen(false)}
-        onChanged={load}
+        onChanged={handleConnectorChanged}
       />
     </div>
   );

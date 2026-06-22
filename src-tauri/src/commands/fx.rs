@@ -1,3 +1,5 @@
+use std::collections::BTreeSet;
+
 use serde::Serialize;
 use tauri::State;
 
@@ -46,17 +48,51 @@ pub fn get_fx_rates(db: State<AppDb>) -> Result<Vec<FxRateRow>, String> {
     Ok(rows)
 }
 
-/// Fetch fresh USD/CAD rates from Yahoo Finance and persist them.
+/// Fetch fresh USD→X rates from Yahoo Finance for every currency the user's active accounts
+/// use (plus CAD, so the CAD total always works), and persist them. USD is the pivot, so a
+/// single rate per currency lets net worth convert any balance into both USD and CAD.
+///
+/// Resilient: if one currency fails (e.g. an unknown symbol) the rest still update. An error is
+/// only returned if *nothing* could be fetched.
 #[tauri::command]
 pub async fn refresh_fx_rates(db: State<'_, AppDb>) -> Result<Vec<FxRateRow>, String> {
-    let client = reqwest::Client::new();
-    let (usd_cad, rate_date) = fx_module::fetch_usd_cad(&client)
-        .await
-        .map_err(|e| e.to_string())?;
-
-    {
+    // Collect the currencies to refresh up front, then release the lock before any network I/O.
+    let currencies: Vec<String> = {
         let conn = db.0.lock().map_err(|e| e.to_string())?;
-        fx_module::store_fx_rate(&conn, usd_cad, &rate_date).map_err(|e| e.to_string())?;
+        let mut set: BTreeSet<String> = BTreeSet::new();
+        set.insert("CAD".to_string());
+        let mut stmt = conn
+            .prepare("SELECT DISTINCT currency FROM accounts WHERE is_active = 1")
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map([], |r| r.get::<_, String>(0))
+            .map_err(|e| e.to_string())?;
+        for row in rows {
+            set.insert(row.map_err(|e| e.to_string())?);
+        }
+        // USD is the pivot (always 1.0) — never fetched.
+        set.into_iter().filter(|c| c != "USD").collect()
+    };
+
+    let client = reqwest::Client::new();
+    let mut fetched = 0usize;
+    let mut last_err: Option<String> = None;
+    for currency in &currencies {
+        match fx_module::fetch_usd_rate(&client, currency).await {
+            Ok((rate, rate_date)) => {
+                let conn = db.0.lock().map_err(|e| e.to_string())?;
+                fx_module::store_usd_rate(&conn, currency, rate, &rate_date)
+                    .map_err(|e| e.to_string())?;
+                fetched += 1;
+            }
+            Err(e) => last_err = Some(format!("{currency}: {e}")),
+        }
+    }
+
+    if fetched == 0 {
+        if let Some(err) = last_err {
+            return Err(err);
+        }
     }
 
     get_fx_rates(db)

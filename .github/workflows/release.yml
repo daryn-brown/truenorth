@@ -11,6 +11,10 @@ name: Release
 # "Publish release". This workflow never pushes commits back to the repo — it only creates a
 # GitHub Release via the Actions token, so nothing bot-authored lands in history or the
 # contributors list (see AGENTS.md / CONTRIBUTING.md).
+#
+# Auto-update note: the in-app updater reads the latest *published* release
+# (releases/latest/download/latest.json), so a draft is invisible to it until you Publish.
+# Signing the updater artifacts requires the TAURI_SIGNING_PRIVATE_KEY secret (see docs/releasing.md).
 
 on:
   push:
@@ -155,6 +159,10 @@ jobs:
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Updater signature (minisign). Required so releases ship a valid latest.json that the
+          # in-app updater will accept. Independent of Apple code signing below.
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
           releaseId: ${{ needs.create-release.outputs.release_id }}
           args: ${{ matrix.args }}
@@ -165,6 +173,9 @@ jobs:
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Updater signature (minisign) — see note above.
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
           APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}

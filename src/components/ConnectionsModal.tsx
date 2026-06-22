@@ -1,10 +1,21 @@
 import { useCallback, useEffect, useState } from "react";
 import { open as openUrl } from "@tauri-apps/plugin-shell";
-import type { SnapTradeStatus, SnapTradeSyncSummary } from "../types/finance";
+import type {
+  SimpleFinStatus,
+  SimpleFinSyncSummary,
+  SnapTradeStatus,
+  SnapTradeSyncSummary,
+} from "../types/finance";
 import {
+  simplefinConnect,
+  simplefinDisconnect,
+  simplefinGetStatus,
+  simplefinSync,
   snaptradeDisconnect,
   snaptradeGetLoginLink,
   snaptradeGetStatus,
+  snaptradeLinkUser,
+  snaptradeListUsers,
   snaptradeSaveCredentials,
   snaptradeSync,
 } from "../hooks/useFinanceApi";
@@ -16,18 +27,81 @@ interface Props {
   onChanged: () => void;
 }
 
+type Provider = "snaptrade" | "simplefin";
+
 const SNAPTRADE_DASHBOARD = "https://dashboard.snaptrade.com";
+const SIMPLEFIN_BRIDGE = "https://bridge.simplefin.org";
 
 const inputClass =
   "w-full rounded-lg border border-slate-600 bg-slate-800 px-3 py-2 text-sm text-slate-200 placeholder-slate-600 focus:outline-none focus:ring-2 focus:ring-indigo-500";
 
 export default function ConnectionsModal({ isOpen, onClose, onChanged }: Props) {
+  const [provider, setProvider] = useState<Provider>("snaptrade");
+
+  if (!isOpen) return null;
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm"
+      onClick={(e) => e.target === e.currentTarget && onClose()}
+    >
+      <div className="w-full max-w-lg rounded-2xl border border-slate-700 bg-slate-900 p-6 shadow-2xl">
+        <h2 className="mb-1 text-lg font-semibold text-white">Connect accounts</h2>
+        <p className="mb-4 text-xs text-slate-400">
+          Sync real balances automatically instead of entering them by hand. TrueNorth requests{" "}
+          <span className="font-semibold text-slate-300">read-only</span> access only — it can never
+          move money. Secrets are stored in your OS keychain, never on disk.
+        </p>
+
+        <div className="mb-5 grid grid-cols-2 gap-1 rounded-lg border border-slate-700 bg-slate-800/60 p-1">
+          <TabButton
+            active={provider === "snaptrade"}
+            onClick={() => setProvider("snaptrade")}
+            label="Brokerages"
+            hint="Robinhood · Questrade · Wealthsimple"
+          />
+          <TabButton
+            active={provider === "simplefin"}
+            onClick={() => setProvider("simplefin")}
+            label="Banks"
+            hint="via SimpleFIN"
+          />
+        </div>
+
+        {provider === "snaptrade" ? (
+          <SnapTradePanel onChanged={onChanged} />
+        ) : (
+          <SimpleFinPanel onChanged={onChanged} />
+        )}
+
+        <div className="flex justify-end pt-5">
+          <button
+            type="button"
+            onClick={onClose}
+            className="rounded-lg border border-slate-600 px-4 py-2 text-sm font-medium text-slate-300 hover:bg-slate-700 transition-colors"
+          >
+            Done
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// SnapTrade — brokerages
+// ---------------------------------------------------------------------------
+
+function SnapTradePanel({ onChanged }: { onChanged: () => void }) {
   const [status, setStatus] = useState<SnapTradeStatus | null>(null);
   const [clientId, setClientId] = useState("");
   const [consumerKey, setConsumerKey] = useState("");
-  const [busy, setBusy] = useState<null | "save" | "connect" | "sync" | "disconnect">(
-    null,
-  );
+  const [userId, setUserId] = useState("");
+  const [userSecret, setUserSecret] = useState("");
+  const [relinking, setRelinking] = useState(false);
+  const [busy, setBusy] = useState<
+    null | "save" | "lookup" | "link" | "connect" | "sync" | "disconnect"
+  >(null);
   const [error, setError] = useState<string | null>(null);
   const [info, setInfo] = useState<string | null>(null);
   const [summary, setSummary] = useState<SnapTradeSyncSummary | null>(null);
@@ -41,14 +115,8 @@ export default function ConnectionsModal({ isOpen, onClose, onChanged }: Props) 
   }, []);
 
   useEffect(() => {
-    if (!isOpen) return;
-    setError(null);
-    setInfo(null);
-    setSummary(null);
     void refreshStatus();
-  }, [isOpen, refreshStatus]);
-
-  if (!isOpen) return null;
+  }, [refreshStatus]);
 
   const handleSave = async () => {
     setBusy("save");
@@ -59,6 +127,46 @@ export default function ConnectionsModal({ isOpen, onClose, onChanged }: Props) 
       setStatus(next);
       setConsumerKey("");
       setInfo("API key saved and verified.");
+    } catch (err) {
+      setError(messageOf(err));
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const handleLookupUser = async () => {
+    setBusy("lookup");
+    setError(null);
+    setInfo(null);
+    try {
+      const users = await snaptradeListUsers();
+      if (users.length > 0) {
+        setUserId(users[0]);
+        setInfo(
+          users.length === 1
+            ? "Found your SnapTrade User ID. Now paste your User Secret."
+            : `Found ${users.length} users — filled in the first. Edit if needed.`,
+        );
+      } else {
+        setError("No SnapTrade user is registered to this key yet.");
+      }
+    } catch (err) {
+      setError(messageOf(err));
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const handleLinkUser = async () => {
+    setBusy("link");
+    setError(null);
+    setInfo(null);
+    try {
+      const next = await snaptradeLinkUser(userId, userSecret);
+      setStatus(next);
+      setUserSecret("");
+      setRelinking(false);
+      setInfo("SnapTrade user linked. You can sync now.");
     } catch (err) {
       setError(messageOf(err));
     } finally {
@@ -127,180 +235,497 @@ export default function ConnectionsModal({ isOpen, onClose, onChanged }: Props) 
 
   const hasCredentials = status?.has_credentials ?? false;
   const isConnected = status?.is_connected ?? false;
+  const isPersonal = status?.is_personal ?? false;
+  const showLinkForm = isPersonal && (!isConnected || relinking);
 
   return (
-    <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm"
-      onClick={(e) => e.target === e.currentTarget && onClose()}
-    >
-      <div className="w-full max-w-lg rounded-2xl border border-slate-700 bg-slate-900 p-6 shadow-2xl">
-        <h2 className="mb-1 text-lg font-semibold text-white">Connect a brokerage</h2>
-        <p className="mb-5 text-xs text-slate-400">
-          Sync real balances from Robinhood, Questrade, Wealthsimple and more via{" "}
-          <button
-            type="button"
-            onClick={() => void openUrl(SNAPTRADE_DASHBOARD)}
-            className="text-indigo-400 underline hover:text-indigo-300"
-          >
-            SnapTrade
-          </button>
-          . TrueNorth requests <span className="font-semibold text-slate-300">read-only</span>{" "}
-          access — it can never place trades. Your keys are stored in your OS keychain, never on
-          disk.
-        </p>
-
-        {/* Step 1 — API credentials */}
-        <Section
-          step={1}
-          title="SnapTrade API key"
-          done={hasCredentials}
+    <>
+      <p className="mb-4 text-xs text-slate-400">
+        Connect Robinhood, Questrade, Wealthsimple and more via{" "}
+        <button
+          type="button"
+          onClick={() => void openUrl(SNAPTRADE_DASHBOARD)}
+          className="text-indigo-400 underline hover:text-indigo-300"
         >
-          {hasCredentials ? (
-            <div className="flex items-center justify-between gap-3 text-sm text-slate-300">
-              <span className="truncate">
-                Saved
-                {status?.client_id ? (
-                  <span className="text-slate-500"> · {status.client_id}</span>
-                ) : null}
-              </span>
+          SnapTrade
+        </button>
+        .
+      </p>
+
+      {/* Step 1 — API credentials */}
+      <Section step={1} title="SnapTrade API key" done={hasCredentials}>
+        {hasCredentials ? (
+          <div className="flex items-center justify-between gap-3 text-sm text-slate-300">
+            <span className="truncate">
+              Saved
+              {status?.client_id ? (
+                <span className="text-slate-500"> · {status.client_id}</span>
+              ) : null}
+            </span>
+            <button
+              type="button"
+              onClick={() => setStatus((s) => (s ? { ...s, has_credentials: false } : s))}
+              className="shrink-0 text-xs text-slate-400 underline hover:text-slate-200"
+            >
+              Change
+            </button>
+          </div>
+        ) : (
+          <div className="space-y-3">
+            <p className="text-xs text-slate-500">
+              Create a free developer account, then copy your Client ID and Consumer Key from the{" "}
               <button
                 type="button"
-                onClick={() => setStatus((s) => (s ? { ...s, has_credentials: false } : s))}
-                className="shrink-0 text-xs text-slate-400 underline hover:text-slate-200"
+                onClick={() => void openUrl(SNAPTRADE_DASHBOARD)}
+                className="text-indigo-400 underline hover:text-indigo-300"
               >
-                Change
+                SnapTrade dashboard
+              </button>
+              .
+            </p>
+            <input
+              value={clientId}
+              onChange={(e) => setClientId(e.target.value)}
+              placeholder="Client ID"
+              spellCheck={false}
+              className={inputClass}
+            />
+            <input
+              value={consumerKey}
+              onChange={(e) => setConsumerKey(e.target.value)}
+              placeholder="Consumer Key"
+              type="password"
+              spellCheck={false}
+              className={inputClass}
+            />
+            <button
+              type="button"
+              onClick={handleSave}
+              disabled={busy !== null || !clientId.trim() || !consumerKey.trim()}
+              className="w-full rounded-lg bg-indigo-600 py-2 text-sm font-semibold text-white hover:bg-indigo-500 disabled:opacity-50 transition-colors"
+            >
+              {busy === "save" ? "Verifying…" : "Save & verify"}
+            </button>
+          </div>
+        )}
+      </Section>
+
+      {/* Step 2 — SnapTrade user */}
+      <Section step={2} title="SnapTrade user" done={isConnected} disabled={!hasCredentials}>
+        {showLinkForm ? (
+          <div className="space-y-3">
+            <p className="text-xs text-slate-500">
+              Personal SnapTrade keys (
+              <span className="font-mono text-slate-400">PERS-…</span>) come with a user that's
+              created for you. Copy your <span className="text-slate-300">User ID</span> and{" "}
+              <span className="text-slate-300">User Secret</span> from the{" "}
+              <button
+                type="button"
+                onClick={() => void openUrl(SNAPTRADE_DASHBOARD)}
+                className="text-indigo-400 underline hover:text-indigo-300"
+              >
+                SnapTrade dashboard
+              </button>
+              .
+            </p>
+            <div className="flex gap-2">
+              <input
+                value={userId}
+                onChange={(e) => setUserId(e.target.value)}
+                placeholder="User ID"
+                spellCheck={false}
+                className={inputClass}
+              />
+              <button
+                type="button"
+                onClick={handleLookupUser}
+                disabled={busy !== null}
+                title="Look up the User ID registered to your key"
+                className="shrink-0 rounded-lg border border-slate-600 px-3 text-xs font-medium text-slate-200 hover:bg-slate-700 disabled:opacity-50 transition-colors"
+              >
+                {busy === "lookup" ? "…" : "Find mine"}
               </button>
             </div>
-          ) : (
-            <div className="space-y-3">
-              <p className="text-xs text-slate-500">
-                Create a free developer account, then copy your Client ID and Consumer Key from
-                the{" "}
+            <input
+              value={userSecret}
+              onChange={(e) => setUserSecret(e.target.value)}
+              placeholder="User Secret"
+              type="password"
+              spellCheck={false}
+              className={inputClass}
+            />
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={handleLinkUser}
+                disabled={busy !== null || !userId.trim() || !userSecret.trim()}
+                className="flex-1 rounded-lg bg-indigo-600 py-2 text-sm font-semibold text-white hover:bg-indigo-500 disabled:opacity-50 transition-colors"
+              >
+                {busy === "link" ? "Linking…" : "Link user"}
+              </button>
+              {relinking && (
                 <button
                   type="button"
-                  onClick={() => void openUrl(SNAPTRADE_DASHBOARD)}
-                  className="text-indigo-400 underline hover:text-indigo-300"
+                  onClick={() => setRelinking(false)}
+                  className="rounded-lg border border-slate-600 px-4 py-2 text-sm font-medium text-slate-300 hover:bg-slate-700 transition-colors"
                 >
-                  SnapTrade dashboard
+                  Cancel
                 </button>
-                .
-              </p>
-              <input
-                value={clientId}
-                onChange={(e) => setClientId(e.target.value)}
-                placeholder="Client ID"
-                spellCheck={false}
-                className={inputClass}
-              />
-              <input
-                value={consumerKey}
-                onChange={(e) => setConsumerKey(e.target.value)}
-                placeholder="Consumer Key"
-                type="password"
-                spellCheck={false}
-                className={inputClass}
-              />
+              )}
+            </div>
+          </div>
+        ) : isConnected ? (
+          <div className="flex items-center justify-between gap-3 text-sm text-slate-300">
+            <span className="truncate">Linked to SnapTrade</span>
+            {isPersonal && (
               <button
                 type="button"
-                onClick={handleSave}
-                disabled={busy !== null || !clientId.trim() || !consumerKey.trim()}
-                className="w-full rounded-lg bg-indigo-600 py-2 text-sm font-semibold text-white hover:bg-indigo-500 disabled:opacity-50 transition-colors"
+                onClick={() => setRelinking(true)}
+                className="shrink-0 text-xs text-slate-400 underline hover:text-slate-200"
               >
-                {busy === "save" ? "Verifying…" : "Save & verify"}
+                Update secret
               </button>
-            </div>
-          )}
-        </Section>
+            )}
+          </div>
+        ) : (
+          <p className="text-xs text-slate-500">
+            A SnapTrade user is created automatically when you connect a brokerage below.
+          </p>
+        )}
+      </Section>
 
-        {/* Step 2 — Authorize a brokerage */}
-        <Section
-          step={2}
-          title="Authorize your brokerage"
-          done={isConnected}
-          disabled={!hasCredentials}
+      {/* Step 3 — Authorize a brokerage */}
+      <Section
+        step={3}
+        title="Authorize your brokerage"
+        done={(status?.account_count ?? 0) > 0}
+        disabled={isPersonal ? !isConnected : !hasCredentials}
+      >
+        <p className="mb-3 text-xs text-slate-500">
+          Opens SnapTrade's secure connection portal in your browser to link an institution.
+          {isPersonal
+            ? " Already linked a brokerage in the SnapTrade dashboard? You can skip straight to Sync."
+            : ""}
+        </p>
+        <button
+          type="button"
+          onClick={handleConnect}
+          disabled={busy !== null || (isPersonal ? !isConnected : !hasCredentials)}
+          className="w-full rounded-lg border border-slate-600 py-2 text-sm font-medium text-slate-200 hover:bg-slate-700 disabled:opacity-50 transition-colors"
         >
-          <p className="mb-3 text-xs text-slate-500">
-            Opens SnapTrade's secure connection portal in your browser to link an institution.
+          {busy === "connect"
+            ? "Opening…"
+            : isConnected
+              ? "Connect another brokerage"
+              : "Connect a brokerage"}
+        </button>
+      </Section>
+
+      {/* Step 4 — Sync */}
+      <Section step={4} title="Sync balances" disabled={!isConnected} last>
+        <div className="flex items-center justify-between gap-3">
+          <p className="text-xs text-slate-500">
+            {status?.account_count
+              ? `${status.account_count} account${status.account_count === 1 ? "" : "s"} connected`
+              : "No accounts synced yet"}
+            {status?.last_synced_at ? ` · last synced ${formatStamp(status.last_synced_at)}` : ""}
           </p>
           <button
             type="button"
-            onClick={handleConnect}
-            disabled={busy !== null || !hasCredentials}
-            className="w-full rounded-lg border border-slate-600 py-2 text-sm font-medium text-slate-200 hover:bg-slate-700 disabled:opacity-50 transition-colors"
+            onClick={handleSync}
+            disabled={busy !== null || !isConnected}
+            className="shrink-0 rounded-lg bg-indigo-600 px-4 py-2 text-sm font-semibold text-white hover:bg-indigo-500 disabled:opacity-50 transition-colors"
           >
-            {busy === "connect"
-              ? "Opening…"
-              : isConnected
-                ? "Connect another brokerage"
-                : "Connect a brokerage"}
+            {busy === "sync" ? "Syncing…" : "Sync now"}
           </button>
-        </Section>
+        </div>
 
-        {/* Step 3 — Sync */}
-        <Section
-          step={3}
-          title="Sync balances"
-          disabled={!isConnected}
-          last
+        {summary && (
+          <p className="mt-3 rounded-lg bg-emerald-900/20 border border-emerald-700/40 px-3 py-2 text-xs text-emerald-300">
+            Synced {summary.accounts_synced} account
+            {summary.accounts_synced === 1 ? "" : "s"} and {summary.holdings_synced} holding
+            {summary.holdings_synced === 1 ? "" : "s"}. Net worth is up to date.
+          </p>
+        )}
+      </Section>
+
+      <Feedback info={info} error={error} />
+
+      {isConnected && (
+        <div className="pt-4">
+          <button
+            type="button"
+            onClick={handleDisconnect}
+            disabled={busy !== null}
+            className="text-xs font-medium text-red-400 hover:text-red-300 disabled:opacity-50"
+          >
+            {busy === "disconnect" ? "Disconnecting…" : "Disconnect brokerage"}
+          </button>
+        </div>
+      )}
+    </>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// SimpleFIN — banks
+// ---------------------------------------------------------------------------
+
+function SimpleFinPanel({ onChanged }: { onChanged: () => void }) {
+  const [status, setStatus] = useState<SimpleFinStatus | null>(null);
+  const [setupToken, setSetupToken] = useState("");
+  const [reclaiming, setReclaiming] = useState(false);
+  const [busy, setBusy] = useState<null | "connect" | "sync" | "disconnect">(null);
+  const [error, setError] = useState<string | null>(null);
+  const [info, setInfo] = useState<string | null>(null);
+  const [summary, setSummary] = useState<SimpleFinSyncSummary | null>(null);
+
+  const refreshStatus = useCallback(async () => {
+    try {
+      setStatus(await simplefinGetStatus());
+    } catch (err) {
+      setError(messageOf(err));
+    }
+  }, []);
+
+  useEffect(() => {
+    void refreshStatus();
+  }, [refreshStatus]);
+
+  const handleConnect = async () => {
+    setBusy("connect");
+    setError(null);
+    setInfo(null);
+    try {
+      const next = await simplefinConnect(setupToken);
+      setStatus(next);
+      setSetupToken("");
+      setReclaiming(false);
+      setInfo("SimpleFIN connected. Click “Sync now” to pull balances.");
+    } catch (err) {
+      setError(messageOf(err));
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const handleSync = async () => {
+    setBusy("sync");
+    setError(null);
+    setInfo(null);
+    setSummary(null);
+    try {
+      const result = await simplefinSync();
+      setSummary(result);
+      await refreshStatus();
+      onChanged();
+    } catch (err) {
+      setError(messageOf(err));
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const handleDisconnect = async () => {
+    if (
+      !confirm(
+        "Disconnect SimpleFIN? Connected accounts will be hidden and synced balances stop updating. Your history is kept.",
+      )
+    ) {
+      return;
+    }
+    setBusy("disconnect");
+    setError(null);
+    setInfo(null);
+    try {
+      const next = await simplefinDisconnect();
+      setStatus(next);
+      setSummary(null);
+      onChanged();
+      setInfo("SimpleFIN disconnected.");
+    } catch (err) {
+      setError(messageOf(err));
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const isConnected = status?.is_connected ?? false;
+  const showTokenForm = !isConnected || reclaiming;
+
+  return (
+    <>
+      <p className="mb-4 text-xs text-slate-400">
+        Connect banks and other institutions through{" "}
+        <button
+          type="button"
+          onClick={() => void openUrl(SIMPLEFIN_BRIDGE)}
+          className="text-indigo-400 underline hover:text-indigo-300"
         >
-          <div className="flex items-center justify-between gap-3">
+          SimpleFIN
+        </button>
+        . Create a setup token in your bridge, then paste it below.
+      </p>
+
+      {/* Step 1 — Setup token */}
+      <Section step={1} title="SimpleFIN setup token" done={isConnected}>
+        {showTokenForm ? (
+          <div className="space-y-3">
             <p className="text-xs text-slate-500">
-              {status?.account_count
-                ? `${status.account_count} account${status.account_count === 1 ? "" : "s"} connected`
-                : "No accounts synced yet"}
-              {status?.last_synced_at ? ` · last synced ${formatStamp(status.last_synced_at)}` : ""}
+              In your{" "}
+              <button
+                type="button"
+                onClick={() => void openUrl(SIMPLEFIN_BRIDGE)}
+                className="text-indigo-400 underline hover:text-indigo-300"
+              >
+                SimpleFIN bridge
+              </button>
+              , connect your bank and click <span className="text-slate-300">Connect</span> to
+              generate a one-time setup token, then paste it here.
             </p>
+            <textarea
+              value={setupToken}
+              onChange={(e) => setSetupToken(e.target.value)}
+              placeholder="Paste your setup token (a long string of letters and numbers)"
+              spellCheck={false}
+              rows={3}
+              className={`${inputClass} resize-none font-mono text-xs`}
+            />
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={handleConnect}
+                disabled={busy !== null || !setupToken.trim()}
+                className="flex-1 rounded-lg bg-indigo-600 py-2 text-sm font-semibold text-white hover:bg-indigo-500 disabled:opacity-50 transition-colors"
+              >
+                {busy === "connect" ? "Connecting…" : "Connect"}
+              </button>
+              {reclaiming && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setReclaiming(false);
+                    setSetupToken("");
+                  }}
+                  className="rounded-lg border border-slate-600 px-4 py-2 text-sm font-medium text-slate-300 hover:bg-slate-700 transition-colors"
+                >
+                  Cancel
+                </button>
+              )}
+            </div>
+          </div>
+        ) : (
+          <div className="flex items-center justify-between gap-3 text-sm text-slate-300">
+            <span className="truncate">Connected to SimpleFIN</span>
             <button
               type="button"
-              onClick={handleSync}
-              disabled={busy !== null || !isConnected}
-              className="shrink-0 rounded-lg bg-indigo-600 px-4 py-2 text-sm font-semibold text-white hover:bg-indigo-500 disabled:opacity-50 transition-colors"
+              onClick={() => setReclaiming(true)}
+              className="shrink-0 text-xs text-slate-400 underline hover:text-slate-200"
             >
-              {busy === "sync" ? "Syncing…" : "Sync now"}
+              Use a new token
             </button>
           </div>
+        )}
+      </Section>
 
-          {summary && (
-            <p className="mt-3 rounded-lg bg-emerald-900/20 border border-emerald-700/40 px-3 py-2 text-xs text-emerald-300">
+      {/* Step 2 — Sync */}
+      <Section step={2} title="Sync balances" disabled={!isConnected} last>
+        <div className="flex items-center justify-between gap-3">
+          <p className="text-xs text-slate-500">
+            {status?.account_count
+              ? `${status.account_count} account${status.account_count === 1 ? "" : "s"} connected`
+              : "No accounts synced yet"}
+            {status?.last_synced_at ? ` · last synced ${formatStamp(status.last_synced_at)}` : ""}
+          </p>
+          <button
+            type="button"
+            onClick={handleSync}
+            disabled={busy !== null || !isConnected}
+            className="shrink-0 rounded-lg bg-indigo-600 px-4 py-2 text-sm font-semibold text-white hover:bg-indigo-500 disabled:opacity-50 transition-colors"
+          >
+            {busy === "sync" ? "Syncing…" : "Sync now"}
+          </button>
+        </div>
+
+        {summary && (
+          <div className="mt-3 space-y-2">
+            <p className="rounded-lg bg-emerald-900/20 border border-emerald-700/40 px-3 py-2 text-xs text-emerald-300">
               Synced {summary.accounts_synced} account
               {summary.accounts_synced === 1 ? "" : "s"} and {summary.holdings_synced} holding
               {summary.holdings_synced === 1 ? "" : "s"}. Net worth is up to date.
             </p>
-          )}
-        </Section>
-
-        {info && (
-          <p className="mt-4 rounded-lg bg-slate-800 border border-slate-700 px-3 py-2 text-xs text-slate-300">
-            {info}
-          </p>
+            {summary.warnings.length > 0 && (
+              <ul className="rounded-lg bg-amber-900/20 border border-amber-700/40 px-3 py-2 text-xs text-amber-300 space-y-1">
+                {summary.warnings.map((w, i) => (
+                  <li key={i}>• {w}</li>
+                ))}
+              </ul>
+            )}
+          </div>
         )}
-        {error && (
-          <p className="mt-4 rounded-lg bg-red-900/20 px-3 py-2 text-sm text-red-400">{error}</p>
-        )}
+      </Section>
 
-        <div className="flex items-center justify-between pt-5">
-          {isConnected ? (
-            <button
-              type="button"
-              onClick={handleDisconnect}
-              disabled={busy !== null}
-              className="text-xs font-medium text-red-400 hover:text-red-300 disabled:opacity-50"
-            >
-              {busy === "disconnect" ? "Disconnecting…" : "Disconnect brokerage"}
-            </button>
-          ) : (
-            <span />
-          )}
+      <Feedback info={info} error={error} />
+
+      {isConnected && (
+        <div className="pt-4">
           <button
             type="button"
-            onClick={onClose}
-            className="rounded-lg border border-slate-600 px-4 py-2 text-sm font-medium text-slate-300 hover:bg-slate-700 transition-colors"
+            onClick={handleDisconnect}
+            disabled={busy !== null}
+            className="text-xs font-medium text-red-400 hover:text-red-300 disabled:opacity-50"
           >
-            Done
+            {busy === "disconnect" ? "Disconnecting…" : "Disconnect SimpleFIN"}
           </button>
         </div>
-      </div>
-    </div>
+      )}
+    </>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Shared UI
+// ---------------------------------------------------------------------------
+
+function TabButton({
+  active,
+  onClick,
+  label,
+  hint,
+}: {
+  active: boolean;
+  onClick: () => void;
+  label: string;
+  hint: string;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className={`rounded-md px-3 py-2 text-left transition-colors ${
+        active ? "bg-indigo-600 text-white" : "text-slate-300 hover:bg-slate-700/60"
+      }`}
+    >
+      <span className="block text-sm font-semibold">{label}</span>
+      <span className={`block text-[11px] ${active ? "text-indigo-100" : "text-slate-500"}`}>
+        {hint}
+      </span>
+    </button>
+  );
+}
+
+function Feedback({ info, error }: { info: string | null; error: string | null }) {
+  return (
+    <>
+      {info && (
+        <p className="mt-4 rounded-lg bg-slate-800 border border-slate-700 px-3 py-2 text-xs text-slate-300">
+          {info}
+        </p>
+      )}
+      {error && (
+        <p className="mt-4 rounded-lg bg-red-900/20 px-3 py-2 text-sm text-red-400">{error}</p>
+      )}
+    </>
   );
 }
 
@@ -324,9 +749,7 @@ function Section({
       <div className="mb-2 flex items-center gap-2">
         <span
           className={`flex h-5 w-5 items-center justify-center rounded-full text-[11px] font-bold ${
-            done
-              ? "bg-emerald-600 text-white"
-              : "border border-slate-600 text-slate-400"
+            done ? "bg-emerald-600 text-white" : "border border-slate-600 text-slate-400"
           }`}
         >
           {done ? "✓" : step}

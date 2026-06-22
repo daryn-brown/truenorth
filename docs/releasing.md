@@ -89,12 +89,45 @@ options are a code-signing certificate thumbprint (`certificateThumbprint` + `di
 `timestampUrl`) with the cert available on the runner, or [Azure Trusted Signing](https://v2.tauri.app/distribute/sign/windows/).
 See the Tauri Windows signing guide and add the relevant secrets/config when you obtain a cert.
 
+## Auto-update (in-app updater)
+
+The app ships with the Tauri **updater** enabled. On launch it checks the latest **published**
+GitHub release for a newer signed build and prompts the user to download + install it
+(`src/components/UpdatePrompt.tsx`). The update manifest is read from
+`https://github.com/daryn-brown/truenorth/releases/latest/download/latest.json`, which
+`tauri-action` generates and uploads when `bundle.createUpdaterArtifacts` is `true`.
+
+**One-time setup — add the updater signing key as a secret:**
+
+A signing keypair was generated with `npm run tauri signer generate`. The **public** key is
+committed in `src-tauri/tauri.conf.json` (`plugins.updater.pubkey`); the **private** key must be
+added to CI so releases can be signed:
+
+| Secret | Description |
+| --- | --- |
+| `TAURI_SIGNING_PRIVATE_KEY` | Contents of the generated private key file (keep it secret — never commit it) |
+| `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` | The key's password, or leave **empty** if it was generated without one |
+
+To generate a fresh keypair (e.g. to rotate it):
+
+```bash
+npm run tauri signer generate -- -w ~/.tauri/truenorth-updater.key
+# Paste the printed public key into src-tauri/tauri.conf.json -> plugins.updater.pubkey,
+# and add the private key file contents to the TAURI_SIGNING_PRIVATE_KEY secret.
+```
+
+> Losing the private key means you can't sign updates the installed app will accept — back it up.
+> The public key in `tauri.conf.json` and the private key in CI must always be a matching pair.
+
+**Important — publish, don't leave as draft.** The updater only sees **published** releases, and
+the new release's `version` must be **higher** than what's installed. So the flow is: bump the
+version → let CI build the draft → review → **Publish release**. Installed apps then pick it up on
+their next launch.
+
 ## Notes
 
 - **Auto-publish instead of draft:** add a final job that flips the release with
-  `github.rest.repos.updateRelease({ ..., draft: false })`, depending on `build-tauri`.
-- **Auto-updater:** not enabled. To add it, configure the `updater` plugin and provide
-  `TAURI_SIGNING_PRIVATE_KEY` (+ `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`) secrets so update
-  artifacts are signed.
+  `github.rest.repos.updateRelease({ ..., draft: false })`, depending on `build-tauri`. (Until then,
+  remember the updater needs the release **published** — see Auto-update above.)
 - **Linux:** intentionally out of scope (macOS + Windows only). Add an `ubuntu-22.04` matrix
   entry with the usual `libwebkit2gtk` system deps if you want Linux bundles later.

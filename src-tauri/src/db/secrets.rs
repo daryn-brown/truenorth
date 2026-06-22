@@ -16,6 +16,9 @@ use super::crypto::KEY_SERVICE;
 pub const SNAPTRADE_CONSUMER_KEY: &str = "snaptrade-consumer-key";
 /// Keychain entry name for the SnapTrade per-user secret.
 pub const SNAPTRADE_USER_SECRET: &str = "snaptrade-user-secret";
+/// Keychain entry name for the SimpleFIN access URL. The access URL embeds HTTP Basic
+/// credentials, so it's treated as a secret and stored alongside the SnapTrade secrets.
+pub const SIMPLEFIN_ACCESS_URL: &str = "simplefin-access-url";
 
 fn entry(account: &str) -> Result<Entry, KeyringError> {
     Entry::new(KEY_SERVICE, account)
