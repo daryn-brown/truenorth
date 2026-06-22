@@ -91,6 +91,17 @@ export default function Dashboard() {
     }
   };
 
+  const handleConnectorChanged = useCallback(async () => {
+    // A sync may have added accounts in new currencies (e.g. JMD) — refresh FX so they
+    // convert into the totals. A rate-fetch failure shouldn't hide the freshly synced balances.
+    try {
+      await refreshFxRates();
+    } catch (err) {
+      console.error("FX refresh after connector sync failed:", err);
+    }
+    await load();
+  }, [load]);
+
   // Net-worth-over-time series in the selected home currency.
   const chartData = history.map((point) => ({
     date: point.date,
@@ -203,7 +214,7 @@ export default function Dashboard() {
       <ConnectionsModal
         isOpen={connectOpen}
         onClose={() => setConnectOpen(false)}
-        onChanged={load}
+        onChanged={handleConnectorChanged}
       />
     </div>
   );
