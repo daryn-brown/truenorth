@@ -30,7 +30,13 @@ type ModalState =
   | { open: true; mode: "update_balance"; account: Account }
   | { open: true; mode: "edit_currency"; account: Account };
 
-export default function Dashboard() {
+export default function Dashboard({
+  onCheckForUpdates,
+  checkingUpdate = false,
+}: {
+  onCheckForUpdates?: () => void;
+  checkingUpdate?: boolean;
+} = {}) {
   const [accounts, setAccounts] = useState<Account[]>([]);
   const [netWorth, setNetWorth] = useState<NetWorth | null>(null);
   const [history, setHistory] = useState<NetWorthHistoryPoint[]>([]);
@@ -154,6 +160,16 @@ export default function Dashboard() {
           >
             {refreshingFx ? "Refreshing…" : "🔄 Refresh FX"}
           </button>
+          {onCheckForUpdates && (
+            <button
+              onClick={onCheckForUpdates}
+              disabled={checkingUpdate}
+              title="Check for a new version of TrueNorth"
+              className="flex items-center gap-1.5 rounded-lg border border-slate-700 px-3 py-1.5 text-xs text-slate-400 hover:bg-slate-800 disabled:opacity-50 transition-colors"
+            >
+              {checkingUpdate ? "Checking…" : "⬇️ Updates"}
+            </button>
+          )}
         </div>
       </header>
 
