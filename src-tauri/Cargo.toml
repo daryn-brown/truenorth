@@ -1,6 +1,6 @@
 [package]
 name = "truenorth"
-version = "1.0.0"
+version = "1.0.1"
 description = "Local-first, privacy-first desktop app for cross-border (US + Canada) personal finances."
 authors = ["Daryn Brown"]
 edition = "2021"
