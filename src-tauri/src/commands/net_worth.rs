@@ -4,7 +4,7 @@ use rusqlite::Connection;
 use tauri::State;
 
 use crate::db::AppDb;
-use crate::fx::load_latest_rates;
+use crate::fx::{load_latest_rates, load_usd_rates};
 
 #[derive(Debug, Serialize)]
 pub struct AccountNetWorth {
@@ -43,6 +43,7 @@ pub fn get_net_worth(db: State<AppDb>) -> Result<NetWorthResponse, String> {
         Some((u, c, d)) => (Some(u), Some(c), Some(d)),
         None => (None, None, None),
     };
+    let usd_rates = load_usd_rates(&conn).map_err(|e| e.to_string())?;
 
     let mut stmt = conn
         .prepare(
@@ -90,7 +91,7 @@ pub fn get_net_worth(db: State<AppDb>) -> Result<NetWorthResponse, String> {
     {
         let balance = balance_opt.unwrap_or(0.0);
 
-        let (balance_usd, balance_cad) = convert_balance(balance, &currency, usd_cad, cad_usd);
+        let (balance_usd, balance_cad) = convert_balance(balance, &currency, &usd_rates);
         total_usd += balance_usd;
         total_cad += balance_cad;
 
@@ -118,24 +119,28 @@ pub fn get_net_worth(db: State<AppDb>) -> Result<NetWorthResponse, String> {
     })
 }
 
-/// Convert a balance in `currency` to both USD and CAD.
+/// Convert a balance in `currency` to both USD and CAD using a USD-pivot rate map
+/// (`currency -> units per 1 USD`, with `USD = 1.0`).
+///
+/// If we have no rate for `currency`, it contributes 0 (we can't place it on the books yet —
+/// refreshing FX will pick the currency up). CAD falls back to 0 only when no USD→CAD rate
+/// is stored.
 fn convert_balance(
     balance: f64,
     currency: &str,
-    usd_cad: Option<f64>,
-    cad_usd: Option<f64>,
+    usd_rates: &HashMap<String, f64>,
 ) -> (f64, f64) {
-    match currency {
-        "USD" => {
-            let cad = usd_cad.map(|r| balance * r).unwrap_or(0.0);
-            (balance, cad)
+    let usd = if currency == "USD" {
+        balance
+    } else {
+        match usd_rates.get(currency) {
+            Some(rate) if *rate != 0.0 => balance / rate,
+            _ => return (0.0, 0.0),
         }
-        "CAD" => {
-            let usd = cad_usd.map(|r| balance * r).unwrap_or(0.0);
-            (usd, balance)
-        }
-        _ => (0.0, 0.0),
-    }
+    };
+
+    let cad = usd_rates.get("CAD").map(|r| usd * r).unwrap_or(0.0);
+    (usd, cad)
 }
 
 // ---------------------------------------------------------------------------
@@ -163,10 +168,7 @@ pub fn get_net_worth_history(db: State<AppDb>) -> Result<Vec<NetWorthHistoryPoin
 }
 
 fn compute_net_worth_history(conn: &Connection) -> rusqlite::Result<Vec<NetWorthHistoryPoint>> {
-    let (usd_cad, cad_usd) = match load_latest_rates(conn)? {
-        Some((u, c, _)) => (Some(u), Some(c)),
-        None => (None, None),
-    };
+    let usd_rates = load_usd_rates(conn)?;
 
     // account_id -> currency (active accounts only)
     let mut currency_of: HashMap<i64, String> = HashMap::new();
@@ -216,7 +218,7 @@ fn compute_net_worth_history(conn: &Connection) -> rusqlite::Result<Vec<NetWorth
                 .get(account_id)
                 .map(|s| s.as_str())
                 .unwrap_or("USD");
-            let (usd, cad) = convert_balance(*balance, currency, usd_cad, cad_usd);
+            let (usd, cad) = convert_balance(*balance, currency, &usd_rates);
             total_usd += usd;
             total_cad += cad;
         }
@@ -302,5 +304,57 @@ mod tests {
         let conn = setup();
         add_account(&conn, "Empty", "CAD");
         assert!(compute_net_worth_history(&conn).unwrap().is_empty());
+    }
+
+    #[test]
+    fn convert_balance_pivots_any_currency_through_usd() {
+        // 1 USD = 1.30 CAD = 155 JMD.
+        let mut rates = HashMap::new();
+        rates.insert("USD".to_string(), 1.0);
+        rates.insert("CAD".to_string(), 1.30);
+        rates.insert("JMD".to_string(), 155.0);
+
+        // USD passes through; CAD column applies the USD→CAD rate.
+        assert_eq!(convert_balance(100.0, "USD", &rates), (100.0, 130.0));
+
+        // CAD round-trips exactly back to itself.
+        let (usd, cad) = convert_balance(130.0, "CAD", &rates);
+        assert!((usd - 100.0).abs() < 1e-9);
+        assert!((cad - 130.0).abs() < 1e-9);
+
+        // JMD (Scotiabank Jamaica): 15_500 JMD = 100 USD = 130 CAD.
+        let (usd, cad) = convert_balance(15_500.0, "JMD", &rates);
+        assert!((usd - 100.0).abs() < 1e-9);
+        assert!((cad - 130.0).abs() < 1e-9);
+
+        // A liability (e.g. a credit card SimpleFIN reports as negative) subtracts.
+        let (usd, _) = convert_balance(-15_500.0, "JMD", &rates);
+        assert!((usd + 100.0).abs() < 1e-9);
+
+        // A currency with no stored rate can't be placed yet → contributes 0.
+        assert_eq!(convert_balance(500.0, "GBP", &rates), (0.0, 0.0));
+    }
+
+    #[test]
+    fn history_totals_include_a_third_currency() {
+        let conn = setup();
+        // USD→CAD = 1.30, USD→JMD = 155.
+        for (to, rate) in [("CAD", 1.30_f64), ("JMD", 155.0)] {
+            conn.execute(
+                "INSERT INTO fx_rates (from_currency, to_currency, rate, rate_date) \
+                 VALUES ('USD', ?1, ?2, '2025-01-01')",
+                rusqlite::params![to, rate],
+            )
+            .unwrap();
+        }
+
+        let jmd = add_account(&conn, "Scotiabank Jamaica", "JMD");
+        add_snapshot(&conn, jmd, "2025-01-01", 15_500.0, "JMD");
+
+        let series = compute_net_worth_history(&conn).unwrap();
+        assert_eq!(series.len(), 1);
+        // 15_500 JMD = 100 USD = 130 CAD.
+        assert!((series[0].total_usd - 100.0).abs() < 1e-9);
+        assert!((series[0].total_cad - 130.0).abs() < 1e-9);
     }
 }
