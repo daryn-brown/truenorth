@@ -31,6 +31,7 @@ pub fn run() {
             commands::accounts::add_account,
             commands::accounts::delete_account,
             commands::accounts::add_balance_snapshot,
+            commands::accounts::update_account_currency,
             commands::net_worth::get_net_worth,
             commands::net_worth::get_net_worth_history,
             commands::import::import_data,
