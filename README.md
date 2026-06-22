@@ -1,4 +1,4 @@
-# Finance Second Brain
+# TrueNorth
 
 A **local-first, privacy-first** desktop app for managing **cross-border (US + Canada)**
 personal finances: connect bank + brokerage accounts, review transactions, track
@@ -11,7 +11,12 @@ questions about your own data.
 ✅ **Phase 1 shipped — manual multi-currency MVP.** A Tauri + React/SQLite desktop app with an
 **encrypted-at-rest** database (SQLCipher; key in the OS keychain), **multi-currency (USD + CAD)
 net worth**, a **net-worth-over-time** chart, and **JSON/CSV import** to seed accounts and balance
-history. Connectors (SnapTrade/SimpleFIN) and the AI advisor are next — see the roadmap below.
+history.
+
+🔄 **Phase 2 in progress — SnapTrade brokerage sync.** Connect Robinhood, Questrade, Wealthsimple
+and more through **SnapTrade** (free for a single user) to pull **real, read-only balances +
+holdings** straight into your net worth. SimpleFIN bank sync and the AI advisor are next — see the
+roadmap below. Setup lives in [`docs/snaptrade.md`](docs/snaptrade.md).
 
 ## Scope (now)
 **Financial transparency + easy decision-making.** Everything is **read-only**.
@@ -28,10 +33,11 @@ Tauri v2 (Rust core) · React + TypeScript + Tailwind · SQLite (rusqlite, SQLCi
 secrets in the OS keychain (`keyring`). Mirrors the TrendWave stack.
 
 ## Architecture
-Finance Second Brain is a single **Tauri v2** desktop app: a React/TypeScript **WebView**
+Finance Second Brain — **TrueNorth** — is a single **Tauri v2** desktop app: a React/TypeScript **WebView**
 frontend talks to a **Rust core** over Tauri's IPC bridge. All data stays on the device in an
 **encrypted-at-rest SQLite** database (SQLCipher), with the 256-bit key held in the OS keychain.
-The only network call is an on-demand **USD↔CAD** exchange-rate lookup.
+Network calls are limited to an on-demand **USD↔CAD** exchange-rate lookup and **read-only**
+brokerage sync via the **SnapTrade** API.
 
 ```mermaid
 flowchart TB
@@ -40,7 +46,7 @@ flowchart TB
     subgraph FE["🪟 Frontend · WebView — React + TypeScript + Tailwind (Vite)"]
         direction TB
         pages["Dashboard page"]
-        comps["Components<br/>NetWorthCard · NetWorthChart · AccountList<br/>AccountModal · ImportModal"]
+        comps["Components<br/>NetWorthCard · NetWorthChart · AccountList<br/>AccountModal · ImportModal · ConnectionsModal"]
         api["useFinanceApi.ts<br/>typed invoke bindings · finance.ts"]
         pages --> comps --> api
     end
@@ -55,13 +61,14 @@ flowchart TB
             c_nw["net_worth<br/>get_net_worth<br/>get_net_worth_history"]
             c_imp["import<br/>import_data"]
             c_fx["fx<br/>get_fx_rates<br/>refresh_fx_rates"]
+            c_snap["snaptrade<br/>status · save_credentials<br/>login · sync · disconnect"]
         end
 
         subgraph SVC["Domain logic · services"]
             direction LR
-            d_db["db<br/>schema · crypto"]
+            d_db["db<br/>schema · crypto · secrets"]
             d_fx["fx<br/>Yahoo client · rate store"]
-            d_conn["connector<br/>AccountConnector trait<br/>ConnectorRegistry"]
+            d_conn["connector<br/>AccountConnector trait · registry<br/>snaptrade: signing + client"]
         end
 
         state[["Managed state<br/>AppDb = Mutex‹Connection›<br/>ConnectorRegistry"]]
@@ -75,19 +82,20 @@ flowchart TB
     kc{{"🔐 OS Keychain · keyring<br/>macOS Keychain · Windows Credential Manager<br/>256-bit SQLCipher key"}}
     db[("🗄️ Encrypted SQLite · SQLCipher<br/>finance-second-brain.db<br/>accounts · balance_snapshots · fx_rates<br/>holdings · transactions · goals · app_settings")]
     yahoo(["🌐 Yahoo Finance<br/>USD/CAD FX quote"])
+    snaptrade(["🌐 SnapTrade API<br/>read-only brokerage sync"])
 
-    subgraph P2["Phase 2 connectors · planned"]
+    subgraph P3["Phase 3 connectors · planned"]
         direction LR
-        snap["SnapTrade<br/>brokerages"]
         sfin["SimpleFIN Bridge<br/>banks"]
     end
 
     user --> pages
     api ==>|"Tauri IPC · invoke() · serde JSON"| builder
     state ==>|"rusqlite · encrypted I/O"| db
-    d_db -->|"unlock / store key"| kc
+    d_db -->|"unlock / store key · secrets"| kc
     d_fx -->|"HTTPS · reqwest"| yahoo
-    d_conn -.->|"trait impls"| P2
+    d_conn -->|"HTTPS · reqwest · signed"| snaptrade
+    d_conn -.->|"trait impls"| P3
 
     classDef feNode fill:#dbeafe,stroke:#2563eb,color:#1e3a8a;
     classDef coreNode fill:#ffedd5,stroke:#ea580c,color:#7c2d12;
@@ -98,26 +106,29 @@ flowchart TB
     classDef planned fill:#f1f5f9,stroke:#94a3b8,color:#475569;
 
     class pages,comps,api feNode;
-    class builder,c_acc,c_nw,c_imp,c_fx,d_db,d_fx,d_conn coreNode;
+    class builder,c_acc,c_nw,c_imp,c_fx,c_snap,d_db,d_fx,d_conn coreNode;
     class state stateNode;
     class db store;
     class kc os;
-    class yahoo ext;
-    class snap,sfin planned;
+    class yahoo,snaptrade ext;
+    class sfin planned;
 ```
 
 **Layers**
 - **Frontend (WebView)** — React + TypeScript + Tailwind (Vite). The `Dashboard` page and its
-  components (`NetWorthCard`, `NetWorthChart`, `AccountList`, `AccountModal`, `ImportModal`) call
-  typed `invoke()` bindings in `useFinanceApi.ts`; no business logic lives here.
+  components (`NetWorthCard`, `NetWorthChart`, `AccountList`, `AccountModal`, `ImportModal`,
+  `ConnectionsModal`) call typed `invoke()` bindings in `useFinanceApi.ts`; no business logic lives here.
 - **Rust core (`src-tauri`)** — `lib.rs` builds the Tauri app, registers managed state, and routes
-  IPC to `#[tauri::command]` handlers (`accounts`, `net_worth`, `import`, `fx`). Domain logic sits in
-  services: `db` (schema + `crypto` key management), `fx` (Yahoo client + rate store), and a
-  `connector` trait/registry that Phase 2 brokerage/bank sync plugs into.
+  IPC to `#[tauri::command]` handlers (`accounts`, `net_worth`, `import`, `fx`, `snaptrade`). Domain
+  logic sits in services: `db` (schema + `crypto` key management + keychain `secrets`), `fx` (Yahoo
+  client + rate store), and a `connector` trait/registry whose `snaptrade` module (request signing +
+  API client) powers read-only brokerage sync.
 - **State** — a single `AppDb(Mutex<Connection>)` and the `ConnectorRegistry`, shared across commands.
 - **Persistence** — SQLite encrypted with SQLCipher (`finance-second-brain.db`); the key is generated
-  once and stored in the macOS Keychain / Windows Credential Manager via `keyring`.
-- **External** — one read-only HTTPS call to Yahoo Finance for the USD↔CAD rate; everything else is local.
+  once and stored in the macOS Keychain / Windows Credential Manager via `keyring`. SnapTrade secrets
+  (consumer key + user secret) live in the same keychain — never on disk.
+- **External** — read-only HTTPS calls to Yahoo Finance (USD↔CAD rate) and the SnapTrade API
+  (signed, read-only brokerage sync); everything else is local.
 
 ### Request flow — "Refresh FX"
 
@@ -164,12 +175,13 @@ the Apple/Windows signing secrets to sign automatically. See [`docs/releasing.md
 - [`docs/plan.md`](docs/plan.md) — phased build plan.
 - [`docs/kickoff-prompt.md`](docs/kickoff-prompt.md) — ready-to-paste prompt for the first build session.
 - [`docs/import.md`](docs/import.md) — importing accounts + balance history (JSON/CSV) and how net-worth history is computed.
+- [`docs/snaptrade.md`](docs/snaptrade.md) — connecting brokerages via SnapTrade (read-only) and how sync feeds net worth.
 - [`docs/releasing.md`](docs/releasing.md) — release pipeline, build targets, and code-signing setup.
 
 ## Phased roadmap
 0. ✅ Scaffold (Tauri/React/SQLite shell, encryption, keychain)
 1. ✅ Manual multi-currency net-worth MVP (+ JSON/CSV import)
-2. SnapTrade brokerage sync
+2. 🔄 SnapTrade brokerage sync (read-only balances + holdings)
 3. SimpleFIN bank sync
 4. Transactions & goals
 5. Model-agnostic AI "second brain"

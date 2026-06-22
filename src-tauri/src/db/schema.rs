@@ -1,6 +1,6 @@
 use rusqlite::{params, Connection, Result as SqlResult};
 
-/// The full DDL for Finance Second Brain's Phase 1 schema.
+/// The full DDL for TrueNorth's Phase 1 schema.
 ///
 /// Design notes:
 /// - Every monetary value carries its currency as a sibling column.

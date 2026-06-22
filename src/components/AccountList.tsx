@@ -96,6 +96,11 @@ export default function AccountList({
                       {account.institution} ·{" "}
                       {ACCOUNT_TYPE_LABELS[account.account_type] ??
                         account.account_type}
+                      {account.connector_kind === "snaptrade" && (
+                        <span className="ml-1.5 inline-flex items-center rounded bg-indigo-900/40 border border-indigo-700/50 px-1.5 py-0.5 text-[10px] font-medium text-indigo-300">
+                          via SnapTrade
+                        </span>
+                      )}
                     </p>
                   </div>
                 </div>

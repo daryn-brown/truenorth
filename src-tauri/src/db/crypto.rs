@@ -14,8 +14,11 @@ use keyring::Entry;
 use rand::RngCore;
 use rusqlite::Connection;
 
-/// Keychain service identifier — matches the app's bundle identifier.
-const KEY_SERVICE: &str = "com.darynbrown.finance-second-brain";
+/// Keychain service identifier. Deliberately kept as the original bundle identifier
+/// (the app was renamed to "TrueNorth" but the identifier is unchanged) so the existing
+/// encryption key — and therefore the encrypted database — remains readable after the rebrand.
+/// Shared with [`crate::db::secrets`] so connector secrets land in the same keychain service.
+pub(crate) const KEY_SERVICE: &str = "com.darynbrown.finance-second-brain";
 /// Keychain entry name for the database encryption key.
 const KEY_ACCOUNT: &str = "db-encryption-key";
 /// The 16-byte magic header that begins every plaintext SQLite database file.
@@ -137,7 +140,10 @@ pub fn quarantine_unreadable_db(db_path: &Path) -> Result<PathBuf, CryptoError> 
     for ext in ["db-wal", "db-shm"] {
         let side = db_path.with_extension(ext);
         if side.exists() {
-            let _ = std::fs::rename(&side, db_path.with_extension(format!("{ext}.unreadable-{ts}")));
+            let _ = std::fs::rename(
+                &side,
+                db_path.with_extension(format!("{ext}.unreadable-{ts}")),
+            );
         }
     }
     Ok(backup)

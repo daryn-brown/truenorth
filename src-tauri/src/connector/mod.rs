@@ -5,6 +5,8 @@ use thiserror::Error;
 mod manual;
 pub use manual::ManualConnector;
 
+pub mod snaptrade;
+
 // ---------------------------------------------------------------------------
 // Domain types returned by connectors
 // ---------------------------------------------------------------------------

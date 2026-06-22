@@ -1,12 +1,12 @@
 [package]
-name = "finance-second-brain"
+name = "truenorth"
 version = "0.1.1"
 description = "Local-first, privacy-first desktop app for cross-border (US + Canada) personal finances."
 authors = ["Daryn Brown"]
 edition = "2021"
 
 [lib]
-name = "finance_second_brain_lib"
+name = "truenorth_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]
@@ -33,6 +33,11 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "rus
 
 # Error handling
 thiserror = "2"
+
+# SnapTrade request signing: HMAC-SHA256 over canonical JSON, base64-encoded.
+hmac = "0.12"
+sha2 = "0.10"
+base64 = "0.22"
 
 # Object-safe async trait impls
 async-trait = "0.1"

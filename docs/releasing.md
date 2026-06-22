@@ -62,7 +62,7 @@ When the runs finish, open the draft release, verify the attached installers, an
 Builds currently ship **unsigned**. They install and run, but users will see OS warnings:
 
 - **macOS** — Gatekeeper blocks the first launch. Right‑click the app → **Open**, or run
-  `xattr -dr com.apple.quarantine "/Applications/Finance Second Brain.app"`.
+  `xattr -dr com.apple.quarantine "/Applications/TrueNorth.app"`.
 - **Windows** — SmartScreen shows "Windows protected your PC". Click **More info → Run anyway**.
 
 The pipeline is wired to sign automatically once you add the secrets — no workflow changes needed.
