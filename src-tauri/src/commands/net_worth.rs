@@ -1,5 +1,5 @@
 use serde::Serialize;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use rusqlite::Connection;
 use tauri::State;
 
@@ -294,7 +294,9 @@ pub struct NetWorthDelta {
     pub total: MoneyPair,
     pub liquid: MoneyPair,
     pub invested: MoneyPair,
-    /// Change versus `previous_date`. Zero when there is no prior date to compare against.
+    /// Change versus `previous_date`, measured like-for-like over only the accounts that already
+    /// existed on `previous_date`. Accounts added afterward don't count as a gain. Zero when there
+    /// is no prior date to compare against.
     pub total_delta: MoneyPair,
     pub liquid_delta: MoneyPair,
     pub invested_delta: MoneyPair,
@@ -318,33 +320,45 @@ pub fn get_net_worth_delta(db: State<AppDb>) -> Result<NetWorthDelta, String> {
 }
 
 fn compute_net_worth_delta(conn: &Connection) -> rusqlite::Result<NetWorthDelta> {
-    let series = compute_classed_series(conn)?;
+    let usd_rates = load_usd_rates(conn)?;
+    let meta = load_account_class_meta(conn)?;
+    let series = compute_carried_account_series(conn)?;
 
-    let (current_date, current) = match series.last() {
-        Some((date, bd)) => (Some(date.clone()), *bd),
-        None => (None, ClassBreakdown::default()),
+    let (current_date, current_balances) = match series.last() {
+        Some((date, balances)) => (Some(date.clone()), balances.clone()),
+        None => (None, HashMap::new()),
     };
 
-    let (previous_date, previous, has_previous) = if series.len() >= 2 {
-        let (date, bd) = &series[series.len() - 2];
-        (Some(date.clone()), *bd, true)
-    } else {
-        (None, ClassBreakdown::default(), false)
-    };
+    // Current totals reflect every account's latest balance.
+    let current = breakdown(&current_balances, &meta, &usd_rates, None);
 
-    let (total_delta, liquid_delta, invested_delta) = if has_previous {
-        (
-            current.total.minus(previous.total),
-            current.liquid.minus(previous.liquid),
-            current.invested.minus(previous.invested),
-        )
-    } else {
-        (
-            MoneyPair::default(),
-            MoneyPair::default(),
-            MoneyPair::default(),
-        )
-    };
+    let (previous_date, total_delta, liquid_delta, invested_delta, has_previous) =
+        if series.len() >= 2 {
+            let (previous_date, previous_balances) = &series[series.len() - 2];
+
+            // Compare like-for-like: only accounts that already had a snapshot on or before the
+            // previous date. An account whose first snapshot lands on the current date is "coming
+            // online" (0 -> full balance), which would otherwise masquerade as a huge gain.
+            let cohort: HashSet<i64> = previous_balances.keys().copied().collect();
+            let previous = breakdown(previous_balances, &meta, &usd_rates, None);
+            let current_cohort = breakdown(&current_balances, &meta, &usd_rates, Some(&cohort));
+
+            (
+                Some(previous_date.clone()),
+                current_cohort.total.minus(previous.total),
+                current_cohort.liquid.minus(previous.liquid),
+                current_cohort.invested.minus(previous.invested),
+                true,
+            )
+        } else {
+            (
+                None,
+                MoneyPair::default(),
+                MoneyPair::default(),
+                MoneyPair::default(),
+                false,
+            )
+        };
 
     Ok(NetWorthDelta {
         current_date,
@@ -359,30 +373,63 @@ fn compute_net_worth_delta(conn: &Connection) -> rusqlite::Result<NetWorthDelta>
     })
 }
 
-/// Walk the snapshot dates (carrying each account's latest balance forward, exactly like the
-/// history series) and, at every date, sum balances into total/liquid/invested buckets in both
-/// USD and CAD.
-fn compute_classed_series(conn: &Connection) -> rusqlite::Result<Vec<(String, ClassBreakdown)>> {
-    let usd_rates = load_usd_rates(conn)?;
-
-    // account_id -> (currency, class) for active accounts.
+/// active account_id -> (currency, class).
+fn load_account_class_meta(
+    conn: &Connection,
+) -> rusqlite::Result<HashMap<i64, (String, AccountClass)>> {
     let mut meta: HashMap<i64, (String, AccountClass)> = HashMap::new();
-    {
-        let mut stmt =
-            conn.prepare("SELECT id, currency, account_type FROM accounts WHERE is_active = 1")?;
-        let rows = stmt.query_map([], |r| {
-            Ok((
-                r.get::<_, i64>(0)?,
-                r.get::<_, String>(1)?,
-                r.get::<_, String>(2)?,
-            ))
-        })?;
-        for row in rows {
-            let (id, currency, account_type) = row?;
-            meta.insert(id, (currency, account_class(&account_type)));
+    let mut stmt =
+        conn.prepare("SELECT id, currency, account_type FROM accounts WHERE is_active = 1")?;
+    let rows = stmt.query_map([], |r| {
+        Ok((
+            r.get::<_, i64>(0)?,
+            r.get::<_, String>(1)?,
+            r.get::<_, String>(2)?,
+        ))
+    })?;
+    for row in rows {
+        let (id, currency, account_type) = row?;
+        meta.insert(id, (currency, account_class(&account_type)));
+    }
+    Ok(meta)
+}
+
+/// Sum carried balances into total/liquid/invested buckets (USD + CAD). When `restrict` is set,
+/// only the listed accounts contribute — used to measure a like-for-like delta over a fixed cohort.
+fn breakdown(
+    balances: &HashMap<i64, f64>,
+    meta: &HashMap<i64, (String, AccountClass)>,
+    usd_rates: &HashMap<String, f64>,
+    restrict: Option<&HashSet<i64>>,
+) -> ClassBreakdown {
+    let mut bd = ClassBreakdown::default();
+    for (account_id, balance) in balances {
+        if let Some(cohort) = restrict {
+            if !cohort.contains(account_id) {
+                continue;
+            }
+        }
+        let (currency, class) = match meta.get(account_id) {
+            Some((c, cls)) => (c.as_str(), *cls),
+            None => ("USD", AccountClass::Other),
+        };
+        let (usd, cad) = convert_balance(*balance, currency, usd_rates);
+        bd.total.add(usd, cad);
+        match class {
+            AccountClass::Liquid => bd.liquid.add(usd, cad),
+            AccountClass::Invested => bd.invested.add(usd, cad),
+            AccountClass::Other => {}
         }
     }
+    bd
+}
 
+/// Walk the snapshot dates (carrying each account's latest balance forward, exactly like the
+/// history series) and capture every account's carried balance at each date. Accounts contribute
+/// nothing before their first snapshot.
+fn compute_carried_account_series(
+    conn: &Connection,
+) -> rusqlite::Result<Vec<(String, HashMap<i64, f64>)>> {
     let snapshots: Vec<(i64, String, f64)> = {
         let mut stmt = conn.prepare(
             "SELECT bs.account_id, bs.snapshot_date, bs.balance \
@@ -402,7 +449,7 @@ fn compute_classed_series(conn: &Connection) -> rusqlite::Result<Vec<(String, Cl
     };
 
     let mut current: HashMap<i64, f64> = HashMap::new();
-    let mut points: Vec<(String, ClassBreakdown)> = Vec::new();
+    let mut points: Vec<(String, HashMap<i64, f64>)> = Vec::new();
     let mut idx = 0;
     while idx < snapshots.len() {
         let date = snapshots[idx].1.clone();
@@ -410,22 +457,7 @@ fn compute_classed_series(conn: &Connection) -> rusqlite::Result<Vec<(String, Cl
             current.insert(snapshots[idx].0, snapshots[idx].2);
             idx += 1;
         }
-
-        let mut bd = ClassBreakdown::default();
-        for (account_id, balance) in &current {
-            let (currency, class) = match meta.get(account_id) {
-                Some((c, cls)) => (c.as_str(), *cls),
-                None => ("USD", AccountClass::Other),
-            };
-            let (usd, cad) = convert_balance(*balance, currency, &usd_rates);
-            bd.total.add(usd, cad);
-            match class {
-                AccountClass::Liquid => bd.liquid.add(usd, cad),
-                AccountClass::Invested => bd.invested.add(usd, cad),
-                AccountClass::Other => {}
-            }
-        }
-        points.push((date, bd));
+        points.push((date, current.clone()));
     }
 
     Ok(points)
@@ -606,6 +638,44 @@ mod tests {
         // CAD mirror is exactly double at this rate.
         assert_eq!(d.liquid_delta.cad, -800.0);
         assert_eq!(d.total_delta.cad, 100.0);
+    }
+
+    #[test]
+    fn delta_excludes_accounts_added_after_the_previous_date() {
+        let conn = setup();
+        conn.execute(
+            "INSERT INTO fx_rates (from_currency, to_currency, rate, rate_date) \
+             VALUES ('USD', 'CAD', 2.0, '2025-01-01')",
+            [],
+        )
+        .unwrap();
+
+        let chequing = add_typed_account(&conn, "Chase Checking", "USD", "chequing");
+        let brokerage = add_typed_account(&conn, "Robinhood", "USD", "brokerage");
+
+        // The chequing account exists on both dates: a real +100 move.
+        add_snapshot(&conn, chequing, "2025-01-01", 1000.0, "USD");
+        add_snapshot(&conn, chequing, "2025-02-01", 1100.0, "USD");
+        // The brokerage's first-ever snapshot lands on the latest date — it's coming online,
+        // not money earned, so it must not inflate the delta.
+        add_snapshot(&conn, brokerage, "2025-02-01", 5000.0, "USD");
+
+        let d = compute_net_worth_delta(&conn).unwrap();
+        assert!(d.has_previous);
+        assert_eq!(d.current_date.as_deref(), Some("2025-02-01"));
+        assert_eq!(d.previous_date.as_deref(), Some("2025-01-01"));
+
+        // Current totals still reflect *all* accounts, including the brand-new brokerage.
+        assert_eq!(d.total.usd, 6100.0);
+        assert_eq!(d.liquid.usd, 1100.0);
+        assert_eq!(d.invested.usd, 5000.0);
+
+        // The delta is like-for-like: only the chequing account existed on both dates, so net
+        // worth is up 100 — not 5100. The new brokerage contributes nothing to the delta.
+        assert_eq!(d.total_delta.usd, 100.0);
+        assert_eq!(d.liquid_delta.usd, 100.0);
+        assert_eq!(d.invested_delta.usd, 0.0);
+        assert_eq!(d.total_delta.cad, 200.0);
     }
 
     #[test]
