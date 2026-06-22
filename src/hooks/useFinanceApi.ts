@@ -8,6 +8,8 @@ import type {
   ImportSummary,
   NetWorth,
   NetWorthHistoryPoint,
+  SnapTradeStatus,
+  SnapTradeSyncSummary,
 } from "../types/finance";
 
 export const listAccounts = (): Promise<Account[]> =>
@@ -38,6 +40,26 @@ export const refreshFxRates = (): Promise<FxRate[]> =>
 
 export const importData = (payload: ImportPayload): Promise<ImportSummary> =>
   invoke("import_data", { payload });
+
+// --- SnapTrade (Phase 2) ---------------------------------------------------
+
+export const snaptradeGetStatus = (): Promise<SnapTradeStatus> =>
+  invoke("snaptrade_get_status");
+
+export const snaptradeSaveCredentials = (
+  clientId: string,
+  consumerKey: string,
+): Promise<SnapTradeStatus> =>
+  invoke("snaptrade_save_credentials", { clientId, consumerKey });
+
+export const snaptradeGetLoginLink = (): Promise<string> =>
+  invoke("snaptrade_get_login_link");
+
+export const snaptradeSync = (): Promise<SnapTradeSyncSummary> =>
+  invoke("snaptrade_sync");
+
+export const snaptradeDisconnect = (): Promise<SnapTradeStatus> =>
+  invoke("snaptrade_disconnect");
 
 interface BalanceSnapshotResult {
   id: number;

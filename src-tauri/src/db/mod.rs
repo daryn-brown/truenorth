@@ -5,8 +5,12 @@ use tauri::{App, Manager, Runtime};
 
 pub mod crypto;
 mod schema;
+pub mod secrets;
 pub use schema::{apply_schema, seed_defaults};
 
+// Kept unchanged across the "TrueNorth" rebrand: renaming this file (or the app's bundle
+// identifier, which determines the app-data directory) would orphan the existing encrypted
+// database. The on-disk name is an internal detail and not shown to the user.
 pub const DB_FILE: &str = "finance-second-brain.db";
 
 /// Shared application state holding the SQLite connection.

@@ -1,5 +1,7 @@
 mod commands;
-// Phase 2 connector groundwork (SnapTrade/SimpleFIN); not yet exercised at runtime.
+// Connector groundwork shared by Phase 2+ providers. The SnapTrade connector under
+// `connector::snaptrade` is exercised at runtime via `commands::snaptrade`; the trait
+// scaffolding and other providers are kept ahead of use.
 #[allow(dead_code)]
 mod connector;
 mod db;
@@ -12,8 +14,7 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
         .setup(|app| {
-            db::setup_database(app)
-                .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
+            db::setup_database(app).map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
             app.manage(connector::ConnectorRegistry::new());
             Ok(())
         })
@@ -27,8 +28,12 @@ pub fn run() {
             commands::import::import_data,
             commands::fx::get_fx_rates,
             commands::fx::refresh_fx_rates,
+            commands::snaptrade::snaptrade_get_status,
+            commands::snaptrade::snaptrade_save_credentials,
+            commands::snaptrade::snaptrade_get_login_link,
+            commands::snaptrade::snaptrade_sync,
+            commands::snaptrade::snaptrade_disconnect,
         ])
         .run(tauri::generate_context!())
-        .expect("Finance Second Brain failed to start");
+        .expect("TrueNorth failed to start");
 }
-

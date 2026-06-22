@@ -20,6 +20,7 @@ import NetWorthCard from "../components/NetWorthCard";
 import AccountList from "../components/AccountList";
 import AccountModal from "../components/AccountModal";
 import ImportModal from "../components/ImportModal";
+import ConnectionsModal from "../components/ConnectionsModal";
 import NetWorthChart from "../components/NetWorthChart";
 
 type ModalState =
@@ -35,6 +36,7 @@ export default function Dashboard() {
   const [loading, setLoading] = useState(true);
   const [modal, setModal] = useState<ModalState>({ open: false });
   const [importOpen, setImportOpen] = useState(false);
+  const [connectOpen, setConnectOpen] = useState(false);
   const [refreshingFx, setRefreshingFx] = useState(false);
   const [fxError, setFxError] = useState<string | null>(null);
 
@@ -101,13 +103,20 @@ export default function Dashboard() {
       <header className="border-b border-slate-800 px-6 py-4 flex items-center justify-between">
         <div className="flex items-center gap-3">
           <span className="text-xl font-bold text-white tracking-tight">
-            💰 Finance Second Brain
+            🧭 TrueNorth
           </span>
           <span className="rounded-full bg-indigo-900/50 border border-indigo-700/50 px-2 py-0.5 text-[11px] font-semibold text-indigo-300 uppercase tracking-wider">
-            Phase 1
+            Phase 2
           </span>
         </div>
         <div className="flex items-center gap-2">
+          <button
+            onClick={() => setConnectOpen(true)}
+            title="Connect a brokerage and sync real balances via SnapTrade"
+            className="flex items-center gap-1.5 rounded-lg border border-indigo-700/60 bg-indigo-900/30 px-3 py-1.5 text-xs text-indigo-200 hover:bg-indigo-900/60 transition-colors"
+          >
+            🔗 Connect
+          </button>
           <button
             onClick={() => setImportOpen(true)}
             title="Import accounts and balance history from JSON or CSV"
@@ -189,6 +198,12 @@ export default function Dashboard() {
         isOpen={importOpen}
         onClose={() => setImportOpen(false)}
         onImported={load}
+      />
+
+      <ConnectionsModal
+        isOpen={connectOpen}
+        onClose={() => setConnectOpen(false)}
+        onChanged={load}
       />
     </div>
   );

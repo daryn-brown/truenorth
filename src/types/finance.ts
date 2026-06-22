@@ -165,3 +165,22 @@ export interface ImportSummary {
   snapshots_imported: number;
   errors: string[];
 }
+
+/** SnapTrade connection state, mirrored from the Rust `SnapTradeStatus`. */
+export interface SnapTradeStatus {
+  /** API key pair saved (clientId + consumerKey). */
+  has_credentials: boolean;
+  /** A brokerage is connected (SnapTrade user exists). */
+  is_connected: boolean;
+  /** Public clientId, for display. Never the secret consumerKey. */
+  client_id: string | null;
+  last_synced_at: string | null;
+  account_count: number;
+}
+
+/** Result of a SnapTrade sync, mirrored from the Rust `SnapTradeSyncSummary`. */
+export interface SnapTradeSyncSummary {
+  accounts_synced: number;
+  holdings_synced: number;
+  synced_at: string;
+}
