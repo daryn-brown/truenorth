@@ -23,7 +23,7 @@ const ACCOUNT_TYPES: { id: AccountTypeId; label: string }[] = [
   { id: "other", label: "Other" },
 ];
 
-type ModalMode = "add_account" | "update_balance";
+type ModalMode = "add_account" | "update_balance" | "edit_currency";
 
 interface Props {
   isOpen: boolean;
@@ -32,6 +32,7 @@ interface Props {
   onClose: () => void;
   onAddAccount: (payload: AddAccountPayload) => Promise<void>;
   onUpdateBalance: (payload: AddBalanceSnapshotPayload) => Promise<void>;
+  onUpdateCurrency?: (accountId: number, currency: string) => Promise<void>;
 }
 
 const today = () => new Date().toISOString().slice(0, 10);
@@ -43,6 +44,7 @@ export default function AccountModal({
   onClose,
   onAddAccount,
   onUpdateBalance,
+  onUpdateCurrency,
 }: Props) {
   const [name, setName] = useState("");
   const [institution, setInstitution] = useState("");
@@ -53,6 +55,9 @@ export default function AccountModal({
 
   const [balance, setBalance] = useState("");
   const [snapshotDate, setSnapshotDate] = useState(today());
+  const [currencyCode, setCurrencyCode] = useState(
+    (accountToUpdate?.currency ?? "USD").toUpperCase(),
+  );
 
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -85,6 +90,14 @@ export default function AccountModal({
           balance: val,
           snapshot_date: snapshotDate,
         });
+      } else if (mode === "edit_currency" && accountToUpdate && onUpdateCurrency) {
+        const code = currencyCode.trim().toUpperCase();
+        if (!/^[A-Z]{3}$/.test(code)) {
+          setError("Enter a 3-letter currency code (e.g. USD, CAD, JMD).");
+          setSubmitting(false);
+          return;
+        }
+        await onUpdateCurrency(accountToUpdate.id, code);
       }
       onClose();
     } catch (err) {
@@ -103,7 +116,9 @@ export default function AccountModal({
         <h2 className="text-lg font-semibold text-white mb-5">
           {mode === "add_account"
             ? "Add Account"
-            : `Update Balance — ${accountToUpdate?.name}`}
+            : mode === "edit_currency"
+              ? `Edit Currency — ${accountToUpdate?.name}`
+              : `Update Balance — ${accountToUpdate?.name}`}
         </h2>
 
         <form onSubmit={handleSubmit} className="space-y-4">
@@ -207,6 +222,36 @@ export default function AccountModal({
                   className={inputClass}
                 />
               </Field>
+            </>
+          )}
+
+          {mode === "edit_currency" && (
+            <>
+              <Field label="Currency (ISO code)">
+                <input
+                  required
+                  list="currency-options"
+                  value={currencyCode}
+                  onChange={(e) => setCurrencyCode(e.target.value.toUpperCase())}
+                  maxLength={3}
+                  placeholder="e.g. JMD"
+                  className={inputClass}
+                />
+                <datalist id="currency-options">
+                  <option value="USD" />
+                  <option value="CAD" />
+                  <option value="JMD" />
+                  <option value="GBP" />
+                  <option value="EUR" />
+                  <option value="MXN" />
+                  <option value="AUD" />
+                </datalist>
+              </Field>
+              <p className="text-xs text-slate-500">
+                Correct a connected account whose currency was mislabelled by the data provider
+                (e.g. a Jamaican account synced as CAD). Net worth reconverts once you save, and
+                future syncs keep your choice.
+              </p>
             </>
           )}
 
