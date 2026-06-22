@@ -9,7 +9,10 @@
 //! 1. a per-transaction manual override (`transactions.flow_override`);
 //! 2. the first matching rule in `txn_rules` (case-insensitive substring of the description,
 //!    earlier rows win);
-//! 3. a sign default — money in is income, money out is variable spending.
+//! 3. an account-type rule — a positive amount landing in a non-cash account (a credit card, or a
+//!    brokerage/retirement account) is an internal move (card payment, contribution, security buy,
+//!    reinvested dividend), never earned income;
+//! 4. a sign default — money in is income, money out is variable spending.
 //!
 //! Every figure is carried in both USD and CAD via the same USD-pivot FX map net worth uses, so
 //! the frontend can render either side of the currency toggle without a second round-trip.
@@ -113,12 +116,14 @@ pub struct CashflowSummary {
 // Classification (pure)
 // ---------------------------------------------------------------------------
 
-/// Resolve a transaction's flow type. `override_opt` is the stored manual override (if any);
+/// Resolve a transaction's flow type from its description, sign and account type. `override_opt`
+/// is the stored manual override (if any); `account_type` is the owning account's type;
 /// `rules` are `(lowercased pattern, flow type)` pairs in priority order.
 fn classify(
     description: &str,
     amount: f64,
     override_opt: Option<&str>,
+    account_type: &str,
     rules: &[(String, FlowType)],
 ) -> FlowType {
     if let Some(ft) = override_opt.and_then(FlowType::parse) {
@@ -131,10 +136,42 @@ fn classify(
         }
     }
     if amount >= 0.0 {
-        FlowType::Income
+        // Money landing in a non-cash account is an internal move, not earned income: a payment
+        // toward a credit card, or a contribution / funding deposit / security buy / reinvested
+        // dividend in a brokerage or retirement account. Treat it as a transfer so it never
+        // inflates income. Outflows from these accounts (card purchases) still count normally.
+        if is_non_cash_account(account_type) {
+            FlowType::Transfer
+        } else {
+            FlowType::Income
+        }
     } else {
         FlowType::Variable
     }
+}
+
+/// Account types whose *inflows* are internal moves rather than earned income: credit cards (an
+/// inflow pays the card down) and investment / retirement accounts (inflows are contributions,
+/// funding deposits, security purchases or reinvested dividends). Cash accounts (chequing,
+/// savings) are deliberately absent — their inflows can be real income such as salary or interest.
+fn is_non_cash_account(account_type: &str) -> bool {
+    matches!(
+        account_type.trim().to_ascii_lowercase().as_str(),
+        "credit"
+            | "brokerage"
+            | "investment"
+            | "crypto"
+            | "ira"
+            | "roth_ira"
+            | "rrsp"
+            | "tfsa"
+            | "resp"
+            | "lira"
+            | "rrif"
+            | "rlif"
+            | "401k"
+            | "pension"
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -158,6 +195,7 @@ struct FlowInput {
     amount: f64,
     currency: String,
     override_opt: Option<String>,
+    account_type: String,
 }
 
 /// Whether any rule matches this description (sign-independent).
@@ -230,7 +268,15 @@ fn resolve_flow_types(
     let n = txns.len();
     let mut flows: Vec<FlowType> = txns
         .iter()
-        .map(|t| classify(&t.description, t.amount, t.override_opt.as_deref(), rules))
+        .map(|t| {
+            classify(
+                &t.description,
+                t.amount,
+                t.override_opt.as_deref(),
+                &t.account_type,
+                rules,
+            )
+        })
         .collect();
 
     // A row is "pinned" when an override or rule decided it — auto-matching must not move it.
@@ -337,7 +383,8 @@ fn compute_cashflow(conn: &Connection, window_days: i64) -> rusqlite::Result<Cas
     let rules = load_rules(conn)?;
 
     let mut stmt = conn.prepare(
-        "SELECT t.account_id, t.txn_date, t.amount, t.currency, t.description, t.flow_override \
+        "SELECT t.account_id, t.txn_date, t.amount, t.currency, t.description, t.flow_override, \
+                a.account_type \
          FROM transactions t JOIN accounts a ON a.id = t.account_id \
          WHERE a.is_active = 1 AND t.txn_date >= ?1",
     )?;
@@ -350,6 +397,7 @@ fn compute_cashflow(conn: &Connection, window_days: i64) -> rusqlite::Result<Cas
                 currency: r.get(3)?,
                 description: r.get(4)?,
                 override_opt: r.get(5)?,
+                account_type: r.get(6)?,
             })
         })?
         .collect::<Result<Vec<_>, _>>()?;
@@ -418,7 +466,7 @@ fn fetch_classified(conn: &Connection, limit: i64) -> rusqlite::Result<Vec<Class
 
     let mut stmt = conn.prepare(
         "SELECT t.id, t.account_id, a.name, t.txn_date, t.description, t.amount, t.currency, \
-                t.flow_override \
+                t.flow_override, a.account_type \
          FROM transactions t JOIN accounts a ON a.id = t.account_id \
          WHERE a.is_active = 1 \
          ORDER BY t.txn_date DESC, t.id DESC LIMIT ?1",
@@ -437,6 +485,7 @@ fn fetch_classified(conn: &Connection, limit: i64) -> rusqlite::Result<Vec<Class
             amount: r.get(5)?,
             currency: r.get(6)?,
             override_opt: r.get(7)?,
+            account_type: r.get(8)?,
         });
     }
 
@@ -588,6 +637,7 @@ mod tests {
                 "Interac e-transfer to Mom",
                 -800.0,
                 Some("variable"),
+                "chequing",
                 &rules()
             ),
             FlowType::Variable
@@ -598,11 +648,11 @@ mod tests {
     fn rule_precedence_is_first_match() {
         // "mom" precedes "e-transfer", so the support payment is fixed, not an excluded transfer.
         assert_eq!(
-            classify("INTERAC E-TRANSFER TO MOM", -800.0, None, &rules()),
+            classify("INTERAC E-TRANSFER TO MOM", -800.0, None, "chequing", &rules()),
             FlowType::Fixed
         );
         assert_eq!(
-            classify("E-TRANSFER TO LANDLORD", -1500.0, None, &rules()),
+            classify("E-TRANSFER TO LANDLORD", -1500.0, None, "chequing", &rules()),
             FlowType::Transfer
         );
     }
@@ -610,11 +660,67 @@ mod tests {
     #[test]
     fn sign_default_when_no_rule_matches() {
         assert_eq!(
-            classify("STARBUCKS", -6.25, None, &rules()),
+            classify("STARBUCKS", -6.25, None, "chequing", &rules()),
             FlowType::Variable
         );
         assert_eq!(
-            classify("PAYROLL", 2500.0, None, &rules()),
+            classify("PAYROLL", 2500.0, None, "chequing", &rules()),
+            FlowType::Income
+        );
+    }
+
+    #[test]
+    fn inflow_into_investment_account_is_transfer_not_income() {
+        // An RRSP contribution / security buy posts as a positive amount but is not earned income.
+        assert_eq!(
+            classify(
+                "BLK US Equity Index Reg 1.6 units at $105",
+                170.32,
+                None,
+                "rrsp",
+                &rules()
+            ),
+            FlowType::Transfer
+        );
+        // Funding a brokerage account is likewise an internal move, not income.
+        assert_eq!(
+            classify(
+                "Instant bank deposit to Robinhood",
+                1000.0,
+                None,
+                "brokerage",
+                &rules()
+            ),
+            FlowType::Transfer
+        );
+    }
+
+    #[test]
+    fn inflow_into_credit_account_is_transfer_not_income() {
+        // A payment landing on a credit card pays it down — it is not income.
+        assert_eq!(
+            classify("PAYMENT FROM CHEQUING", 1500.0, None, "credit", &rules()),
+            FlowType::Transfer
+        );
+    }
+
+    #[test]
+    fn outflow_from_credit_account_still_counts_as_spending() {
+        // Purchases on the card (negative) remain real variable spending.
+        assert_eq!(
+            classify("CORNER STORE", -42.0, None, "credit", &rules()),
+            FlowType::Variable
+        );
+    }
+
+    #[test]
+    fn inflow_into_cash_account_is_income() {
+        assert_eq!(
+            classify("ACME PAYROLL", 2500.0, None, "chequing", &rules()),
+            FlowType::Income
+        );
+        assert_eq!(
+            classify("INTEREST PAYMENT", 12.0, None, "savings", &rules()),
             FlowType::Income
         );
     }
@@ -624,6 +730,16 @@ mod tests {
             "INSERT INTO accounts (name, institution, account_type, currency, jurisdiction) \
              VALUES ('Chequing', 'Scotiabank', 'chequing', ?1, 'CA')",
             params![currency],
+        )
+        .unwrap();
+        conn.last_insert_rowid()
+    }
+
+    fn seed_account_typed(conn: &Connection, currency: &str, account_type: &str) -> i64 {
+        conn.execute(
+            "INSERT INTO accounts (name, institution, account_type, currency, jurisdiction) \
+             VALUES ('Acct', 'Inst', ?1, ?2, 'CA')",
+            params![account_type, currency],
         )
         .unwrap();
         conn.last_insert_rowid()
@@ -643,6 +759,41 @@ mod tests {
             params![account_id, date, description, amount, currency, description],
         )
         .unwrap();
+    }
+
+    #[test]
+    fn compute_cashflow_excludes_investment_account_inflows() {
+        let conn = Connection::open_in_memory().unwrap();
+        crate::db::apply_schema(&conn).unwrap();
+        crate::db::seed_defaults(&conn).unwrap();
+        conn.execute(
+            "INSERT INTO fx_rates (from_currency, to_currency, rate, rate_date) \
+             VALUES ('USD', 'CAD', 1.25, '2025-01-01')",
+            [],
+        )
+        .unwrap();
+        let chequing = seed_account(&conn, "CAD");
+        let rrsp = seed_account_typed(&conn, "CAD", "rrsp");
+        let card = seed_account_typed(&conn, "CAD", "credit");
+        let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
+        // Real salary in a cash account stays income.
+        insert_txn(&conn, chequing, &today, "MICROSOFT PAYROLL", 4000.0, "CAD");
+        // RRSP contribution buys post as positive amounts but are not earned income.
+        insert_txn(&conn, rrsp, &today, "BLK US Equity Index Reg units at $105", 170.0, "CAD");
+        insert_txn(&conn, rrsp, &today, "BLK EAFE Equity Index units at $35", 85.0, "CAD");
+        // A one-legged credit-card payment (no matching cash debit synced) is still a transfer.
+        insert_txn(&conn, card, &today, "PAYMENT FROM 07*60", 600.0, "CAD");
+        // A purchase on the card is genuine variable spending.
+        insert_txn(&conn, card, &today, "CORNER STORE", -50.0, "CAD");
+
+        let s = compute_cashflow(&conn, 30).unwrap();
+        assert_eq!(s.txn_count, 5);
+        // Income is the payroll only — not 4855 (payroll + RRSP buys + card payment).
+        assert_eq!(s.income.cad, 4000.0);
+        // The three inflows into the RRSP/credit accounts are excluded as transfers.
+        assert_eq!(s.transfer_count, 3);
+        // The card purchase still counts as spending.
+        assert_eq!(s.variable.cad, 50.0);
     }
 
     #[test]
