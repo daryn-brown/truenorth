@@ -137,6 +137,109 @@ fn classify(
 }
 
 // ---------------------------------------------------------------------------
+// Internal-transfer detection
+// ---------------------------------------------------------------------------
+
+/// How many days apart the two legs of an internal transfer may post and still be matched.
+const TRANSFER_PAIR_WINDOW_DAYS: i64 = 5;
+
+/// The fields needed to resolve a transaction's flow across the whole window. Transfer detection
+/// has to look at every row at once, not one at a time.
+struct FlowInput {
+    account_id: i64,
+    date: String,
+    description: String,
+    amount: f64,
+    currency: String,
+    override_opt: Option<String>,
+}
+
+/// Whether any rule matches this description (sign-independent).
+fn rule_matches(description: &str, rules: &[(String, FlowType)]) -> bool {
+    let hay = description.to_ascii_lowercase();
+    rules
+        .iter()
+        .any(|(pattern, _)| !pattern.is_empty() && hay.contains(pattern.as_str()))
+}
+
+/// Amount in whole cents, for exact equality matching without float wobble.
+fn cents(amount: f64) -> i64 {
+    (amount * 100.0).round() as i64
+}
+
+/// Absolute day gap between two `YYYY-MM-DD` dates, or `None` if either fails to parse.
+fn day_gap(a: &str, b: &str) -> Option<i64> {
+    let da = chrono::NaiveDate::parse_from_str(a, "%Y-%m-%d").ok()?;
+    let db = chrono::NaiveDate::parse_from_str(b, "%Y-%m-%d").ok()?;
+    Some((da - db).num_days().abs())
+}
+
+/// Resolve every transaction's flow type, additionally detecting internal transfers between the
+/// user's own accounts — a debit in one account matched by an equal credit in another within a few
+/// days — that no keyword rule caught. Manual overrides and rule matches always win; auto-matching
+/// only reclassifies rows that would otherwise fall to the income/variable sign default, so money
+/// moved between accounts (and card payments) stops inflating income or spending.
+fn resolve_flow_types(txns: &[FlowInput], rules: &[(String, FlowType)]) -> Vec<FlowType> {
+    let n = txns.len();
+    let mut flows: Vec<FlowType> = txns
+        .iter()
+        .map(|t| classify(&t.description, t.amount, t.override_opt.as_deref(), rules))
+        .collect();
+
+    // A row is "pinned" when an override or rule decided it — auto-matching must not move it.
+    let pinned: Vec<bool> = txns
+        .iter()
+        .map(|t| {
+            t.override_opt.as_deref().and_then(FlowType::parse).is_some()
+                || rule_matches(&t.description, rules)
+        })
+        .collect();
+
+    // A row may join a transfer pair only if it isn't pinned to a non-transfer flow: either it's a
+    // sign-default row, or it's already a transfer (so the keyworded leg of a pair can also pull an
+    // un-keyworded partner out of income/spending).
+    let eligible: Vec<bool> = (0..n)
+        .map(|i| !pinned[i] || flows[i] == FlowType::Transfer)
+        .collect();
+
+    let mut used = vec![false; n];
+    for i in 0..n {
+        if used[i] || !eligible[i] || txns[i].amount >= 0.0 {
+            continue;
+        }
+        for j in 0..n {
+            if used[j]
+                || j == i
+                || !eligible[j]
+                || txns[j].amount <= 0.0
+                || txns[i].account_id == txns[j].account_id
+                || txns[i].currency != txns[j].currency
+                || cents(txns[i].amount).abs() != cents(txns[j].amount).abs()
+            {
+                continue;
+            }
+            match day_gap(&txns[i].date, &txns[j].date) {
+                Some(gap) if gap <= TRANSFER_PAIR_WINDOW_DAYS => {}
+                _ => continue,
+            }
+            // Matched pair: exclude both legs. Pinned legs keep their flow (already transfer);
+            // sign-default legs flip to transfer so the inflow no longer reads as income.
+            if !pinned[i] {
+                flows[i] = FlowType::Transfer;
+            }
+            if !pinned[j] {
+                flows[j] = FlowType::Transfer;
+            }
+            used[i] = true;
+            used[j] = true;
+            break;
+        }
+    }
+
+    flows
+}
+
+// ---------------------------------------------------------------------------
 // DB helpers
 // ---------------------------------------------------------------------------
 
@@ -170,34 +273,37 @@ fn compute_cashflow(conn: &Connection, window_days: i64) -> rusqlite::Result<Cas
     let rules = load_rules(conn)?;
 
     let mut stmt = conn.prepare(
-        "SELECT t.amount, t.currency, t.description, t.flow_override \
+        "SELECT t.account_id, t.txn_date, t.amount, t.currency, t.description, t.flow_override \
          FROM transactions t JOIN accounts a ON a.id = t.account_id \
          WHERE a.is_active = 1 AND t.txn_date >= ?1",
     )?;
-    let rows = stmt.query_map(params![since], |r| {
-        Ok((
-            r.get::<_, f64>(0)?,
-            r.get::<_, String>(1)?,
-            r.get::<_, String>(2)?,
-            r.get::<_, Option<String>>(3)?,
-        ))
-    })?;
+    let txns: Vec<FlowInput> = stmt
+        .query_map(params![since], |r| {
+            Ok(FlowInput {
+                account_id: r.get(0)?,
+                date: r.get(1)?,
+                amount: r.get(2)?,
+                currency: r.get(3)?,
+                description: r.get(4)?,
+                override_opt: r.get(5)?,
+            })
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+
+    let flows = resolve_flow_types(&txns, &rules);
 
     let mut income = MoneyPair::default();
     let mut fixed = MoneyPair::default();
     let mut variable = MoneyPair::default();
     let mut transfer_count = 0i64;
-    let mut txn_count = 0i64;
+    let txn_count = txns.len() as i64;
     let mut currency_warning = false;
 
-    for row in rows {
-        let (amount, currency, description, override_opt) = row?;
-        txn_count += 1;
-        if currency != "USD" && !usd_rates.contains_key(&currency) {
+    for (t, ft) in txns.iter().zip(flows.iter()) {
+        if t.currency != "USD" && !usd_rates.contains_key(&t.currency) {
             currency_warning = true;
         }
-        let ft = classify(&description, amount, override_opt.as_deref(), &rules);
-        let (usd, cad) = convert_balance(amount, &currency, &usd_rates);
+        let (usd, cad) = convert_balance(t.amount, &t.currency, &usd_rates);
         match ft {
             FlowType::Income => {
                 income.usd += usd;
@@ -252,37 +358,40 @@ fn fetch_classified(conn: &Connection, limit: i64) -> rusqlite::Result<Vec<Class
          WHERE a.is_active = 1 \
          ORDER BY t.txn_date DESC, t.id DESC LIMIT ?1",
     )?;
-    let rows = stmt.query_map(params![limit], |r| {
-        Ok((
-            r.get::<_, i64>(0)?,
-            r.get::<_, i64>(1)?,
-            r.get::<_, String>(2)?,
-            r.get::<_, String>(3)?,
-            r.get::<_, String>(4)?,
-            r.get::<_, f64>(5)?,
-            r.get::<_, String>(6)?,
-            r.get::<_, Option<String>>(7)?,
-        ))
-    })?;
-
-    let mut out = Vec::new();
-    for row in rows {
-        let (id, account_id, account_name, txn_date, description, amount, currency, override_opt) =
-            row?;
-        let is_override = override_opt.as_deref().and_then(FlowType::parse).is_some();
-        let ft = classify(&description, amount, override_opt.as_deref(), &rules);
-        out.push(ClassifiedTransaction {
-            id,
-            account_id,
-            account_name,
-            txn_date,
-            description,
-            amount,
-            currency,
-            flow_type: ft.as_str().to_string(),
-            is_override,
+    let mut ids: Vec<i64> = Vec::new();
+    let mut names: Vec<String> = Vec::new();
+    let mut inputs: Vec<FlowInput> = Vec::new();
+    let mut rows = stmt.query(params![limit])?;
+    while let Some(r) = rows.next()? {
+        ids.push(r.get(0)?);
+        names.push(r.get(2)?);
+        inputs.push(FlowInput {
+            account_id: r.get(1)?,
+            date: r.get(3)?,
+            description: r.get(4)?,
+            amount: r.get(5)?,
+            currency: r.get(6)?,
+            override_opt: r.get(7)?,
         });
     }
+
+    let flows = resolve_flow_types(&inputs, &rules);
+
+    let out = inputs
+        .into_iter()
+        .enumerate()
+        .map(|(k, fi)| ClassifiedTransaction {
+            id: ids[k],
+            account_id: fi.account_id,
+            account_name: names[k].clone(),
+            txn_date: fi.date,
+            description: fi.description,
+            amount: fi.amount,
+            currency: fi.currency,
+            flow_type: flows[k].as_str().to_string(),
+            is_override: fi.override_opt.as_deref().and_then(FlowType::parse).is_some(),
+        })
+        .collect();
     Ok(out)
 }
 
@@ -544,5 +653,111 @@ mod tests {
         assert_eq!(list.len(), 1);
         assert_eq!(list[0].flow_type, "fixed");
         assert!(list[0].is_override);
+    }
+
+    #[test]
+    fn auto_detects_internal_transfer_between_accounts() {
+        let conn = Connection::open_in_memory().unwrap();
+        crate::db::apply_schema(&conn).unwrap();
+        crate::db::seed_defaults(&conn).unwrap();
+        conn.execute(
+            "INSERT INTO fx_rates (from_currency, to_currency, rate, rate_date) \
+             VALUES ('USD', 'CAD', 1.25, '2025-01-01')",
+            [],
+        )
+        .unwrap();
+        let a = seed_account(&conn, "CAD");
+        let b = seed_account(&conn, "CAD");
+        let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
+        // Equal-and-opposite move between the two accounts, with no transfer keyword in sight.
+        insert_txn(&conn, a, &today, "OUTGOING FUNDS", -5000.0, "CAD");
+        insert_txn(&conn, b, &today, "INCOMING FUNDS", 5000.0, "CAD");
+        // A real paycheque and a real expense that must be left alone.
+        insert_txn(&conn, a, &today, "MICROSOFT PAYROLL", 3000.0, "CAD");
+        insert_txn(&conn, a, &today, "GROCERY STORE", -200.0, "CAD");
+
+        let s = compute_cashflow(&conn, 30).unwrap();
+        assert_eq!(s.txn_count, 4);
+        assert_eq!(s.transfer_count, 2); // both legs of the move excluded
+        assert_eq!(s.income.cad, 3000.0); // payroll only, not 8000
+        assert_eq!(s.variable.cad, 200.0); // groceries only, not 5200
+        assert_eq!(s.fixed.cad, 0.0);
+        assert_eq!(s.net_savings.cad, 2800.0);
+    }
+
+    #[test]
+    fn auto_matches_card_payment_to_its_unlabelled_leg() {
+        let conn = Connection::open_in_memory().unwrap();
+        crate::db::apply_schema(&conn).unwrap();
+        crate::db::seed_defaults(&conn).unwrap();
+        conn.execute(
+            "INSERT INTO fx_rates (from_currency, to_currency, rate, rate_date) \
+             VALUES ('USD', 'CAD', 1.25, '2025-01-01')",
+            [],
+        )
+        .unwrap();
+        let chequing = seed_account(&conn, "CAD");
+        let card = seed_account(&conn, "CAD");
+        let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
+        // The card side hits the seeded "payment - thank you" transfer rule; the chequing side has
+        // no keyword and would otherwise be counted as variable spending.
+        insert_txn(&conn, card, &today, "PAYMENT - THANK YOU", 1500.0, "CAD");
+        insert_txn(&conn, chequing, &today, "WWWPAY CARD AUTOPAY", -1500.0, "CAD");
+        insert_txn(&conn, chequing, &today, "ACME SALARY", 4000.0, "CAD");
+
+        let s = compute_cashflow(&conn, 30).unwrap();
+        assert_eq!(s.transfer_count, 2); // both legs excluded
+        assert_eq!(s.variable.cad, 0.0); // the autopay is not spending
+        assert_eq!(s.income.cad, 4000.0); // salary untouched
+    }
+
+    #[test]
+    fn does_not_match_same_account_or_a_refund() {
+        let conn = Connection::open_in_memory().unwrap();
+        crate::db::apply_schema(&conn).unwrap();
+        crate::db::seed_defaults(&conn).unwrap();
+        conn.execute(
+            "INSERT INTO fx_rates (from_currency, to_currency, rate, rate_date) \
+             VALUES ('USD', 'CAD', 1.25, '2025-01-01')",
+            [],
+        )
+        .unwrap();
+        let acct = seed_account(&conn, "CAD");
+        let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
+        // A purchase and its refund in the SAME account are not an internal transfer.
+        insert_txn(&conn, acct, &today, "SHOE STORE", -120.0, "CAD");
+        insert_txn(&conn, acct, &today, "SHOE STORE REFUND", 120.0, "CAD");
+
+        let s = compute_cashflow(&conn, 30).unwrap();
+        assert_eq!(s.transfer_count, 0);
+        assert_eq!(s.variable.cad, 120.0);
+        assert_eq!(s.income.cad, 120.0);
+    }
+
+    #[test]
+    fn does_not_match_transfers_outside_the_day_window() {
+        let conn = Connection::open_in_memory().unwrap();
+        crate::db::apply_schema(&conn).unwrap();
+        crate::db::seed_defaults(&conn).unwrap();
+        conn.execute(
+            "INSERT INTO fx_rates (from_currency, to_currency, rate, rate_date) \
+             VALUES ('USD', 'CAD', 1.25, '2025-01-01')",
+            [],
+        )
+        .unwrap();
+        let a = seed_account(&conn, "CAD");
+        let b = seed_account(&conn, "CAD");
+        let recent = chrono::Utc::now().format("%Y-%m-%d").to_string();
+        let earlier = (chrono::Utc::now() - chrono::Duration::days(10))
+            .format("%Y-%m-%d")
+            .to_string();
+        insert_txn(&conn, a, &earlier, "MOVE OUT", -750.0, "CAD");
+        insert_txn(&conn, b, &recent, "MOVE IN", 750.0, "CAD");
+
+        let s = compute_cashflow(&conn, 30).unwrap();
+        // 10 days apart is beyond the 5-day pairing window, so the legs are not matched.
+        assert_eq!(s.transfer_count, 0);
+        assert_eq!(s.variable.cad, 750.0);
+        assert_eq!(s.income.cad, 750.0);
     }
 }
