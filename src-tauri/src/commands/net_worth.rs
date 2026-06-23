@@ -463,6 +463,174 @@ fn compute_carried_account_series(
     Ok(points)
 }
 
+// ---------------------------------------------------------------------------
+// Backfill — reconstruct historical balance snapshots from transactions
+// ---------------------------------------------------------------------------
+
+/// Snapshots written by the backfill carry this `source` so they can be safely deleted and
+/// recomputed without touching real snapshots (`manual` / `simplefin` / `import` / `snaptrade`
+/// / `questrade`).
+const BACKFILL_SOURCE: &str = "backfill";
+
+/// Summary of a backfill run, surfaced to the UI so it can reload the chart and explain the result.
+#[derive(Debug, Serialize, PartialEq, Default)]
+pub struct BackfillResult {
+    /// Accounts that had an anchor snapshot and at least one earlier dated transaction.
+    pub accounts_backfilled: usize,
+    /// Total reconstructed snapshots inserted (excludes dates that already had a real snapshot).
+    pub snapshots_created: usize,
+    /// Distinct snapshot dates present after the backfill (real + reconstructed). The chart needs
+    /// at least two to draw a line.
+    pub distinct_dates: usize,
+    /// Oldest reconstructed date, or None when nothing was created.
+    pub earliest_date: Option<String>,
+}
+
+/// Reconstruct a net-worth history from existing transactions for accounts that only have a single
+/// (or sparse) balance snapshot, so the chart has something to draw before daily sync history
+/// accumulates.
+///
+/// For each active account we take its most recent ("anchor") snapshot — balance `A` on date `D0` —
+/// and roll the balance backward. Because a positive transaction amount raises the balance and a
+/// negative one lowers it, the balance at the end of an earlier day `d` is:
+///
+/// ```text
+/// balance(d) = A - sum(amount of txns with d < txn_date <= D0)
+/// ```
+///
+/// We evaluate this for every account on a *shared* date grid (the union of all transaction dates),
+/// not just the dates an individual account transacted on. That way an account with no recorded
+/// activity between two dates is carried flat across them — its balance is assumed unchanged —
+/// instead of dropping to zero and then "popping" back in, which would put misleading cliffs in the
+/// total line.
+///
+/// Reconstructed rows are written with `source = "backfill"`. The run first deletes any prior
+/// backfill rows (so it is idempotent and refreshes when transactions or the anchor change) and
+/// inserts with `INSERT OR IGNORE`, so a real snapshot on the same date always wins.
+///
+/// Caveat: this only backs out recorded cash flows. For investment / brokerage accounts the balance
+/// also moves with the market, so reconstructed history for those accounts is approximate.
+#[tauri::command]
+pub fn backfill_net_worth_history(db: State<AppDb>) -> Result<BackfillResult, String> {
+    let mut conn = db.0.lock().map_err(|e| e.to_string())?;
+    backfill_history(&mut conn).map_err(|e| e.to_string())
+}
+
+pub(crate) fn backfill_history(conn: &mut Connection) -> rusqlite::Result<BackfillResult> {
+    let tx = conn.transaction()?;
+
+    // Replace prior backfill rows so re-runs refresh rather than duplicate or go stale.
+    tx.execute(
+        "DELETE FROM balance_snapshots WHERE source = ?1",
+        [BACKFILL_SOURCE],
+    )?;
+
+    // The shared date grid: every distinct transaction date across active accounts, newest first.
+    // Each account is reconstructed on this grid so all accounts span the same range.
+    let grid: Vec<String> = {
+        let mut stmt = tx.prepare(
+            "SELECT DISTINCT t.txn_date FROM transactions t \
+             JOIN accounts a ON a.id = t.account_id \
+             WHERE a.is_active = 1 ORDER BY t.txn_date DESC",
+        )?;
+        let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+        rows.collect::<Result<Vec<_>, _>>()?
+    };
+
+    // Active accounts and the currency to stamp reconstructed snapshots with.
+    let accounts: Vec<(i64, String)> = {
+        let mut stmt = tx.prepare("SELECT id, currency FROM accounts WHERE is_active = 1")?;
+        let rows = stmt.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))?;
+        rows.collect::<Result<Vec<_>, _>>()?
+    };
+
+    let mut accounts_backfilled = 0usize;
+    let mut snapshots_created = 0usize;
+    let mut earliest_date: Option<String> = None;
+
+    for (account_id, account_currency) in accounts {
+        // Anchor on the most recent snapshot: balance `A` on date `D0`.
+        let anchor: Option<(String, f64, Option<String>)> = tx
+            .query_row(
+                "SELECT snapshot_date, balance, currency FROM balance_snapshots \
+                 WHERE account_id = ?1 ORDER BY snapshot_date DESC LIMIT 1",
+                [account_id],
+                |r| {
+                    Ok((
+                        r.get::<_, String>(0)?,
+                        r.get::<_, f64>(1)?,
+                        r.get::<_, Option<String>>(2)?,
+                    ))
+                },
+            )
+            .ok();
+        let (anchor_date, anchor_balance, anchor_currency) = match anchor {
+            Some(a) => a,
+            None => continue, // nothing to anchor from
+        };
+        let snapshot_currency = anchor_currency.unwrap_or_else(|| account_currency.clone());
+
+        // This account's net flow per date, up to and including the anchor date. Transactions dated
+        // after the anchor are ignored: we never reconstruct forward past the balance we know.
+        let delta_by_date: HashMap<String, f64> = {
+            let mut stmt = tx.prepare(
+                "SELECT txn_date, SUM(amount) FROM transactions \
+                 WHERE account_id = ?1 AND txn_date <= ?2 GROUP BY txn_date",
+            )?;
+            let rows = stmt.query_map(rusqlite::params![account_id, anchor_date], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, f64>(1)?))
+            })?;
+            rows.collect::<Result<HashMap<_, _>, _>>()?
+        };
+
+        // Walk the shared grid newest -> oldest. `subtract` is the sum of this account's amounts
+        // strictly after the current grid date; seed it with anything dated on the anchor itself
+        // (already baked into `A`, so it must come back out for every earlier date).
+        let mut subtract = *delta_by_date.get(&anchor_date).unwrap_or(&0.0);
+        let mut created_for_account = false;
+        for date in &grid {
+            if *date >= anchor_date {
+                continue; // on/after the anchor: nothing to reconstruct
+            }
+            let balance = anchor_balance - subtract;
+            let inserted = tx.execute(
+                "INSERT OR IGNORE INTO balance_snapshots \
+                 (account_id, snapshot_date, balance, currency, source) \
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                rusqlite::params![account_id, date, balance, snapshot_currency, BACKFILL_SOURCE],
+            )?;
+            if inserted > 0 {
+                snapshots_created += 1;
+                created_for_account = true;
+                earliest_date = Some(match earliest_date {
+                    Some(cur) if cur <= *date => cur,
+                    _ => date.clone(),
+                });
+            }
+            subtract += *delta_by_date.get(date).unwrap_or(&0.0);
+        }
+        if created_for_account {
+            accounts_backfilled += 1;
+        }
+    }
+
+    let distinct_dates: usize = tx.query_row(
+        "SELECT COUNT(DISTINCT bs.snapshot_date) FROM balance_snapshots bs \
+         JOIN accounts a ON a.id = bs.account_id WHERE a.is_active = 1",
+        [],
+        |r| r.get::<_, i64>(0),
+    )? as usize;
+
+    tx.commit()?;
+
+    Ok(BackfillResult {
+        accounts_backfilled,
+        snapshots_created,
+        distinct_dates,
+        earliest_date,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -500,6 +668,15 @@ mod tests {
             "INSERT OR REPLACE INTO balance_snapshots (account_id, snapshot_date, balance, currency) \
              VALUES (?1, ?2, ?3, ?4)",
             rusqlite::params![account_id, date, balance, currency],
+        )
+        .unwrap();
+    }
+
+    fn add_txn(conn: &Connection, account_id: i64, date: &str, amount: f64, currency: &str) {
+        conn.execute(
+            "INSERT INTO transactions (account_id, txn_date, description, amount, currency) \
+             VALUES (?1, ?2, 'txn', ?3, ?4)",
+            rusqlite::params![account_id, date, amount, currency],
         )
         .unwrap();
     }
@@ -707,5 +884,176 @@ mod tests {
         assert!(!d.has_previous);
         assert_eq!(d.current_date, None);
         assert_eq!(d.total, MoneyPair::default());
+    }
+
+    #[test]
+    fn backfill_reconstructs_history_from_transactions() {
+        let mut conn = setup();
+        let acct = add_typed_account(&conn, "Chase Checking", "USD", "chequing");
+
+        // Anchor: balance 1000 on 2025-03-01. Positive amounts raised the balance, negatives lowered it.
+        add_snapshot(&conn, acct, "2025-03-01", 1000.0, "USD");
+        add_txn(&conn, acct, "2025-01-15", 200.0, "USD"); // deposit
+        add_txn(&conn, acct, "2025-02-10", -50.0, "USD"); // spend
+        add_txn(&conn, acct, "2025-03-01", 100.0, "USD"); // on the anchor date (already in 1000)
+
+        let res = backfill_history(&mut conn).unwrap();
+        assert_eq!(res.accounts_backfilled, 1);
+        assert_eq!(res.snapshots_created, 2);
+        assert_eq!(res.distinct_dates, 3);
+        assert_eq!(res.earliest_date.as_deref(), Some("2025-01-15"));
+
+        // balance(2025-02-10) = 1000 - 100 (the later +100) = 900.
+        // balance(2025-01-15) = 1000 - (100 - 50) = 950.
+        let series = compute_net_worth_history(&conn).unwrap();
+        assert_eq!(series.len(), 3);
+        assert_eq!(series[0].date, "2025-01-15");
+        assert_eq!(series[0].total_usd, 950.0);
+        assert_eq!(series[1].date, "2025-02-10");
+        assert_eq!(series[1].total_usd, 900.0);
+        assert_eq!(series[2].date, "2025-03-01");
+        assert_eq!(series[2].total_usd, 1000.0);
+    }
+
+    #[test]
+    fn backfill_does_not_overwrite_real_snapshots() {
+        let mut conn = setup();
+        let acct = add_typed_account(&conn, "Chase Checking", "USD", "chequing");
+
+        add_snapshot(&conn, acct, "2025-03-01", 1000.0, "USD");
+        // A real manual snapshot already exists on an intermediate date.
+        add_snapshot(&conn, acct, "2025-02-10", 777.0, "USD");
+        add_txn(&conn, acct, "2025-01-15", 200.0, "USD");
+        add_txn(&conn, acct, "2025-02-10", -50.0, "USD");
+
+        let res = backfill_history(&mut conn).unwrap();
+        // Only 2025-01-15 is newly created; 2025-02-10 is left untouched.
+        assert_eq!(res.snapshots_created, 1);
+
+        let (balance, source): (f64, String) = conn
+            .query_row(
+                "SELECT balance, source FROM balance_snapshots \
+                 WHERE account_id = ?1 AND snapshot_date = '2025-02-10'",
+                [acct],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(balance, 777.0);
+        assert_eq!(source, "manual");
+    }
+
+    #[test]
+    fn backfill_is_idempotent() {
+        let mut conn = setup();
+        let acct = add_typed_account(&conn, "Chase Checking", "USD", "chequing");
+        add_snapshot(&conn, acct, "2025-03-01", 1000.0, "USD");
+        add_txn(&conn, acct, "2025-01-15", 200.0, "USD");
+        add_txn(&conn, acct, "2025-02-10", -50.0, "USD");
+
+        let first = backfill_history(&mut conn).unwrap();
+        let second = backfill_history(&mut conn).unwrap();
+        assert_eq!(first, second);
+
+        // Re-running deletes prior backfill rows first, so there are no duplicates.
+        let backfill_rows: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM balance_snapshots WHERE source = 'backfill'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(backfill_rows, 2);
+        assert_eq!(compute_net_worth_history(&conn).unwrap().len(), 3);
+    }
+
+    #[test]
+    fn backfill_skips_account_without_anchor() {
+        let mut conn = setup();
+        let acct = add_typed_account(&conn, "No Snapshot", "USD", "chequing");
+        add_txn(&conn, acct, "2025-01-15", 200.0, "USD");
+
+        let res = backfill_history(&mut conn).unwrap();
+        assert_eq!(res.accounts_backfilled, 0);
+        assert_eq!(res.snapshots_created, 0);
+        assert_eq!(res.distinct_dates, 0);
+        assert!(compute_net_worth_history(&conn).unwrap().is_empty());
+    }
+
+    #[test]
+    fn backfill_excludes_transactions_after_anchor() {
+        let mut conn = setup();
+        let acct = add_typed_account(&conn, "Chase Checking", "USD", "chequing");
+
+        add_snapshot(&conn, acct, "2025-02-01", 500.0, "USD");
+        add_txn(&conn, acct, "2025-01-15", 100.0, "USD");
+        // A transaction dated after the anchor must not affect the reconstruction.
+        add_txn(&conn, acct, "2025-03-01", 1000.0, "USD");
+
+        let res = backfill_history(&mut conn).unwrap();
+        assert_eq!(res.snapshots_created, 1);
+
+        // balance(2025-01-15) = 500 (the post-anchor +1000 is ignored, and nothing falls between
+        // 2025-01-15 and the 2025-02-01 anchor).
+        let balance: f64 = conn
+            .query_row(
+                "SELECT balance FROM balance_snapshots \
+                 WHERE account_id = ?1 AND snapshot_date = '2025-01-15'",
+                [acct],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(balance, 500.0);
+
+        // No snapshot was invented on the post-anchor transaction's date.
+        let after: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM balance_snapshots \
+                 WHERE account_id = ?1 AND snapshot_date = '2025-03-01'",
+                [acct],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(after, 0);
+    }
+
+    #[test]
+    fn backfill_carries_accounts_across_the_shared_grid() {
+        // Two accounts share an anchor date. Account A transacts on two earlier dates; account B has
+        // no transactions at all. B must be carried flat across A's dates (present from the start at
+        // its anchor balance) rather than contributing 0 until the anchor and then popping in.
+        let mut conn = setup();
+        let a = add_typed_account(&conn, "Chase Checking", "USD", "chequing");
+        let b = add_typed_account(&conn, "Bask Savings", "USD", "savings");
+
+        add_snapshot(&conn, a, "2025-03-01", 1000.0, "USD");
+        add_snapshot(&conn, b, "2025-03-01", 500.0, "USD");
+        add_txn(&conn, a, "2025-01-10", -100.0, "USD");
+        add_txn(&conn, a, "2025-02-01", 200.0, "USD");
+
+        let res = backfill_history(&mut conn).unwrap();
+        // A: 2025-01-10 + 2025-02-01; B carried onto both of A's dates -> 4 rows, 2 accounts.
+        assert_eq!(res.accounts_backfilled, 2);
+        assert_eq!(res.snapshots_created, 4);
+
+        // B is reconstructed flat at 500 on a date it never transacted on.
+        let b_early: f64 = conn
+            .query_row(
+                "SELECT balance FROM balance_snapshots \
+                 WHERE account_id = ?1 AND snapshot_date = '2025-01-10'",
+                [b],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(b_early, 500.0);
+
+        // The total line has no cliffs: A 800 + B 500, then A 1000 + B 500, then the anchors.
+        let series = compute_net_worth_history(&conn).unwrap();
+        assert_eq!(series.len(), 3);
+        assert_eq!(series[0].date, "2025-01-10");
+        assert_eq!(series[0].total_usd, 1300.0);
+        assert_eq!(series[1].date, "2025-02-01");
+        assert_eq!(series[1].total_usd, 1500.0);
+        assert_eq!(series[2].date, "2025-03-01");
+        assert_eq!(series[2].total_usd, 1500.0);
     }
 }

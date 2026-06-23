@@ -16,6 +16,11 @@ interface DataPoint {
 interface Props {
   data: DataPoint[];
   currency: Currency;
+  /** When provided, the empty state offers a button to reconstruct history from transactions. */
+  onBackfill?: () => void;
+  backfilling?: boolean;
+  /** Optional message shown under the empty state (e.g. the result of a backfill attempt). */
+  note?: string | null;
 }
 
 const fmt = (value: number, currency: Currency) =>
@@ -26,11 +31,28 @@ const fmt = (value: number, currency: Currency) =>
     maximumFractionDigits: 1,
   }).format(value);
 
-export default function NetWorthChart({ data, currency }: Props) {
+export default function NetWorthChart({
+  data,
+  currency,
+  onBackfill,
+  backfilling = false,
+  note,
+}: Props) {
   if (data.length < 2) {
     return (
-      <div className="flex h-40 items-center justify-center rounded-2xl border border-slate-700 bg-slate-800/40 text-sm text-slate-500">
-        Add balance snapshots over time to see your net worth chart.
+      <div className="flex h-40 flex-col items-center justify-center gap-3 rounded-2xl border border-slate-700 bg-slate-800/40 px-4 text-center text-sm text-slate-500">
+        <span>Add balance snapshots over time to see your net worth chart.</span>
+        {onBackfill && (
+          <button
+            onClick={onBackfill}
+            disabled={backfilling}
+            title="Reconstruct past balances from your transaction history"
+            className="flex items-center gap-1.5 rounded-lg border border-indigo-700/60 bg-indigo-900/30 px-3 py-1.5 text-xs text-indigo-200 hover:bg-indigo-900/60 disabled:opacity-50 transition-colors"
+          >
+            {backfilling ? "Reconstructing…" : "↺ Reconstruct from transactions"}
+          </button>
+        )}
+        {note && <span className="text-xs text-slate-500">{note}</span>}
       </div>
     );
   }

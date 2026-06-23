@@ -35,6 +35,7 @@ pub fn run() {
             commands::net_worth::get_net_worth,
             commands::net_worth::get_net_worth_history,
             commands::net_worth::get_net_worth_delta,
+            commands::net_worth::backfill_net_worth_history,
             commands::goals::get_goal_progress,
             commands::goals::set_goal_target,
             commands::cashflow::get_cashflow_summary,
