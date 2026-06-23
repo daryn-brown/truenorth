@@ -111,6 +111,15 @@ export interface NetWorthHistoryPoint {
   total_cad: number;
 }
 
+/** Result summary of reconstructing net-worth history from transactions. Mirrors the Rust `BackfillResult`. */
+export interface BackfillResult {
+  accounts_backfilled: number;
+  snapshots_created: number;
+  /** Distinct snapshot dates after the backfill. The chart needs at least two to draw. */
+  distinct_dates: number;
+  earliest_date: string | null;
+}
+
 /** A money figure in both reporting currencies, mirrored from the Rust `MoneyPair`. */
 export interface MoneyPair {
   usd: number;
