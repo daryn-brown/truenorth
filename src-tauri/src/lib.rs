@@ -74,6 +74,7 @@ pub fn run() {
             commands::ai::ai_github_cli_login,
             commands::ai::ai_list_models,
             commands::ai::ai_chat,
+            commands::ai::ai_categorize_transactions,
         ])
         .run(tauri::generate_context!())
         .expect("TrueNorth failed to start");

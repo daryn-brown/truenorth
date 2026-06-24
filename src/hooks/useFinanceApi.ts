@@ -11,6 +11,7 @@ import type {
   AddBalanceSnapshotPayload,
   BackfillResult,
   CashflowSummary,
+  CategorizeResult,
   ClassifiedTransaction,
   FlowType,
   FxRate,
@@ -212,6 +213,15 @@ export const aiListModels = (): Promise<ModelInfo[]> =>
 /** Send the conversation; the backend prepends a grounding snapshot of your finances. */
 export const aiChat = (messages: ChatMessage[]): Promise<ChatMessage> =>
   invoke("ai_chat", { messages });
+
+/**
+ * Ask the configured model to label recent transactions by spending category and flag any that
+ * are really internal transfers. Stored categories win over local guesses; transfer flags only
+ * touch rows you haven't manually retagged.
+ */
+export const aiCategorizeTransactions = (
+  limit?: number,
+): Promise<CategorizeResult> => invoke("ai_categorize_transactions", { limit });
 
 interface BalanceSnapshotResult {
   id: number;

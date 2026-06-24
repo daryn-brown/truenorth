@@ -322,6 +322,22 @@ export interface ClassifiedTransaction {
   flow_type: FlowType;
   /** True when the flow type comes from a manual override rather than a rule/sign default. */
   is_override: boolean;
+  /** Best-guess spending category (stored AI/manual value, else a local merchant guess). */
+  category: string | null;
+}
+
+/** A spending category and its total over the window. Mirrors the Rust `CategoryTotal`. */
+export interface CategoryTotal {
+  category: string;
+  amount: MoneyPair;
+}
+
+/** Outcome of an AI "Refine categories" pass. Mirrors the Rust `CategorizeResult`. */
+export interface CategorizeResult {
+  categorized: number;
+  flagged_transfers: number;
+  considered: number;
+  model: string;
 }
 
 /**
@@ -341,6 +357,8 @@ export interface CashflowSummary {
   txn_count: number;
   /** True when some transaction's currency had no FX rate (counted as 0). */
   currency_warning: boolean;
+  /** Variable spending broken down by category, largest (USD) first. */
+  variable_by_category: CategoryTotal[];
 }
 
 /** Questrade direct-connection state, mirrored from the Rust `QuestradeStatus`. */

@@ -34,6 +34,12 @@ and suggest what to add, import, or sync.\n\
 - Do the math carefully and show the key numbers you used. Always state the currency — this user \
 holds both USD and CAD.\n\
 - Be concise and practical: clear observations, comparisons, and tradeoffs, not generic boilerplate.\n\
+- Transactions carry a flow (income / fixed / variable / transfer) and a best-guess spending \
+category (Groceries, Dining, Transport, etc.). Transfers are internal moves — money sent to the \
+user's own accounts, a brokerage or exchange, or a credit-card payment — and are NOT spending; \
+never count them as variable spending or income.\n\
+- When asked where money goes, use the variable-spending-by-category breakdown and the merchant \
+names in the transaction list; infer the likely purpose of a purchase from the merchant.\n\
 - You are an educational tool, not a licensed financial or tax advisor; note significant caveats \
 briefly when they matter, without disclaiming every sentence.\n\
 - Never invent balances, transactions, or accounts that are not in the snapshot.";
@@ -296,6 +302,189 @@ pub async fn ai_chat(
     Ok(ChatMessage { role: "assistant".into(), content: answer })
 }
 
+/// Outcome of an AI "Refine categories" pass.
+#[derive(Debug, Serialize)]
+pub struct CategorizeResult {
+    /// How many transactions had a category written.
+    pub categorized: usize,
+    /// How many were newly reclassified as internal transfers (only rows with no manual override).
+    pub flagged_transfers: usize,
+    /// How many transactions were sent to the model.
+    pub considered: usize,
+    /// The model that produced the labels (for the UI to show).
+    pub model: String,
+}
+
+struct CatTxn {
+    id: i64,
+    description: String,
+    amount: f64,
+    currency: String,
+}
+
+#[derive(Deserialize)]
+struct CatItem {
+    id: i64,
+    #[serde(default)]
+    category: Option<String>,
+    #[serde(default)]
+    transfer: Option<bool>,
+}
+
+/// Extract the first top-level JSON array from a model reply, tolerating ```json fences or prose
+/// around it.
+fn extract_json_array(reply: &str) -> Option<&str> {
+    let start = reply.find('[')?;
+    let end = reply.rfind(']')?;
+    if end > start {
+        Some(&reply[start..=end])
+    } else {
+        None
+    }
+}
+
+/// Ask the configured model to label recent transactions by spending category and flag any that
+/// are really internal transfers (moves to the user's own accounts, a brokerage, or a card
+/// payment). Results are stored on `transactions.category`; transfer flags are written to
+/// `flow_override` only for rows the user hasn't already pinned, so a manual choice always wins.
+#[tauri::command]
+pub async fn ai_categorize_transactions(
+    db: State<'_, AppDb>,
+    limit: Option<i64>,
+) -> Result<CategorizeResult, String> {
+    let want = limit.unwrap_or(75).clamp(1, 200);
+
+    // 1) Gather the most recent transactions under a short lock.
+    let (provider, github_model, ollama_model, ollama_url, _include) = {
+        let conn = db.0.lock().map_err(|e| e.to_string())?;
+        read_settings(&conn).map_err(|e| e.to_string())?
+    };
+    let txns: Vec<CatTxn> = {
+        let conn = db.0.lock().map_err(|e| e.to_string())?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT t.id, t.description, t.amount, t.currency \
+                 FROM transactions t JOIN accounts a ON a.id = t.account_id \
+                 WHERE a.is_active = 1 \
+                 ORDER BY t.txn_date DESC, t.id DESC LIMIT ?1",
+            )
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map(params![want], |r| {
+                Ok(CatTxn {
+                    id: r.get(0)?,
+                    description: r.get(1)?,
+                    amount: r.get(2)?,
+                    currency: r.get(3)?,
+                })
+            })
+            .map_err(|e| e.to_string())?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| e.to_string())?;
+        rows
+    };
+    if txns.is_empty() {
+        return Err("No transactions to categorize yet. Import or sync some first.".into());
+    }
+    let considered = txns.len();
+
+    // 2) Build the prompt. Constrain the model to the canonical category set so labels stay
+    //    consistent with the local guesser.
+    let allowed = crate::commands::cashflow::CATEGORIES.join(", ");
+    let system = format!(
+        "You label personal-finance transactions. For each transaction you are given, decide the \
+single best spending category and whether it is actually an internal transfer (money moved to \
+the user's OWN account, a brokerage/investment/crypto account, or a credit-card payment) rather \
+than real spending.\n\
+Allowed categories (use EXACTLY one of these spellings): {allowed}.\n\
+Infer the purpose from the merchant name. Mark transfer=true for moves to brokerages/exchanges \
+(Wealthsimple, Questrade, Robinhood, Schwab, Fidelity, Vanguard, Coinbase, etc.), account-to-\
+account moves, and card payments; otherwise transfer=false.\n\
+Reply with ONLY a JSON array, no prose, no code fences. Each element: \
+{{\"id\": <number>, \"category\": \"<one allowed category>\", \"transfer\": <true|false>}}."
+    );
+    let mut user = String::with_capacity(txns.len() * 48);
+    user.push_str("Transactions (id | description | amount currency):\n");
+    for t in &txns {
+        user.push_str(&format!(
+            "{} | {} | {:.2} {}\n",
+            t.id, t.description, t.amount, t.currency
+        ));
+    }
+
+    let messages = vec![
+        ChatMessage::system(system),
+        ChatMessage { role: "user".into(), content: user },
+    ];
+
+    // 3) Call the model with no DB lock held.
+    let reply = if provider == "ollama" {
+        ai::chat_completion(&ollama_url, None, &ollama_model, &messages)
+            .await
+            .map_err(|e| e.to_string())?
+    } else {
+        let token = secrets::get_secret(GITHUB_MODELS_TOKEN)
+            .map_err(|e| e.to_string())?
+            .filter(|t| !t.trim().is_empty())
+            .ok_or(
+                "Add a GitHub token (with the models:read scope) in AI settings first, or switch to Ollama.",
+            )?;
+        ai::chat_completion(ai::GITHUB_MODELS_BASE, Some(&token), &github_model, &messages)
+            .await
+            .map_err(|e| e.to_string())?
+    };
+
+    // 4) Parse the JSON array, ignoring anything around it.
+    let json = extract_json_array(&reply)
+        .ok_or("The model did not return a JSON array of categories. Try again.")?;
+    let items: Vec<CatItem> = serde_json::from_str(json)
+        .map_err(|e| format!("Could not parse the model's category response: {e}"))?;
+
+    // 5) Apply: store sanitized categories; flag transfers only where the user hasn't overridden.
+    let known: std::collections::HashSet<i64> = txns.iter().map(|t| t.id).collect();
+    let mut categorized = 0usize;
+    let mut flagged_transfers = 0usize;
+    {
+        let conn = db.0.lock().map_err(|e| e.to_string())?;
+        for item in &items {
+            if !known.contains(&item.id) {
+                continue;
+            }
+            if let Some(cat) = item
+                .category
+                .as_deref()
+                .and_then(crate::commands::cashflow::canonical_category)
+            {
+                let n = conn
+                    .execute(
+                        "UPDATE transactions SET category = ?1 WHERE id = ?2",
+                        params![cat, item.id],
+                    )
+                    .map_err(|e| e.to_string())?;
+                categorized += n;
+            }
+            if item.transfer == Some(true) {
+                let n = conn
+                    .execute(
+                        "UPDATE transactions SET flow_override = 'transfer' \
+                         WHERE id = ?1 AND (flow_override IS NULL OR flow_override = '')",
+                        params![item.id],
+                    )
+                    .map_err(|e| e.to_string())?;
+                flagged_transfers += n;
+            }
+        }
+    }
+
+    let model = if provider == "ollama" { ollama_model } else { github_model };
+    Ok(CategorizeResult {
+        categorized,
+        flagged_transfers,
+        considered,
+        model,
+    })
+}
+
 // ---------------------------------------------------------------------------
 // Financial context ("RAG over your own SQLite")
 // ---------------------------------------------------------------------------
@@ -398,6 +587,12 @@ fn build_context(db: &State<AppDb>, include_real: bool) -> Result<String, String
             cashflow.savings_rate * 100.0
         ));
 
+        if !cashflow.variable_by_category.is_empty() {
+            s.push_str("Variable spending by category (largest first):\n");
+            for c in cashflow.variable_by_category.iter().take(8) {
+                s.push_str(&format!("  - {}: USD ${:.2}\n", c.category, c.amount.usd));
+            }
+        }
         s.push_str(&format!(
             "Goal: target USD ${:.0}, current USD ${:.2} ({:.0}% there, gap USD ${:.2}){}\n",
             goal.target_usd,
@@ -433,9 +628,10 @@ fn build_context(db: &State<AppDb>, include_real: bool) -> Result<String, String
         if !txns.is_empty() {
             s.push_str(&format!("\nRecent transactions (latest {}):\n", txns.len()));
             for t in &txns {
+                let cat = t.category.as_deref().unwrap_or("Uncategorized");
                 s.push_str(&format!(
-                    "  - {} | {} | {:.2} {} | {}\n",
-                    t.txn_date, t.description, t.amount, t.currency, t.flow_type
+                    "  - {} | {} | {:.2} {} | {} | {}\n",
+                    t.txn_date, t.description, t.amount, t.currency, t.flow_type, cat
                 ));
             }
         }

@@ -6,7 +6,11 @@ import type {
   FlowType,
   MoneyPair,
 } from "../types/finance";
-import { listRecentTransactions, setTransactionFlow } from "../hooks/useFinanceApi";
+import {
+  aiCategorizeTransactions,
+  listRecentTransactions,
+  setTransactionFlow,
+} from "../hooks/useFinanceApi";
 
 interface Props {
   summary: CashflowSummary | null;
@@ -62,6 +66,8 @@ export default function CashflowCard({
   const [txns, setTxns] = useState<ClassifiedTransaction[]>([]);
   const [txnsLoading, setTxnsLoading] = useState(false);
   const [savingId, setSavingId] = useState<number | null>(null);
+  const [refining, setRefining] = useState(false);
+  const [refineMsg, setRefineMsg] = useState<string | null>(null);
 
   const loadTxns = useCallback(async () => {
     setTxnsLoading(true);
@@ -88,6 +94,34 @@ export default function CashflowCard({
       console.error("Failed to retag transaction:", err);
     } finally {
       setSavingId(null);
+    }
+  };
+
+  const handleRefine = async () => {
+    setRefining(true);
+    setRefineMsg(null);
+    try {
+      const res = await aiCategorizeTransactions(50);
+      setOpen(true);
+      await loadTxns();
+      onChanged();
+      const parts = [`Categorized ${res.categorized} of ${res.considered}`];
+      if (res.flagged_transfers > 0) {
+        parts.push(
+          `reclassified ${res.flagged_transfers} as transfer${
+            res.flagged_transfers === 1 ? "" : "s"
+          }`,
+        );
+      }
+      setRefineMsg(`${parts.join(", ")} (via ${res.model}).`);
+    } catch (err) {
+      setRefineMsg(
+        typeof err === "string"
+          ? err
+          : "AI categorization failed. Check your AI provider in settings.",
+      );
+    } finally {
+      setRefining(false);
     }
   };
 
@@ -204,6 +238,36 @@ export default function CashflowCard({
             />
           </div>
 
+          {summary.variable_by_category.length > 0 && (
+            <div className="mt-4">
+              <p className="text-xs font-medium uppercase tracking-wider text-slate-500">
+                Where variable spending goes
+              </p>
+              <div className="mt-2 space-y-1.5">
+                {summary.variable_by_category.slice(0, 5).map((c) => {
+                  const val = homeCurrency === "CAD" ? c.amount.cad : c.amount.usd;
+                  const pct = Math.max(2, Math.min(100, (val / Math.max(variableVal, 1)) * 100));
+                  return (
+                    <div key={c.category} className="flex items-center gap-2">
+                      <span className="w-24 shrink-0 truncate text-xs text-slate-400">
+                        {c.category}
+                      </span>
+                      <div className="h-1.5 flex-1 overflow-hidden rounded-full bg-slate-800">
+                        <div
+                          className="h-full rounded-full bg-amber-500/70"
+                          style={{ width: `${pct}%` }}
+                        />
+                      </div>
+                      <span className="w-16 shrink-0 text-right text-xs text-slate-300">
+                        {money(c.amount, homeCurrency)}
+                      </span>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+
           <p className="mt-4 rounded-xl border border-slate-700/70 bg-slate-900/40 px-4 py-3 text-xs text-slate-400">
             Fixed commitments are kept out of the <span className="text-amber-300">variable</span>{" "}
             "lifestyle creep" number, and {summary.transfer_count} internal transfer
@@ -217,12 +281,23 @@ export default function CashflowCard({
             )}
           </p>
 
-          <button
-            onClick={() => setOpen((o) => !o)}
-            className="mt-4 text-xs font-medium text-indigo-300 hover:text-indigo-200"
-          >
-            {open ? "Hide transactions" : `Review transactions (${summary.txn_count})`}
-          </button>
+          <div className="mt-4 flex flex-wrap items-center gap-x-4 gap-y-2">
+            <button
+              onClick={() => setOpen((o) => !o)}
+              className="text-xs font-medium text-indigo-300 hover:text-indigo-200"
+            >
+              {open ? "Hide transactions" : `Review transactions (${summary.txn_count})`}
+            </button>
+            <button
+              onClick={handleRefine}
+              disabled={refining}
+              title="Use your AI provider to label merchants and spot internal transfers"
+              className="text-xs font-medium text-indigo-300 hover:text-indigo-200 disabled:opacity-50"
+            >
+              {refining ? "Refining with AI…" : "Refine categories with AI"}
+            </button>
+          </div>
+          {refineMsg && <p className="mt-2 text-xs text-slate-400">{refineMsg}</p>}
 
           {open && (
             <div className="mt-3 space-y-1.5">
@@ -239,7 +314,12 @@ export default function CashflowCard({
                     </span>
                     <div className="min-w-0 flex-1">
                       <p className="truncate text-sm text-slate-200">{t.description}</p>
-                      <p className="truncate text-[11px] text-slate-500">{t.account_name}</p>
+                      <p className="truncate text-[11px] text-slate-500">
+                        {t.account_name}
+                        {t.category && (
+                          <span className="text-slate-400"> · {t.category}</span>
+                        )}
+                      </p>
                     </div>
                     <span
                       className={`shrink-0 text-sm font-medium ${
