@@ -86,6 +86,9 @@ pub struct ClassifiedTransaction {
     pub flow_type: String,
     /// True when the flow type comes from a manual override rather than a rule/sign default.
     pub is_override: bool,
+    /// Best-guess spending category: a stored AI/manual value if present, otherwise a local
+    /// merchant guess. `None` when nothing matched.
+    pub category: Option<String>,
 }
 
 /// Rolling-window cashflow totals, with each figure in both reporting currencies.
@@ -110,6 +113,16 @@ pub struct CashflowSummary {
     pub txn_count: i64,
     /// True when at least one transaction's currency had no stored FX rate (so it counted as 0).
     pub currency_warning: bool,
+    /// Variable spending broken down by category, largest (USD) first. Lets the UI and the AI
+    /// see where lifestyle money actually goes.
+    pub variable_by_category: Vec<CategoryTotal>,
+}
+
+/// One spending category and its total magnitude over the window, in both reporting currencies.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct CategoryTotal {
+    pub category: String,
+    pub amount: MoneyPair,
 }
 
 // ---------------------------------------------------------------------------
@@ -196,6 +209,7 @@ struct FlowInput {
     currency: String,
     override_opt: Option<String>,
     account_type: String,
+    category: Option<String>,
 }
 
 /// Whether any rule matches this description (sign-independent).
@@ -204,6 +218,267 @@ fn rule_matches(description: &str, rules: &[(String, FlowType)]) -> bool {
     rules
         .iter()
         .any(|(pattern, _)| !pattern.is_empty() && hay.contains(pattern.as_str()))
+}
+
+// ---------------------------------------------------------------------------
+// Merchant categorisation (pure, local)
+// ---------------------------------------------------------------------------
+// A deterministic best-guess of *what a purchase was for*, derived from the merchant in the
+// description. Used for display and to ground the optional AI "Refine" pass. Independent of
+// FlowType: a rent payment is flow=Fixed and category=Housing. Anything unmatched is left
+// uncategorised for the AI pass (or the user) to fill in.
+
+/// The canonical spending categories. Both the local guesser and the AI refine pass are limited
+/// to this set so labels stay consistent across the app.
+pub const CATEGORIES: &[&str] = &[
+    "Groceries",
+    "Dining",
+    "Coffee",
+    "Transport",
+    "Fuel",
+    "Shopping",
+    "Subscriptions",
+    "Utilities",
+    "Housing",
+    "Travel",
+    "Health",
+    "Entertainment",
+    "Fees",
+    "Education",
+    "Gifts",
+    "Charity",
+    "Cash",
+    "Income",
+    "Transfer",
+    "Other",
+];
+
+/// Lowercased-substring -> category table, checked in order (first hit wins). Ordering matters:
+/// narrower buckets (Coffee, Groceries) precede broader ones (Dining, Shopping) so a cafe doesn't
+/// fall into the generic food bucket. Curated to common North-American merchants.
+const MERCHANT_CATEGORIES: &[(&str, &str)] = &[
+    // Coffee (before Dining)
+    ("starbucks", "Coffee"),
+    ("tim hortons", "Coffee"),
+    ("second cup", "Coffee"),
+    ("dunkin", "Coffee"),
+    ("peet's", "Coffee"),
+    ("blenz", "Coffee"),
+    ("coffee", "Coffee"),
+    ("cafe", "Coffee"),
+    // Groceries (before Dining/Shopping)
+    ("loblaw", "Groceries"),
+    ("no frills", "Groceries"),
+    ("sobeys", "Groceries"),
+    ("safeway", "Groceries"),
+    ("save-on-foods", "Groceries"),
+    ("save on foods", "Groceries"),
+    ("whole foods", "Groceries"),
+    ("trader joe", "Groceries"),
+    ("costco", "Groceries"),
+    ("superstore", "Groceries"),
+    ("freshco", "Groceries"),
+    ("food basics", "Groceries"),
+    ("longo", "Groceries"),
+    ("kroger", "Groceries"),
+    ("aldi", "Groceries"),
+    ("publix", "Groceries"),
+    ("metro", "Groceries"),
+    ("grocery", "Groceries"),
+    ("supermarket", "Groceries"),
+    // Dining / food delivery
+    ("mcdonald", "Dining"),
+    ("restaurant", "Dining"),
+    ("uber eats", "Dining"),
+    ("ubereats", "Dining"),
+    ("doordash", "Dining"),
+    ("skip the dishes", "Dining"),
+    ("skipthedishes", "Dining"),
+    ("grubhub", "Dining"),
+    ("a&w", "Dining"),
+    ("burger king", "Dining"),
+    ("wendy", "Dining"),
+    ("subway", "Dining"),
+    ("chipotle", "Dining"),
+    ("pizza", "Dining"),
+    ("sushi", "Dining"),
+    ("kitchen", "Dining"),
+    ("grill", "Dining"),
+    ("bar & grill", "Dining"),
+    ("tavern", "Dining"),
+    ("brewery", "Dining"),
+    // Fuel
+    ("shell", "Fuel"),
+    ("esso", "Fuel"),
+    ("petro-canada", "Fuel"),
+    ("petro canada", "Fuel"),
+    ("chevron", "Fuel"),
+    ("husky", "Fuel"),
+    ("ultramar", "Fuel"),
+    ("exxon", "Fuel"),
+    ("gas bar", "Fuel"),
+    ("gas station", "Fuel"),
+    ("gasoline", "Fuel"),
+    ("petrol", "Fuel"),
+    ("fuel", "Fuel"),
+    // Transport / transit / rideshare
+    ("uber", "Transport"),
+    ("lyft", "Transport"),
+    ("transit", "Transport"),
+    ("translink", "Transport"),
+    ("presto", "Transport"),
+    ("compass vancouver", "Transport"),
+    ("parking", "Transport"),
+    ("via rail", "Transport"),
+    ("taxi", "Transport"),
+    // Travel
+    ("air canada", "Travel"),
+    ("westjet", "Travel"),
+    ("airlines", "Travel"),
+    ("airline", "Travel"),
+    ("expedia", "Travel"),
+    ("airbnb", "Travel"),
+    ("hotel", "Travel"),
+    ("marriott", "Travel"),
+    ("hilton", "Travel"),
+    ("booking.com", "Travel"),
+    // Subscriptions / streaming / software
+    ("netflix", "Subscriptions"),
+    ("spotify", "Subscriptions"),
+    ("disney+", "Subscriptions"),
+    ("disney plus", "Subscriptions"),
+    ("amazon prime", "Subscriptions"),
+    ("prime video", "Subscriptions"),
+    ("youtube premium", "Subscriptions"),
+    ("apple.com/bill", "Subscriptions"),
+    ("icloud", "Subscriptions"),
+    ("patreon", "Subscriptions"),
+    ("openai", "Subscriptions"),
+    ("github", "Subscriptions"),
+    ("adobe", "Subscriptions"),
+    ("audible", "Subscriptions"),
+    ("crave", "Subscriptions"),
+    // Utilities / telecom
+    ("hydro", "Utilities"),
+    ("fortis", "Utilities"),
+    ("enbridge", "Utilities"),
+    ("rogers", "Utilities"),
+    ("telus", "Utilities"),
+    ("bell mobility", "Utilities"),
+    ("bell canada", "Utilities"),
+    ("shaw", "Utilities"),
+    ("fido", "Utilities"),
+    ("koodo", "Utilities"),
+    ("freedom mobile", "Utilities"),
+    ("at&t", "Utilities"),
+    ("verizon", "Utilities"),
+    ("comcast", "Utilities"),
+    ("internet", "Utilities"),
+    ("wireless", "Utilities"),
+    ("utility", "Utilities"),
+    // Health / pharmacy / fitness
+    ("shoppers drug mart", "Health"),
+    ("pharmacy", "Health"),
+    ("pharmaprix", "Health"),
+    ("rexall", "Health"),
+    ("walgreens", "Health"),
+    ("dental", "Health"),
+    ("dentist", "Health"),
+    ("clinic", "Health"),
+    ("goodlife", "Health"),
+    ("fitness", "Health"),
+    ("gym", "Health"),
+    // Entertainment
+    ("cineplex", "Entertainment"),
+    ("cinema", "Entertainment"),
+    ("steam games", "Entertainment"),
+    ("steampowered", "Entertainment"),
+    ("playstation", "Entertainment"),
+    ("xbox", "Entertainment"),
+    ("nintendo", "Entertainment"),
+    ("ticketmaster", "Entertainment"),
+    // Shopping / retail / online
+    ("amazon", "Shopping"),
+    ("amzn", "Shopping"),
+    ("ebay", "Shopping"),
+    ("etsy", "Shopping"),
+    ("best buy", "Shopping"),
+    ("apple store", "Shopping"),
+    ("ikea", "Shopping"),
+    ("winners", "Shopping"),
+    ("canadian tire", "Shopping"),
+    ("home depot", "Shopping"),
+    ("lowe's", "Shopping"),
+    ("dollarama", "Shopping"),
+    ("indigo", "Shopping"),
+    ("lululemon", "Shopping"),
+    ("aliexpress", "Shopping"),
+    ("shein", "Shopping"),
+    // Education
+    ("tuition", "Education"),
+    ("university", "Education"),
+    ("college", "Education"),
+    ("coursera", "Education"),
+    ("udemy", "Education"),
+    // Charity
+    ("donation", "Charity"),
+    ("red cross", "Charity"),
+    ("unicef", "Charity"),
+    // Housing
+    ("mortgage", "Housing"),
+    ("property tax", "Housing"),
+    ("strata", "Housing"),
+    ("condo fee", "Housing"),
+    ("rent", "Housing"),
+    // Fees / banking
+    ("interest charge", "Fees"),
+    ("overdraft", "Fees"),
+    ("service charge", "Fees"),
+    ("monthly fee", "Fees"),
+    ("atm fee", "Fees"),
+    ("foreign transaction", "Fees"),
+    // Cash / ATM
+    ("atm withdrawal", "Cash"),
+    ("cash withdrawal", "Cash"),
+    ("abm withdrawal", "Cash"),
+    // Income
+    ("payroll", "Income"),
+    ("salary", "Income"),
+    ("direct deposit", "Income"),
+    ("dividend", "Income"),
+    ("refund", "Income"),
+];
+
+/// Best-guess spending category from a description, or `None` if nothing matches. Pure and
+/// case-insensitive; used for display and to ground the AI refine pass.
+pub fn category_for(description: &str) -> Option<&'static str> {
+    let hay = description.to_ascii_lowercase();
+    MERCHANT_CATEGORIES
+        .iter()
+        .find(|(needle, _)| hay.contains(needle))
+        .map(|(_, cat)| *cat)
+}
+
+/// Map an arbitrary label onto a canonical category (case-insensitive), or `None` if it isn't one
+/// of [`CATEGORIES`]. Used to sanitise AI-suggested labels before they're stored.
+pub fn canonical_category(label: &str) -> Option<&'static str> {
+    let trimmed = label.trim();
+    CATEGORIES
+        .iter()
+        .copied()
+        .find(|c| c.eq_ignore_ascii_case(trimmed))
+}
+
+/// Resolve the category shown for a transaction: a stored (AI/manual) category wins over the
+/// local guess; blank stored values are ignored.
+fn resolve_category(stored: Option<&str>, description: &str) -> Option<String> {
+    if let Some(s) = stored {
+        let trimmed = s.trim();
+        if !trimmed.is_empty() {
+            return Some(trimmed.to_string());
+        }
+    }
+    category_for(description).map(|s| s.to_string())
 }
 
 /// Amount in whole cents, for exact equality matching without float wobble.
@@ -384,7 +659,7 @@ fn compute_cashflow(conn: &Connection, window_days: i64) -> rusqlite::Result<Cas
 
     let mut stmt = conn.prepare(
         "SELECT t.account_id, t.txn_date, t.amount, t.currency, t.description, t.flow_override, \
-                a.account_type \
+                a.account_type, t.category \
          FROM transactions t JOIN accounts a ON a.id = t.account_id \
          WHERE a.is_active = 1 AND t.txn_date >= ?1",
     )?;
@@ -398,6 +673,7 @@ fn compute_cashflow(conn: &Connection, window_days: i64) -> rusqlite::Result<Cas
                 description: r.get(4)?,
                 override_opt: r.get(5)?,
                 account_type: r.get(6)?,
+                category: r.get(7)?,
             })
         })?
         .collect::<Result<Vec<_>, _>>()?;
@@ -407,6 +683,7 @@ fn compute_cashflow(conn: &Connection, window_days: i64) -> rusqlite::Result<Cas
     let mut income = MoneyPair::default();
     let mut fixed = MoneyPair::default();
     let mut variable = MoneyPair::default();
+    let mut by_category: HashMap<String, MoneyPair> = HashMap::new();
     let mut transfer_count = 0i64;
     let txn_count = txns.len() as i64;
     let mut currency_warning = false;
@@ -429,10 +706,26 @@ fn compute_cashflow(conn: &Connection, window_days: i64) -> rusqlite::Result<Cas
             FlowType::Variable => {
                 variable.usd -= usd;
                 variable.cad -= cad;
+                let cat = resolve_category(t.category.as_deref(), &t.description)
+                    .unwrap_or_else(|| "Uncategorized".to_string());
+                let entry = by_category.entry(cat).or_default();
+                entry.usd -= usd;
+                entry.cad -= cad;
             }
             FlowType::Transfer => transfer_count += 1,
         }
     }
+
+    let mut variable_by_category: Vec<CategoryTotal> = by_category
+        .into_iter()
+        .map(|(category, amount)| CategoryTotal { category, amount })
+        .collect();
+    variable_by_category.sort_by(|a, b| {
+        b.amount
+            .usd
+            .partial_cmp(&a.amount.usd)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
 
     let net_savings = MoneyPair {
         usd: income.usd - fixed.usd - variable.usd,
@@ -455,6 +748,7 @@ fn compute_cashflow(conn: &Connection, window_days: i64) -> rusqlite::Result<Cas
         transfer_count,
         txn_count,
         currency_warning,
+        variable_by_category,
     })
 }
 
@@ -466,7 +760,7 @@ fn fetch_classified(conn: &Connection, limit: i64) -> rusqlite::Result<Vec<Class
 
     let mut stmt = conn.prepare(
         "SELECT t.id, t.account_id, a.name, t.txn_date, t.description, t.amount, t.currency, \
-                t.flow_override, a.account_type \
+                t.flow_override, a.account_type, t.category \
          FROM transactions t JOIN accounts a ON a.id = t.account_id \
          WHERE a.is_active = 1 \
          ORDER BY t.txn_date DESC, t.id DESC LIMIT ?1",
@@ -486,6 +780,7 @@ fn fetch_classified(conn: &Connection, limit: i64) -> rusqlite::Result<Vec<Class
             currency: r.get(6)?,
             override_opt: r.get(7)?,
             account_type: r.get(8)?,
+            category: r.get(9)?,
         });
     }
 
@@ -494,16 +789,20 @@ fn fetch_classified(conn: &Connection, limit: i64) -> rusqlite::Result<Vec<Class
     let out = inputs
         .into_iter()
         .enumerate()
-        .map(|(k, fi)| ClassifiedTransaction {
-            id: ids[k],
-            account_id: fi.account_id,
-            account_name: names[k].clone(),
-            txn_date: fi.date,
-            description: fi.description,
-            amount: fi.amount,
-            currency: fi.currency,
-            flow_type: flows[k].as_str().to_string(),
-            is_override: fi.override_opt.as_deref().and_then(FlowType::parse).is_some(),
+        .map(|(k, fi)| {
+            let category = resolve_category(fi.category.as_deref(), &fi.description);
+            ClassifiedTransaction {
+                id: ids[k],
+                account_id: fi.account_id,
+                account_name: names[k].clone(),
+                txn_date: fi.date,
+                description: fi.description,
+                amount: fi.amount,
+                currency: fi.currency,
+                flow_type: flows[k].as_str().to_string(),
+                is_override: fi.override_opt.as_deref().and_then(FlowType::parse).is_some(),
+                category,
+            }
         })
         .collect();
     Ok(out)
@@ -725,6 +1024,35 @@ mod tests {
         );
     }
 
+    #[test]
+    fn category_for_picks_specific_buckets() {
+        assert_eq!(category_for("STARBUCKS #123 VANCOUVER"), Some("Coffee"));
+        assert_eq!(category_for("NO FRILLS 4821"), Some("Groceries"));
+        assert_eq!(category_for("UBER EATS"), Some("Dining"));
+        assert_eq!(category_for("UBER TRIP HELP.UBER.COM"), Some("Transport"));
+        assert_eq!(category_for("SHELL OIL 5567"), Some("Fuel"));
+        assert_eq!(category_for("NETFLIX.COM"), Some("Subscriptions"));
+        assert_eq!(category_for("AMAZON PRIME MEMBERSHIP"), Some("Subscriptions"));
+        assert_eq!(category_for("AMAZON.CA ORDER"), Some("Shopping"));
+        assert_eq!(category_for("ROGERS WIRELESS"), Some("Utilities"));
+        assert_eq!(category_for("SOME UNKNOWN MERCHANT"), None);
+    }
+
+    #[test]
+    fn resolve_category_prefers_stored_over_local() {
+        // A stored (AI/manual) label wins over the local guess.
+        assert_eq!(
+            resolve_category(Some("Travel"), "STARBUCKS"),
+            Some("Travel".to_string())
+        );
+        // Blank stored values fall back to the local guess.
+        assert_eq!(
+            resolve_category(Some("  "), "STARBUCKS"),
+            Some("Coffee".to_string())
+        );
+        assert_eq!(resolve_category(None, "MYSTERY CO"), None);
+    }
+
     fn seed_account(conn: &Connection, currency: &str) -> i64 {
         conn.execute(
             "INSERT INTO accounts (name, institution, account_type, currency, jurisdiction) \
@@ -831,10 +1159,37 @@ mod tests {
         assert_eq!(s.fixed.cad, 800.0); // mom support, flagged fixed
         assert_eq!(s.variable.cad, 200.0); // groceries only — the card payment didn't count
         assert_eq!(s.net_savings.cad, 4000.0);
+        // The variable spend is bucketed by merchant category.
+        assert_eq!(s.variable_by_category.len(), 1);
+        assert_eq!(s.variable_by_category[0].category, "Groceries");
+        assert_eq!(s.variable_by_category[0].amount.cad, 200.0);
         // USD figures use the 1.25 pivot.
         assert_eq!(s.income.usd, 4000.0);
         assert!((s.savings_rate - 0.8).abs() < 1e-9);
         assert!(!s.currency_warning);
+    }
+
+    #[test]
+    fn brokerage_payee_counts_as_transfer_not_variable() {
+        // A debit to a brokerage/exchange is an internal move, even with no matching inflow leg
+        // synced. The back-filled rule (seed_txn_rules_v2) catches it by payee name.
+        let conn = Connection::open_in_memory().unwrap();
+        crate::db::apply_schema(&conn).unwrap();
+        crate::db::seed_defaults(&conn).unwrap();
+        conn.execute(
+            "INSERT INTO fx_rates (from_currency, to_currency, rate, rate_date) \
+             VALUES ('USD', 'CAD', 1.25, '2025-01-01')",
+            [],
+        )
+        .unwrap();
+        let acct = seed_account(&conn, "CAD");
+        let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
+        insert_txn(&conn, acct, &today, "WEALTHSIMPLE PAYMENTS INC", -2000.0, "CAD");
+        insert_txn(&conn, acct, &today, "GROCERY STORE", -150.0, "CAD");
+
+        let s = compute_cashflow(&conn, 30).unwrap();
+        assert_eq!(s.transfer_count, 1);
+        assert_eq!(s.variable.cad, 150.0); // only the groceries, not the brokerage funding
     }
 
     #[test]
