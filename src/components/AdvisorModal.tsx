@@ -25,6 +25,14 @@ const SUGGESTIONS = [
   "Which spending should I watch this month?",
 ];
 
+// GitHub Models' free tier doesn't include every catalog model (e.g. gpt-5), so a chosen model can
+// come back with a "no access" error. These are safe, free defaults to fall back to.
+const RECOMMENDED_GITHUB_MODEL = "openai/gpt-4o-mini";
+
+/** True when an error looks like GitHub Models rejecting the chosen model for this account/tier. */
+const isModelAccessError = (msg: string) =>
+  /no_access|access to (the )?model/i.test(msg);
+
 export default function AdvisorModal({ isOpen, onClose }: Props) {
   const [settings, setSettings] = useState<AiSettings | null>(null);
   const [showSettings, setShowSettings] = useState(false);
@@ -74,27 +82,57 @@ export default function AdvisorModal({ isOpen, onClose }: Props) {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "smooth" });
   }, [messages, busy]);
 
+  const runChat = useCallback(async (convo: ChatMessage[]) => {
+    setBusy(true);
+    setError(null);
+    try {
+      const reply = await aiChat(convo);
+      setMessages((m) => [...m, reply]);
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setBusy(false);
+    }
+  }, []);
+
   const send = useCallback(
     async (text: string) => {
       const content = text.trim();
       if (!content || busy) return;
-      setError(null);
-      const userMsg: ChatMessage = { role: "user", content };
-      const next = [...messages, userMsg];
+      const next: ChatMessage[] = [...messages, { role: "user", content }];
       setMessages(next);
       setInput("");
-      setBusy(true);
-      try {
-        const reply = await aiChat(next);
-        setMessages((m) => [...m, reply]);
-      } catch (e) {
-        setError(String(e));
-      } finally {
-        setBusy(false);
-      }
+      await runChat(next);
     },
-    [messages, busy],
+    [messages, busy, runChat],
   );
+
+  // After a failed send the conversation already ends with the user's turn (no assistant reply was
+  // appended), so retry just re-runs it as-is.
+  const retry = useCallback(async () => {
+    if (busy || messages.length === 0) return;
+    await runChat(messages);
+  }, [busy, messages, runChat]);
+
+  // One-click recovery from a no-access error: switch to the free default model, persist it, retry.
+  const switchToRecommendedAndRetry = useCallback(async () => {
+    if (busy) return;
+    setGithubModel(RECOMMENDED_GITHUB_MODEL);
+    try {
+      const saved = await aiSaveSettings({
+        provider,
+        github_model: RECOMMENDED_GITHUB_MODEL,
+        ollama_model: ollamaModel,
+        ollama_url: ollamaUrl,
+        include_real_data: includeRealData,
+      });
+      applySettings(saved);
+    } catch (e) {
+      setError(String(e));
+      return;
+    }
+    await retry();
+  }, [busy, provider, ollamaModel, ollamaUrl, includeRealData, applySettings, retry]);
 
   const handleSaveSettings = async () => {
     setSavingSettings(true);
@@ -181,7 +219,19 @@ export default function AdvisorModal({ isOpen, onClose }: Props) {
 
         {error && (
           <div className="mx-5 mt-3 rounded-lg border border-red-700/50 bg-red-900/20 px-3 py-2 text-xs text-red-300">
-            {error}
+            <p>{error}</p>
+            {provider === "github" &&
+              isModelAccessError(error) &&
+              githubModel !== RECOMMENDED_GITHUB_MODEL &&
+              messages.length > 0 && (
+                <button
+                  onClick={() => void switchToRecommendedAndRetry()}
+                  disabled={busy}
+                  className="mt-2 rounded-md border border-red-600/60 bg-red-800/40 px-2.5 py-1 font-medium text-red-100 hover:bg-red-800/70 disabled:opacity-50"
+                >
+                  Switch to {RECOMMENDED_GITHUB_MODEL} and retry
+                </button>
+              )}
           </div>
         )}
 
@@ -413,13 +463,23 @@ function SettingsPanel(p: SettingsProps) {
       <div>
         <div className="mb-1.5 flex items-center justify-between">
           <label className="text-xs font-medium text-slate-400">Model</label>
-          <button
-            onClick={p.onLoadModels}
-            disabled={p.loadingModels}
-            className="text-[11px] text-indigo-400 hover:text-indigo-300 disabled:opacity-50"
-          >
-            {p.loadingModels ? "Loading…" : "Load available models"}
-          </button>
+          <div className="flex items-center gap-3">
+            {isGithub && p.githubModel !== RECOMMENDED_GITHUB_MODEL && (
+              <button
+                onClick={() => p.setGithubModel(RECOMMENDED_GITHUB_MODEL)}
+                className="text-[11px] text-indigo-400 hover:text-indigo-300"
+              >
+                Use recommended
+              </button>
+            )}
+            <button
+              onClick={p.onLoadModels}
+              disabled={p.loadingModels}
+              className="text-[11px] text-indigo-400 hover:text-indigo-300 disabled:opacity-50"
+            >
+              {p.loadingModels ? "Loading…" : "Load available models"}
+            </button>
+          </div>
         </div>
         <input
           value={isGithub ? p.githubModel : p.ollamaModel}

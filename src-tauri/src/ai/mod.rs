@@ -88,6 +88,11 @@ fn http_client() -> Result<Client, AiError> {
 
 /// Turn a non-2xx provider response into an actionable message.
 fn friendly_http_error(status: StatusCode, body: &str) -> String {
+    // A "you don't have access to this model" response is a model/tier problem, not a token or
+    // scope problem, so it gets its own clear message regardless of the (usually 403) status.
+    if let Some(msg) = no_access_message(body) {
+        return msg;
+    }
     let snippet: String = body.chars().take(300).collect();
     match status.as_u16() {
         401 | 403 => format!(
@@ -104,6 +109,30 @@ fn friendly_http_error(status: StatusCode, body: &str) -> String {
         500..=599 => format!("The AI provider had a server error (HTTP {status}). {snippet}"),
         _ => format!("AI provider error (HTTP {status}). {snippet}"),
     }
+}
+
+/// Detect GitHub Models "no access to model" responses (HTTP 403, `code: no_access`) and return a
+/// model-specific, actionable message. Returns `None` for any other error so normal handling runs.
+fn no_access_message(body: &str) -> Option<String> {
+    if !body.contains("no_access") && !body.contains("No access to model") {
+        return None;
+    }
+    // Best-effort: pull the model id out of "No access to model: <id>".
+    let model = body
+        .split("No access to model:")
+        .nth(1)
+        .and_then(|rest| rest.split(['"', '}']).next())
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    let target = match model {
+        Some(m) => format!("the model `{m}`"),
+        None => "that model".to_string(),
+    };
+    Some(format!(
+        "Your GitHub account doesn't have access to {target} on GitHub Models. This is a \
+         model/tier limit, not a token problem. Open Settings and choose a model your account can \
+         use — `openai/gpt-4o-mini` works on the free tier — then try again."
+    ))
 }
 
 /// POST to an OpenAI-compatible `/chat/completions` endpoint and return the assistant's text.
@@ -215,5 +244,31 @@ fn map_connect_error(e: reqwest::Error) -> AiError {
         )
     } else {
         AiError::Http(e)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn no_access_message_extracts_model_id() {
+        let body = r#"{"error":{"code":"no_access","message":"No access to model: openai/gpt-5","details":"No access to model: openai/gpt-5"}}"#;
+        let msg = no_access_message(body).expect("should detect no_access");
+        assert!(msg.contains("openai/gpt-5"), "names the gated model: {msg}");
+        assert!(msg.contains("openai/gpt-4o-mini"), "suggests a free default: {msg}");
+    }
+
+    #[test]
+    fn no_access_message_handles_unknown_model_shape() {
+        let body = r#"{"error":{"code":"no_access"}}"#;
+        let msg = no_access_message(body).expect("should detect no_access by code");
+        assert!(msg.contains("that model"), "falls back gracefully: {msg}");
+    }
+
+    #[test]
+    fn no_access_message_ignores_other_errors() {
+        assert!(no_access_message(r#"{"error":{"code":"rate_limited"}}"#).is_none());
+        assert!(no_access_message("").is_none());
     }
 }
