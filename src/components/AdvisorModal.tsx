@@ -3,6 +3,7 @@ import type { AiProvider, AiSettings, ChatMessage, ModelInfo } from "../types/ai
 import {
   aiChat,
   aiGetSettings,
+  aiGithubCliLogin,
   aiListModels,
   aiSaveSettings,
   aiSetGithubToken,
@@ -25,13 +26,18 @@ const SUGGESTIONS = [
   "Which spending should I watch this month?",
 ];
 
-// GitHub Models' free tier doesn't include every catalog model (e.g. gpt-5), so a chosen model can
-// come back with a "no access" error. These are safe, free defaults to fall back to.
+// Free, broadly-available default model, offered as a one-click reset in Settings.
 const RECOMMENDED_GITHUB_MODEL = "openai/gpt-4o-mini";
 
-/** True when an error looks like GitHub Models rejecting the chosen model for this account/tier. */
-const isModelAccessError = (msg: string) =>
-  /no_access|access to (the )?model/i.test(msg);
+/**
+ * True when a GitHub error looks like the token can't reach GitHub Models (no_access, a rejected
+ * request, or a missing scope). The fix is a working token, which the one-click GitHub CLI login
+ * provides without creating or pasting a PAT.
+ */
+const isGithubAccessError = (msg: string) =>
+  /no_access|access to (the )?model|models:read|rejected the request|doesn't have access/i.test(
+    msg,
+  );
 
 export default function AdvisorModal({ isOpen, onClose }: Props) {
   const [settings, setSettings] = useState<AiSettings | null>(null);
@@ -50,6 +56,7 @@ export default function AdvisorModal({ isOpen, onClose }: Props) {
   const [tokenInput, setTokenInput] = useState("");
   const [savingSettings, setSavingSettings] = useState(false);
   const [savingToken, setSavingToken] = useState(false);
+  const [cliBusy, setCliBusy] = useState(false);
   const [models, setModels] = useState<ModelInfo[]>([]);
   const [loadingModels, setLoadingModels] = useState(false);
 
@@ -114,25 +121,28 @@ export default function AdvisorModal({ isOpen, onClose }: Props) {
     await runChat(messages);
   }, [busy, messages, runChat]);
 
-  // One-click recovery from a no-access error: switch to the free default model, persist it, retry.
-  const switchToRecommendedAndRetry = useCallback(async () => {
-    if (busy) return;
-    setGithubModel(RECOMMENDED_GITHUB_MODEL);
+  // Reuse the local GitHub CLI session (`gh auth token`) as the token — nothing to create or
+  // paste. Returns whether a working token was stored.
+  const useGithubCliLogin = useCallback(async () => {
+    if (cliBusy) return false;
+    setCliBusy(true);
+    setError(null);
     try {
-      const saved = await aiSaveSettings({
-        provider,
-        github_model: RECOMMENDED_GITHUB_MODEL,
-        ollama_model: ollamaModel,
-        ollama_url: ollamaUrl,
-        include_real_data: includeRealData,
-      });
-      applySettings(saved);
+      const s = await aiGithubCliLogin();
+      applySettings(s);
+      return true;
     } catch (e) {
       setError(String(e));
-      return;
+      return false;
+    } finally {
+      setCliBusy(false);
     }
-    await retry();
-  }, [busy, provider, ollamaModel, ollamaUrl, includeRealData, applySettings, retry]);
+  }, [cliBusy, applySettings]);
+
+  // One-click recovery from a token/no-access error: grab a CLI token, then retry the last message.
+  const cliLoginAndRetry = useCallback(async () => {
+    if (await useGithubCliLogin()) await retry();
+  }, [useGithubCliLogin, retry]);
 
   const handleSaveSettings = async () => {
     setSavingSettings(true);
@@ -220,18 +230,15 @@ export default function AdvisorModal({ isOpen, onClose }: Props) {
         {error && (
           <div className="mx-5 mt-3 rounded-lg border border-red-700/50 bg-red-900/20 px-3 py-2 text-xs text-red-300">
             <p>{error}</p>
-            {provider === "github" &&
-              isModelAccessError(error) &&
-              githubModel !== RECOMMENDED_GITHUB_MODEL &&
-              messages.length > 0 && (
-                <button
-                  onClick={() => void switchToRecommendedAndRetry()}
-                  disabled={busy}
-                  className="mt-2 rounded-md border border-red-600/60 bg-red-800/40 px-2.5 py-1 font-medium text-red-100 hover:bg-red-800/70 disabled:opacity-50"
-                >
-                  Switch to {RECOMMENDED_GITHUB_MODEL} and retry
-                </button>
-              )}
+            {provider === "github" && isGithubAccessError(error) && messages.length > 0 && (
+              <button
+                onClick={() => void cliLoginAndRetry()}
+                disabled={busy || cliBusy}
+                className="mt-2 rounded-md border border-red-600/60 bg-red-800/40 px-2.5 py-1 font-medium text-red-100 hover:bg-red-800/70 disabled:opacity-50"
+              >
+                {cliBusy ? "Signing in…" : "Use my GitHub CLI login and retry"}
+              </button>
+            )}
           </div>
         )}
 
@@ -252,6 +259,8 @@ export default function AdvisorModal({ isOpen, onClose }: Props) {
             hasToken={githubReady}
             onSaveToken={handleSaveToken}
             savingToken={savingToken}
+            onUseCliLogin={useGithubCliLogin}
+            cliBusy={cliBusy}
             models={models}
             loadingModels={loadingModels}
             onLoadModels={handleLoadModels}
@@ -375,6 +384,8 @@ interface SettingsProps {
   hasToken: boolean;
   onSaveToken: () => void;
   savingToken: boolean;
+  onUseCliLogin: () => void;
+  cliBusy: boolean;
   models: ModelInfo[];
   loadingModels: boolean;
   onLoadModels: () => void;
@@ -419,6 +430,24 @@ function SettingsPanel(p: SettingsProps) {
                 {p.hasToken ? "· saved" : "· not set"}
               </span>
             </label>
+            <button
+              onClick={p.onUseCliLogin}
+              disabled={p.cliBusy}
+              className="w-full rounded-lg bg-indigo-600 px-3 py-2 text-xs font-medium text-white hover:bg-indigo-500 disabled:opacity-40"
+            >
+              {p.cliBusy ? "Signing in…" : "Use my GitHub CLI login (no token needed)"}
+            </button>
+            <p className="mt-1 text-[11px] text-slate-500">
+              Reuses your <span className="font-mono text-slate-400">gh auth login</span> session —
+              the easiest option if you have the GitHub CLI installed. Nothing to paste.
+            </p>
+
+            <div className="my-3 flex items-center gap-2 text-[10px] uppercase tracking-wide text-slate-600">
+              <span className="h-px flex-1 bg-slate-700" />
+              or paste a token
+              <span className="h-px flex-1 bg-slate-700" />
+            </div>
+
             <div className="flex gap-2">
               <input
                 type="password"
@@ -436,10 +465,9 @@ function SettingsPanel(p: SettingsProps) {
               </button>
             </div>
             <p className="mt-1 text-[11px] text-slate-500">
-              Create a fine-grained or classic token with the{" "}
-              <span className="font-mono text-slate-400">models:read</span> scope at{" "}
-              <span className="font-mono text-slate-400">{GITHUB_TOKEN_SETTINGS}</span>. Free with
-              your GitHub account.
+              Needs a token with GitHub Models access — for a fine-grained token, add the{" "}
+              <span className="font-mono text-slate-400">Models</span> permission (read-only) at{" "}
+              <span className="font-mono text-slate-400">{GITHUB_TOKEN_SETTINGS}</span>.
             </p>
           </div>
         </>

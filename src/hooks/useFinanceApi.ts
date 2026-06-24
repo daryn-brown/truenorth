@@ -201,6 +201,10 @@ export const aiSaveSettings = (settings: AiSettingsInput): Promise<AiSettings> =
 export const aiSetGithubToken = (token: string): Promise<boolean> =>
   invoke("ai_set_github_token", { token });
 
+/** Reuse the local GitHub CLI session (`gh auth token`) as the GitHub Models token. */
+export const aiGithubCliLogin = (): Promise<AiSettings> =>
+  invoke("ai_github_cli_login");
+
 /** List models for the active provider (GitHub catalog or local Ollama). */
 export const aiListModels = (): Promise<ModelInfo[]> =>
   invoke("ai_list_models");
