@@ -1,7 +1,7 @@
 {
   "name": "truenorth",
   "private": true,
-  "version": "1.1.1",
+  "version": "1.1.2",
   "description": "Local-first, privacy-first desktop app for cross-border (US + Canada) personal finances.",
   "type": "module",
   "scripts": {
