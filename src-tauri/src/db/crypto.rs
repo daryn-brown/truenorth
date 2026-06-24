@@ -1,8 +1,10 @@
 //! Database encryption key management.
 //!
-//! The SQLite database is encrypted at rest with SQLCipher. The 256-bit key is
-//! generated on first run and stored in the OS keychain (macOS Keychain / Windows
-//! Credential Manager) via the `keyring` crate — never on disk in the clear.
+//! The SQLite database is encrypted with SQLCipher and keyed with a 256-bit value generated on
+//! first run. In "open mode" that key is stored in a local file (`secrets.json` in the app data
+//! directory) via [`crate::db::secret_store`] rather than the OS keychain, so unlocking the
+//! database never prompts for the laptop password. The tradeoff is documented on the secret store:
+//! the key sits beside the database, so the encryption no longer protects against file-level access.
 //!
 //! The raw-key form `x'<hex>'` is used so SQLCipher consumes the 32 bytes directly
 //! without a KDF; the same literal must be used everywhere the DB is keyed (open and
@@ -10,25 +12,26 @@
 
 use std::path::{Path, PathBuf};
 
-use keyring::Entry;
 use rand::RngCore;
 use rusqlite::Connection;
+
+use crate::db::secret_store;
 
 /// Keychain service identifier. Deliberately kept as the original bundle identifier
 /// (the app was renamed to "TrueNorth" but the identifier is unchanged) so the existing
 /// encryption key — and therefore the encrypted database — remains readable after the rebrand.
 /// Shared with [`crate::db::secrets`] so connector secrets land in the same keychain service.
 pub(crate) const KEY_SERVICE: &str = "com.darynbrown.finance-second-brain";
-/// Keychain entry name for the database encryption key.
-const KEY_ACCOUNT: &str = "db-encryption-key";
+/// Keychain/secret-store entry name for the database encryption key.
+pub(crate) const KEY_ACCOUNT: &str = "db-encryption-key";
 /// The 16-byte magic header that begins every plaintext SQLite database file.
 const SQLITE_MAGIC: &[u8; 16] = b"SQLite format 3\0";
 
 /// Errors that can occur while resolving or applying the encryption key.
 #[derive(Debug, thiserror::Error)]
 pub enum CryptoError {
-    #[error("Keychain error: {0}")]
-    Keychain(#[from] keyring::Error),
+    #[error("Secret store error: {0}")]
+    Secret(#[from] secret_store::SecretStoreError),
 
     #[error("Database error: {0}")]
     Db(#[from] rusqlite::Error),
@@ -47,19 +50,19 @@ fn generate_key_hex() -> String {
     hex::encode(bytes)
 }
 
-/// Fetch the DB encryption key from the OS keychain, creating and persisting a new
+/// Fetch the DB encryption key from the local secret store, creating and persisting a new
 /// random key on first run. Returns the key as a 64-character hex string.
+///
+/// In "open mode" the key lives in `secrets.json` in the app data directory rather than the OS
+/// keychain, so reading it never prompts for the laptop password. Existing keychain-held keys are
+/// migrated into the file once at startup (see [`secret_store::migrate_from_keychain`]).
 pub fn get_or_create_key() -> Result<String, CryptoError> {
-    let entry = Entry::new(KEY_SERVICE, KEY_ACCOUNT)?;
-    match entry.get_password() {
-        Ok(key) => Ok(key),
-        Err(keyring::Error::NoEntry) => {
-            let key = generate_key_hex();
-            entry.set_password(&key)?;
-            Ok(key)
-        }
-        Err(e) => Err(CryptoError::Keychain(e)),
+    if let Some(key) = secret_store::get(KEY_ACCOUNT)? {
+        return Ok(key);
     }
+    let key = generate_key_hex();
+    secret_store::set(KEY_ACCOUNT, &key)?;
+    Ok(key)
 }
 
 /// Apply the SQLCipher key to a freshly opened connection. MUST run before any other

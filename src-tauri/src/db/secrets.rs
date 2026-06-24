@@ -1,51 +1,40 @@
-//! OS-keychain storage for connector secrets.
+//! Storage for connector secrets.
 //!
-//! SnapTrade has two sensitive values that must never touch disk in the clear:
-//! the API `consumerKey` and the per-user `userSecret`. Both live in the OS keychain
-//! (macOS Keychain / Windows Credential Manager) under the same service identifier as the
-//! database encryption key — see [`crate::db::crypto`].
+//! SnapTrade has two sensitive values (`consumerKey`, per-user `userSecret`), plus the SimpleFIN
+//! access URL and the Questrade refresh token. These are stored through
+//! [`crate::db::secret_store`]. In "open mode" that means the local `secrets.json` file (no
+//! keychain prompts); see the secret store module for the security tradeoff.
 //!
 //! Non-secret identifiers (`clientId`, `userId`, last-synced timestamp) are *not* stored here;
 //! they live in the `app_settings` table.
 
-use keyring::{Entry, Error as KeyringError};
+use super::secret_store::{self, SecretStoreError};
 
-use super::crypto::KEY_SERVICE;
-
-/// Keychain entry name for the SnapTrade API consumer key.
+/// Secret-store entry name for the SnapTrade API consumer key.
 pub const SNAPTRADE_CONSUMER_KEY: &str = "snaptrade-consumer-key";
-/// Keychain entry name for the SnapTrade per-user secret.
+/// Secret-store entry name for the SnapTrade per-user secret.
 pub const SNAPTRADE_USER_SECRET: &str = "snaptrade-user-secret";
-/// Keychain entry name for the SimpleFIN access URL. The access URL embeds HTTP Basic
+/// Secret-store entry name for the SimpleFIN access URL. The access URL embeds HTTP Basic
 /// credentials, so it's treated as a secret and stored alongside the SnapTrade secrets.
 pub const SIMPLEFIN_ACCESS_URL: &str = "simplefin-access-url";
-/// Keychain entry name for the Questrade refresh token. Questrade rotates this on every use, so
+/// Secret-store entry name for the Questrade refresh token. Questrade rotates this on every use, so
 /// it's the single durable secret for the direct Questrade connection (the short-lived access
 /// token is never persisted).
 pub const QUESTRADE_REFRESH_TOKEN: &str = "questrade-refresh-token";
-
-fn entry(account: &str) -> Result<Entry, KeyringError> {
-    Entry::new(KEY_SERVICE, account)
-}
+/// Secret-store entry name for the GitHub Models personal access token (the AI advisor's key).
+pub const GITHUB_MODELS_TOKEN: &str = "github-models-token";
 
 /// Store (or overwrite) a secret.
-pub fn set_secret(account: &str, value: &str) -> Result<(), KeyringError> {
-    entry(account)?.set_password(value)
+pub fn set_secret(account: &str, value: &str) -> Result<(), SecretStoreError> {
+    secret_store::set(account, value)
 }
 
 /// Read a secret, returning `None` when no entry exists yet.
-pub fn get_secret(account: &str) -> Result<Option<String>, KeyringError> {
-    match entry(account)?.get_password() {
-        Ok(value) => Ok(Some(value)),
-        Err(KeyringError::NoEntry) => Ok(None),
-        Err(e) => Err(e),
-    }
+pub fn get_secret(account: &str) -> Result<Option<String>, SecretStoreError> {
+    secret_store::get(account)
 }
 
 /// Delete a secret. Succeeds silently when the entry is already absent.
-pub fn delete_secret(account: &str) -> Result<(), KeyringError> {
-    match entry(account)?.delete_credential() {
-        Ok(()) | Err(KeyringError::NoEntry) => Ok(()),
-        Err(e) => Err(e),
-    }
+pub fn delete_secret(account: &str) -> Result<(), SecretStoreError> {
+    secret_store::delete(account)
 }

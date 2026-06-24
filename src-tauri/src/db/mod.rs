@@ -5,6 +5,7 @@ use tauri::{App, Manager, Runtime};
 
 pub mod crypto;
 mod schema;
+pub mod secret_store;
 pub mod secrets;
 pub use schema::{apply_schema, seed_defaults};
 
@@ -18,10 +19,11 @@ pub struct AppDb(pub Mutex<Connection>);
 
 /// Open (or create) the encrypted database, apply the schema, and register AppDb state.
 ///
-/// The database is encrypted at rest with SQLCipher and the key lives in the OS keychain.
-/// On launch the existing file (if any) is reconciled with the current key:
+/// The database is encrypted at rest with SQLCipher. In "open mode" the key lives in a local
+/// file ([`secret_store`]) rather than the OS keychain, so the app never prompts for the laptop
+/// password. On launch the existing file (if any) is reconciled with the current key:
 /// * a legacy pre-encryption plaintext database is encrypted in place;
-/// * a database that can't be decrypted with the current key (e.g. the keychain entry was
+/// * a database that can't be decrypted with the current key (e.g. the stored key was
 ///   lost or the file is corrupt) is set aside — not deleted — so the app starts fresh
 ///   instead of aborting.
 pub fn setup_database<R: Runtime>(app: &App<R>) -> Result<(), Box<dyn std::error::Error>> {
@@ -32,6 +34,25 @@ pub fn setup_database<R: Runtime>(app: &App<R>) -> Result<(), Box<dyn std::error
 
     std::fs::create_dir_all(&data_dir)?;
     let db_path = data_dir.join(DB_FILE);
+
+    // "Open mode": secrets (the SQLCipher key + connector tokens) live in a local file in the app
+    // data directory rather than the OS keychain, so the app never prompts for the laptop password.
+    secret_store::init(&data_dir);
+    // One-time only: pull any secrets still held in the OS keychain (from before open mode) into the
+    // file store. This preserves an existing encrypted database — its key is migrated rather than
+    // lost — and any connector logins. It is the single remaining keychain prompt; afterwards the
+    // keychain is never read again. Absent entries don't prompt, so fresh installs see no prompt.
+    secret_store::migrate_from_keychain(
+        crypto::KEY_SERVICE,
+        &[
+            crypto::KEY_ACCOUNT,
+            secrets::SNAPTRADE_CONSUMER_KEY,
+            secrets::SNAPTRADE_USER_SECRET,
+            secrets::SIMPLEFIN_ACCESS_URL,
+            secrets::QUESTRADE_REFRESH_TOKEN,
+        ],
+    )
+    .map_err(|e| format!("Secret migration failed: {e}"))?;
 
     let key = crypto::get_or_create_key()?;
 
