@@ -37,6 +37,7 @@ import AccountList from "../components/AccountList";
 import AccountModal from "../components/AccountModal";
 import ImportModal from "../components/ImportModal";
 import ConnectionsModal from "../components/ConnectionsModal";
+import AdvisorModal from "../components/AdvisorModal";
 import NetWorthChart from "../components/NetWorthChart";
 
 type ModalState =
@@ -64,6 +65,7 @@ export default function Dashboard({
   const [modal, setModal] = useState<ModalState>({ open: false });
   const [importOpen, setImportOpen] = useState(false);
   const [connectOpen, setConnectOpen] = useState(false);
+  const [advisorOpen, setAdvisorOpen] = useState(false);
   const [refreshingFx, setRefreshingFx] = useState(false);
   const [fxError, setFxError] = useState<string | null>(null);
   const [backfilling, setBackfilling] = useState(false);
@@ -210,6 +212,13 @@ export default function Dashboard({
         </div>
         <div className="flex items-center gap-2">
           <button
+            onClick={() => setAdvisorOpen(true)}
+            title="Ask the AI advisor about your finances"
+            className="flex items-center gap-1.5 rounded-lg border border-emerald-700/60 bg-emerald-900/30 px-3 py-1.5 text-xs text-emerald-200 hover:bg-emerald-900/60 transition-colors"
+          >
+            🧠 Ask AI
+          </button>
+          <button
             onClick={() => setConnectOpen(true)}
             title="Connect brokerages (SnapTrade) and banks (SimpleFIN) to sync real balances"
             className="flex items-center gap-1.5 rounded-lg border border-indigo-700/60 bg-indigo-900/30 px-3 py-1.5 text-xs text-indigo-200 hover:bg-indigo-900/60 transition-colors"
@@ -354,6 +363,8 @@ export default function Dashboard({
         onClose={() => setConnectOpen(false)}
         onChanged={handleConnectorChanged}
       />
+
+      <AdvisorModal isOpen={advisorOpen} onClose={() => setAdvisorOpen(false)} />
     </div>
   );
 }

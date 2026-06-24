@@ -1,4 +1,7 @@
 mod commands;
+// Model-agnostic AI advisor layer (GitHub Models / Ollama transport). The grounded-context
+// builder and Tauri commands live in `commands::ai`.
+mod ai;
 // Connector groundwork shared by Phase 2+ providers. The SnapTrade connector under
 // `connector::snaptrade` is exercised at runtime via `commands::snaptrade`; the trait
 // scaffolding and other providers are kept ahead of use.
@@ -65,6 +68,11 @@ pub fn run() {
             commands::questrade::questrade_connect,
             commands::questrade::questrade_sync,
             commands::questrade::questrade_disconnect,
+            commands::ai::ai_get_settings,
+            commands::ai::ai_save_settings,
+            commands::ai::ai_set_github_token,
+            commands::ai::ai_list_models,
+            commands::ai::ai_chat,
         ])
         .run(tauri::generate_context!())
         .expect("TrueNorth failed to start");

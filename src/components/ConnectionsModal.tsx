@@ -57,7 +57,7 @@ export default function ConnectionsModal({ isOpen, onClose, onChanged }: Props) 
         <p className="mb-4 text-xs text-slate-400">
           Sync real balances automatically instead of entering them by hand. TrueNorth requests{" "}
           <span className="font-semibold text-slate-300">read-only</span> access only — it can never
-          move money. Secrets are stored in your OS keychain, never on disk.
+          move money. Secrets are stored locally on this device, in your app data folder.
         </p>
 
         <div className="mb-5 grid grid-cols-3 gap-1 rounded-lg border border-slate-700 bg-slate-800/60 p-1">
@@ -715,7 +715,7 @@ function DirectConnectionsPanel({ onChanged }: { onChanged: () => void }) {
         or bank offers a personal API, or when an aggregator can’t see your full balance (for
         example, SimpleFIN reports only the cash in a Questrade account, not the stock equity). Each
         connection is <span className="font-semibold text-slate-300">read-only</span> and its secret
-        lives in your OS keychain.
+        is stored locally on this device.
       </p>
 
       <QuestradeConnection onChanged={onChanged} />

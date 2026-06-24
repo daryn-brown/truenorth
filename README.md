@@ -9,15 +9,16 @@ questions about your own data.
 
 ## Status
 ✅ **Phase 1 shipped — manual multi-currency MVP.** A Tauri + React/SQLite desktop app with an
-**encrypted-at-rest** database (SQLCipher; key in the OS keychain), **multi-currency net worth**
+**encrypted-at-rest** database (SQLCipher), **multi-currency net worth**
 (any currency converted into USD + CAD totals), a **net-worth-over-time** chart, and **JSON/CSV import** to seed accounts and balance
-history.
+history. By default it runs in **open mode** (secrets in a local file, no password prompts — see [Privacy](#privacy)).
 
 🔄 **Phase 2–3 in progress — real account sync.** Connect Robinhood, Questrade, Wealthsimple and
 more through **SnapTrade** (free for a single user), and banks through **SimpleFIN** — both pull
 **real, read-only balances + holdings** straight into your net worth. You can also connect an
 institution's **own API directly** (the **Direct** tab) — **Questrade** is supported today, pulling
-full cash + equity. The AI advisor is next — see the roadmap below. Setup lives in
+full cash + equity. An **AI advisor** that queries your own data ships too (GitHub Models or local
+Ollama) — see [`docs/ai.md`](docs/ai.md). Setup lives in
 [`docs/snaptrade.md`](docs/snaptrade.md), [`docs/simplefin.md`](docs/simplefin.md), and
 [`docs/questrade.md`](docs/questrade.md).
 
@@ -180,18 +181,31 @@ the Apple/Windows signing secrets to sign automatically. See [`docs/releasing.md
 - [`docs/snaptrade.md`](docs/snaptrade.md) — connecting brokerages via SnapTrade (read-only) and how sync feeds net worth.
 - [`docs/simplefin.md`](docs/simplefin.md) — connecting banks via SimpleFIN (read-only) and how sync feeds net worth.
 - [`docs/questrade.md`](docs/questrade.md) — connecting Questrade directly (read-only cash + equity) and how it complements SimpleFIN.
+- [`docs/ai.md`](docs/ai.md) — the AI advisor: GitHub Models vs local Ollama, setup, what data is sent, and privacy mode.
 - [`docs/releasing.md`](docs/releasing.md) — release pipeline, build targets, and code-signing setup.
 
 ## Phased roadmap
-0. ✅ Scaffold (Tauri/React/SQLite shell, encryption, keychain)
+0. ✅ Scaffold (Tauri/React/SQLite shell, SQLCipher encryption)
 1. ✅ Manual multi-currency net-worth MVP (+ JSON/CSV import)
 2. ✅ SnapTrade brokerage sync (read-only balances + holdings)
 3. 🔄 SimpleFIN bank sync (read-only balances + holdings) + direct institution APIs (Questrade: cash + equity)
 4. Transactions & goals
-5. Model-agnostic AI "second brain"
+5. 🔄 Model-agnostic AI "second brain" — GitHub Models + local Ollama shipped (Azure later)
 6. Hardening & polish
 
 ## Privacy
-Financial data stays **local and encrypted**. Secrets live in the OS keychain, never in
-the repo (`.env`, `*.db`, `*.sqlite` are gitignored). For AI, prefer local Ollama or Azure
-for real balances; redact/aggregate before using the free GitHub Models tier.
+Financial data stays **on your device** in a local SQLite database (SQLCipher). Secrets are never
+committed (`.env`, `*.db`, `*.sqlite` are gitignored).
+
+**Open mode (default).** To avoid repeated macOS/Windows password prompts, secrets — the database
+key and connector tokens — are kept in a local, owner-only file (`secrets.json`) in the app data
+folder instead of the OS keychain. This is a deliberate convenience tradeoff: because the key sits
+next to the database, at-rest encryption no longer protects against someone who can read your
+files. Existing keychain-held secrets are migrated into the file once on first launch (the single
+remaining prompt); afterwards the keychain is never touched.
+
+**AI advisor.** Ask questions about your own data via **GitHub Models** (free with your GitHub
+account) or a fully-local **Ollama** model. With GitHub Models, your question plus a snapshot of
+your finances are sent to GitHub's API to generate the answer; a **privacy mode** sends only
+rounded aggregates instead of exact balances and transactions. With Ollama, nothing leaves your
+device. See [`docs/ai.md`](docs/ai.md).

@@ -1,5 +1,11 @@
 import { invoke } from "@tauri-apps/api/core";
 import type {
+  AiSettings,
+  AiSettingsInput,
+  ChatMessage,
+  ModelInfo,
+} from "../types/ai";
+import type {
   Account,
   AddAccountPayload,
   AddBalanceSnapshotPayload,
@@ -171,7 +177,7 @@ export const simplefinDisconnect = (): Promise<SimpleFinStatus> =>
 export const questradeGetStatus = (): Promise<QuestradeStatus> =>
   invoke("questrade_get_status");
 
-/** Exchange a Questrade refresh token and store the rotated token in the keychain. */
+/** Exchange a Questrade refresh token and store the rotated token in the local secret store. */
 export const questradeConnect = (
   refreshToken: string,
 ): Promise<QuestradeStatus> =>
@@ -182,6 +188,26 @@ export const questradeSync = (): Promise<QuestradeSyncSummary> =>
 
 export const questradeDisconnect = (): Promise<QuestradeStatus> =>
   invoke("questrade_disconnect");
+
+// --- AI advisor ("second brain", Phase 5) ----------------------------------
+
+export const aiGetSettings = (): Promise<AiSettings> =>
+  invoke("ai_get_settings");
+
+export const aiSaveSettings = (settings: AiSettingsInput): Promise<AiSettings> =>
+  invoke("ai_save_settings", { settings });
+
+/** Store (or clear, with an empty string) the GitHub Models token. Returns whether one is set. */
+export const aiSetGithubToken = (token: string): Promise<boolean> =>
+  invoke("ai_set_github_token", { token });
+
+/** List models for the active provider (GitHub catalog or local Ollama). */
+export const aiListModels = (): Promise<ModelInfo[]> =>
+  invoke("ai_list_models");
+
+/** Send the conversation; the backend prepends a grounding snapshot of your finances. */
+export const aiChat = (messages: ChatMessage[]): Promise<ChatMessage> =>
+  invoke("ai_chat", { messages });
 
 interface BalanceSnapshotResult {
   id: number;
