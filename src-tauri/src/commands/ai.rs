@@ -178,6 +178,63 @@ pub fn ai_set_github_token(token: String) -> Result<bool, String> {
     }
 }
 
+/// Locate the GitHub CLI (`gh`). GUI apps on macOS launch with a minimal PATH that usually omits
+/// Homebrew, so check the common install locations before falling back to a PATH lookup.
+fn find_gh() -> String {
+    if let Ok(p) = std::env::var("GH_PATH") {
+        if !p.trim().is_empty() {
+            return p;
+        }
+    }
+    for candidate in [
+        "/opt/homebrew/bin/gh", // Apple Silicon Homebrew
+        "/usr/local/bin/gh",    // Intel Homebrew
+        "/opt/local/bin/gh",    // MacPorts
+        "/usr/bin/gh",
+    ] {
+        if std::path::Path::new(candidate).exists() {
+            return candidate.to_string();
+        }
+    }
+    "gh".to_string() // last resort: let the OS resolve it via PATH
+}
+
+/// Read a token from the user's GitHub CLI session (`gh auth token`).
+fn read_github_cli_token() -> Result<String, String> {
+    let gh = find_gh();
+    let output = std::process::Command::new(&gh)
+        .args(["auth", "token"])
+        .output()
+        .map_err(|e| {
+            format!(
+                "Couldn't run the GitHub CLI ({gh}): {e}. Install it from https://cli.github.com, \
+                 run `gh auth login`, then try again."
+            )
+        })?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!(
+            "The GitHub CLI couldn't provide a token. Run `gh auth login` in a terminal, then try \
+             again. {}",
+            stderr.trim()
+        ));
+    }
+    let token = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if token.is_empty() {
+        return Err("The GitHub CLI returned an empty token. Run `gh auth login` and try again.".into());
+    }
+    Ok(token)
+}
+
+/// Pull a token from the local GitHub CLI (`gh auth token`) and store it, so the user never has to
+/// create or paste a personal access token. Returns the updated settings (with `has_github_token`).
+#[tauri::command]
+pub fn ai_github_cli_login(db: State<AppDb>) -> Result<AiSettings, String> {
+    let token = read_github_cli_token()?;
+    secrets::set_secret(GITHUB_MODELS_TOKEN, token.trim()).map_err(|e| e.to_string())?;
+    ai_get_settings(db)
+}
+
 #[tauri::command]
 pub async fn ai_list_models(db: State<'_, AppDb>) -> Result<Vec<ai::ModelInfo>, String> {
     let (provider, ollama_url, token) = {

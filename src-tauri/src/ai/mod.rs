@@ -88,9 +88,13 @@ fn http_client() -> Result<Client, AiError> {
 
 /// Turn a non-2xx provider response into an actionable message.
 fn friendly_http_error(status: StatusCode, body: &str) -> String {
-    // A "you don't have access to this model" response is a model/tier problem, not a token or
-    // scope problem, so it gets its own clear message regardless of the (usually 403) status.
+    // GitHub Models "no_access" (usually 403) means the token in use can't reach the model, so it
+    // gets a token-focused message regardless of the status code.
     if let Some(msg) = no_access_message(body) {
+        return msg;
+    }
+    // Ollama "model 'x' not found" (404) just means the model isn't pulled locally.
+    if let Some(msg) = ollama_missing_model_message(body) {
         return msg;
     }
     let snippet: String = body.chars().take(300).collect();
@@ -111,8 +115,9 @@ fn friendly_http_error(status: StatusCode, body: &str) -> String {
     }
 }
 
-/// Detect GitHub Models "no access to model" responses (HTTP 403, `code: no_access`) and return a
-/// model-specific, actionable message. Returns `None` for any other error so normal handling runs.
+/// Detect GitHub Models "no access" responses (usually HTTP 403, `code: no_access`). In practice
+/// this means the *token* in use can't reach GitHub Models, not that the account lacks a tier, so
+/// the message points at fixing the token. Returns `None` for any other error.
 fn no_access_message(body: &str) -> Option<String> {
     if !body.contains("no_access") && !body.contains("No access to model") {
         return None;
@@ -129,9 +134,29 @@ fn no_access_message(body: &str) -> Option<String> {
         None => "that model".to_string(),
     };
     Some(format!(
-        "Your GitHub account doesn't have access to {target} on GitHub Models. This is a \
-         model/tier limit, not a token problem. Open Settings and choose a model your account can \
-         use — `openai/gpt-4o-mini` works on the free tier — then try again."
+        "GitHub Models rejected {target} with `no_access`. This almost always means the GitHub \
+         token in use doesn't have GitHub Models access (not a tier limit on your account). In \
+         Settings, click \"Use my GitHub CLI login\" for a token that works automatically, or paste \
+         a token from an account that can use this model."
+    ))
+}
+
+/// Detect Ollama's "model 'x' not found" (HTTP 404) and tell the user to pull it. Returns `None`
+/// when the body doesn't carry an extractable model name.
+fn ollama_missing_model_message(body: &str) -> Option<String> {
+    if !body.contains("not found") || !body.contains("model") {
+        return None;
+    }
+    // Body looks like: {"error":{"message":"model 'llama3.1' not found", ...}}
+    let model = body
+        .split("model")
+        .nth(1)
+        .and_then(|rest| rest.split('\'').nth(1))
+        .map(str::trim)
+        .filter(|s| !s.is_empty())?;
+    Some(format!(
+        "Ollama doesn't have the model `{model}` installed. Run `ollama pull {model}` in a terminal \
+         (or pick an already-installed model in Settings), then try again."
     ))
 }
 
@@ -256,7 +281,10 @@ mod tests {
         let body = r#"{"error":{"code":"no_access","message":"No access to model: openai/gpt-5","details":"No access to model: openai/gpt-5"}}"#;
         let msg = no_access_message(body).expect("should detect no_access");
         assert!(msg.contains("openai/gpt-5"), "names the gated model: {msg}");
-        assert!(msg.contains("openai/gpt-4o-mini"), "suggests a free default: {msg}");
+        assert!(
+            msg.contains("GitHub CLI login"),
+            "points at the token fix: {msg}"
+        );
     }
 
     #[test]
@@ -264,6 +292,20 @@ mod tests {
         let body = r#"{"error":{"code":"no_access"}}"#;
         let msg = no_access_message(body).expect("should detect no_access by code");
         assert!(msg.contains("that model"), "falls back gracefully: {msg}");
+    }
+
+    #[test]
+    fn ollama_missing_model_message_extracts_and_suggests_pull() {
+        let body = r#"{"error":{"message":"model 'llama3.1' not found","type":"not_found_error"}}"#;
+        let msg = ollama_missing_model_message(body).expect("should detect missing model");
+        assert!(msg.contains("llama3.1"), "names the missing model: {msg}");
+        assert!(msg.contains("ollama pull llama3.1"), "suggests the pull command: {msg}");
+    }
+
+    #[test]
+    fn ollama_missing_model_message_ignores_other_errors() {
+        assert!(ollama_missing_model_message(r#"{"error":{"message":"bad request"}}"#).is_none());
+        assert!(ollama_missing_model_message("").is_none());
     }
 
     #[test]

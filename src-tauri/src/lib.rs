@@ -71,6 +71,7 @@ pub fn run() {
             commands::ai::ai_get_settings,
             commands::ai::ai_save_settings,
             commands::ai::ai_set_github_token,
+            commands::ai::ai_github_cli_login,
             commands::ai::ai_list_models,
             commands::ai::ai_chat,
         ])
