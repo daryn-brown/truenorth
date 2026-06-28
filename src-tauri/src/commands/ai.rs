@@ -5,11 +5,14 @@
 //! app, the SQLite mutex is never held across an `.await`: the financial snapshot is gathered first
 //! (each helper locks briefly and releases), then the model call runs with no lock held.
 
+use chrono::NaiveDate;
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
+use serde_json::json;
+use std::collections::HashMap;
 use tauri::State;
 
-use crate::ai::{self, ChatMessage};
+use crate::ai::{self, ChatMessage, ToolDef, WireMessage};
 use crate::commands::cashflow::{get_cashflow_summary, list_recent_transactions};
 use crate::commands::goals::get_goal_progress;
 use crate::commands::net_worth::get_net_worth;
@@ -264,11 +267,32 @@ pub async fn ai_list_models(db: State<'_, AppDb>) -> Result<Vec<ai::ModelInfo>, 
     }
 }
 
+/// One tool the model invoked while answering, surfaced to the UI as a "Used tool: …" step.
+#[derive(Debug, Serialize)]
+pub struct ToolStep {
+    pub name: String,
+    /// Raw JSON arguments the model passed.
+    pub arguments: String,
+    /// JSON result returned to the model (truncated for display).
+    pub result: String,
+}
+
+/// The advisor's reply plus the trace of tools it called to get there.
+#[derive(Debug, Serialize)]
+pub struct AiChatResponse {
+    pub role: String,
+    pub content: String,
+    pub steps: Vec<ToolStep>,
+}
+
+/// Hard cap on agentic round-trips, so a confused model can't loop forever on tool calls.
+const MAX_TOOL_ITERATIONS: usize = 6;
+
 #[tauri::command]
 pub async fn ai_chat(
     db: State<'_, AppDb>,
     messages: Vec<ChatMessage>,
-) -> Result<ChatMessage, String> {
+) -> Result<AiChatResponse, String> {
     // 1) Resolve provider config + token under a short lock.
     let (provider, github_model, ollama_model, ollama_url, include_real_data) = {
         let conn = db.0.lock().map_err(|e| e.to_string())?;
@@ -276,30 +300,488 @@ pub async fn ai_chat(
     };
     let token = secrets::get_secret(GITHUB_MODELS_TOKEN).map_err(|e| e.to_string())?;
 
-    // 2) Build the grounding context from the user's own data (each helper locks briefly).
-    let context = build_context(&db, include_real_data)?;
-
-    // 3) Compose: system grounding first, then the conversation so far (drop any client-sent
-    //    system messages so the snapshot can't be overridden).
-    let mut full = Vec::with_capacity(messages.len() + 1);
-    full.push(ChatMessage::system(context));
-    full.extend(messages.into_iter().filter(|m| m.role != "system"));
-
-    // 4) Dispatch to the chosen provider. No DB lock is held across this await.
-    let answer = if provider == "ollama" {
-        ai::chat_completion(&ollama_url, None, &ollama_model, &full)
-            .await
-            .map_err(|e| e.to_string())?
+    // Resolve the endpoint, key, and model for the chosen provider once.
+    let (base_url, api_key, model) = if provider == "ollama" {
+        (ollama_url, None, ollama_model)
     } else {
         let token = token.filter(|t| !t.trim().is_empty()).ok_or(
             "Add a GitHub token (with the models:read scope) in AI settings first, or switch to Ollama.",
         )?;
-        ai::chat_completion(ai::GITHUB_MODELS_BASE, Some(&token), &github_model, &full)
-            .await
-            .map_err(|e| e.to_string())?
+        (ai::GITHUB_MODELS_BASE.to_string(), Some(token), github_model)
     };
 
-    Ok(ChatMessage { role: "assistant".into(), content: answer })
+    // 2) Privacy mode: never expose tools (they return exact figures). Fall back to the static,
+    //    rounded snapshot so only aggregates leave the device — same guarantee as before.
+    if !include_real_data {
+        let context = build_context(&db, false)?;
+        let mut convo = vec![WireMessage::system(context)];
+        convo.extend(messages.iter().filter(|m| m.role != "system").map(WireMessage::from));
+        let reply = ai::chat_completion_tools(&base_url, api_key.as_deref(), &model, &convo, &[])
+            .await
+            .map_err(|e| e.to_string())?;
+        let content = reply.content.unwrap_or_default();
+        if content.trim().is_empty() {
+            return Err("The model returned an empty response.".into());
+        }
+        return Ok(AiChatResponse { role: "assistant".into(), content, steps: vec![] });
+    }
+
+    // 3) Agentic mode: advertise the finance tools and let the model query its own data on demand.
+    let system = build_system_preamble(&db)?;
+    let tools = finance_tools();
+    let mut convo = vec![WireMessage::system(system)];
+    convo.extend(messages.iter().filter(|m| m.role != "system").map(WireMessage::from));
+
+    let mut steps: Vec<ToolStep> = Vec::new();
+
+    // The loop: ask the model; if it requested tools, run them (each locks the DB briefly, with no
+    // lock held across an await), append the results, and ask again — until it returns prose.
+    for _ in 0..MAX_TOOL_ITERATIONS {
+        let assistant =
+            ai::chat_completion_tools(&base_url, api_key.as_deref(), &model, &convo, &tools)
+                .await
+                .map_err(|e| e.to_string())?;
+
+        let calls = assistant.tool_calls.clone().unwrap_or_default();
+        if calls.is_empty() {
+            let content = assistant.content.unwrap_or_default();
+            if content.trim().is_empty() {
+                return Err("The model returned an empty response.".into());
+            }
+            return Ok(AiChatResponse { role: "assistant".into(), content, steps });
+        }
+
+        // Echo the assistant's tool-call turn back, then answer each call with a `tool` message.
+        convo.push(assistant);
+        for call in calls {
+            let args: serde_json::Value =
+                serde_json::from_str(&call.function.arguments).unwrap_or_else(|_| serde_json::json!({}));
+            let result = execute_finance_tool(&db, &call.function.name, &args)
+                .unwrap_or_else(|e| serde_json::json!({ "error": e }));
+            let result_str = result.to_string();
+            steps.push(ToolStep {
+                name: call.function.name.clone(),
+                arguments: call.function.arguments.clone(),
+                result: truncate_for_display(&result_str, 6000),
+            });
+            convo.push(WireMessage::tool_result(call.id, call.function.name, result_str));
+        }
+    }
+
+    // Hit the iteration cap — make one last call with no tools to force a written answer.
+    let final_msg = ai::chat_completion_tools(&base_url, api_key.as_deref(), &model, &convo, &[])
+        .await
+        .map_err(|e| e.to_string())?;
+    let content = final_msg.content.unwrap_or_default();
+    if content.trim().is_empty() {
+        return Err("The model kept calling tools without answering. Try rephrasing.".into());
+    }
+    Ok(AiChatResponse { role: "assistant".into(), content, steps })
+}
+
+/// Cap a tool result for the UI trace without splitting a UTF-8 char boundary.
+fn truncate_for_display(s: &str, max: usize) -> String {
+    if s.len() <= max {
+        return s.to_string();
+    }
+    let mut end = max;
+    while !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}… (truncated)", &s[..end])
+}
+
+// ---------------------------------------------------------------------------
+// Agentic mode: system preamble, the finance tool catalog, and the executor that runs each tool
+// over the user's own local database.
+// ---------------------------------------------------------------------------
+
+/// System message for agentic mode: the standing instructions, a tiny grounding header (date, home
+/// currency, account count), and a nudge to gather real figures via tools before answering.
+fn build_system_preamble(db: &State<AppDb>) -> Result<String, String> {
+    let (today, home_currency, active_accounts) = {
+        let conn = db.0.lock().map_err(|e| e.to_string())?;
+        let today: String = conn
+            .query_row("SELECT strftime('%Y-%m-%d','now')", [], |r| r.get(0))
+            .map_err(|e| e.to_string())?;
+        let home_currency = get_setting(&conn, "home_currency")
+            .map_err(|e| e.to_string())?
+            .unwrap_or_else(|| "CAD".into());
+        let active_accounts: i64 = conn
+            .query_row("SELECT COUNT(*) FROM accounts WHERE is_active = 1", [], |r| r.get(0))
+            .map_err(|e| e.to_string())?;
+        (today, home_currency, active_accounts)
+    };
+    Ok(format!(
+        "{SYSTEM_PREAMBLE}\n\n\
+         ===== HOW TO ANSWER =====\n\
+         You can call tools that query the user's own local TrueNorth database. Call whatever tools \
+         you need to gather the real figures before answering — never guess at balances, spending, \
+         holdings, or debts you can look up. For broad questions (e.g. \"how's my money management?\") \
+         combine several tools: cashflow + recurring charges + liabilities + holdings + the goal.\n\
+         Today is {today}. The user's home currency is {home_currency}. They have {active_accounts} \
+         active account(s). Always label amounts with their currency (USD or CAD).\n\
+         Format the final answer as clean GitHub-flavored markdown: short **bold** section headers, \
+         tight bullet or numbered lists, and key numbers in bold. Be specific, candid, and practical."
+    ))
+}
+
+/// The catalog of tools advertised to the model. Schemas are JSON-Schema objects.
+fn finance_tools() -> Vec<ToolDef> {
+    let no_params = || json!({ "type": "object", "properties": {}, "additionalProperties": false });
+    vec![
+        ToolDef::function(
+            "get_net_worth_summary",
+            "Total net worth in USD and CAD, the FX rate date, and the number of active accounts. Use for headline totals.",
+            no_params(),
+        ),
+        ToolDef::function(
+            "list_accounts",
+            "Every active account with its institution, type, jurisdiction, currency, and current balance (native, USD, and CAD).",
+            no_params(),
+        ),
+        ToolDef::function(
+            "get_cashflow",
+            "Income vs. fixed vs. variable spending, net savings, savings rate, and variable spending by category over a trailing window. Internal transfers are excluded.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "window_days": { "type": "integer", "description": "Trailing window in days (default 30).", "minimum": 1, "maximum": 730 }
+                },
+                "additionalProperties": false
+            }),
+        ),
+        ToolDef::function(
+            "list_transactions",
+            "Recent transactions with their flow (income/fixed/variable/transfer), category, account, amount, and currency. Optionally filter by a merchant substring or a flow type.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "limit": { "type": "integer", "description": "Max rows (default 40, max 100).", "minimum": 1, "maximum": 100 },
+                    "search": { "type": "string", "description": "Case-insensitive substring to match in the description/merchant." },
+                    "flow": { "type": "string", "enum": ["income", "fixed", "variable", "transfer"], "description": "Only return this flow type." }
+                },
+                "additionalProperties": false
+            }),
+        ),
+        ToolDef::function(
+            "find_recurring_transactions",
+            "Detect likely recurring charges, subscriptions, and bills (and recurring income) by grouping similar merchants over a window. Returns merchant, occurrences, average amount, currency, and rough cadence in days.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "window_days": { "type": "integer", "description": "Trailing window in days (default 120).", "minimum": 30, "maximum": 730 }
+                },
+                "additionalProperties": false
+            }),
+        ),
+        ToolDef::function(
+            "get_liabilities",
+            "Credit-card, loan, and other debt accounts with their balances. Negative balances are amounts owed. Credit limits are not tracked, so exact utilization can't be computed.",
+            no_params(),
+        ),
+        ToolDef::function(
+            "get_holdings",
+            "Investment holdings across brokerage accounts: symbol, quantity, average cost, last price, currency, and estimated market value.",
+            no_params(),
+        ),
+        ToolDef::function(
+            "get_goal",
+            "Progress toward the user's net-worth milestone: target, current value, gap, percent complete, and projected hit-date.",
+            no_params(),
+        ),
+    ]
+}
+
+/// Run one finance tool by name, returning a compact JSON value to feed back to the model. Each
+/// helper locks the DB only for its own query — never across an `.await` in the agentic loop.
+fn execute_finance_tool(
+    db: &State<AppDb>,
+    name: &str,
+    args: &serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    match name {
+        "get_net_worth_summary" => {
+            let nw = get_net_worth(db.clone())?;
+            Ok(json!({
+                "total_usd": round2(nw.total_usd),
+                "total_cad": round2(nw.total_cad),
+                "fx_rate_date": nw.rate_date,
+                "active_accounts": nw.accounts.len(),
+            }))
+        }
+        "list_accounts" => {
+            let nw = get_net_worth(db.clone())?;
+            let accounts: Vec<_> = nw
+                .accounts
+                .iter()
+                .map(|a| {
+                    json!({
+                        "name": a.account_name,
+                        "institution": a.institution,
+                        "type": a.account_type,
+                        "jurisdiction": a.jurisdiction,
+                        "currency": a.currency,
+                        "balance": round2(a.balance),
+                        "balance_usd": round2(a.balance_usd),
+                        "balance_cad": round2(a.balance_cad),
+                        "as_of": a.snapshot_date,
+                    })
+                })
+                .collect();
+            Ok(json!({ "accounts": accounts }))
+        }
+        "get_cashflow" => {
+            let window = args.get("window_days").and_then(|v| v.as_i64());
+            let cf = get_cashflow_summary(db.clone(), window)?;
+            serde_json::to_value(cf).map_err(|e| e.to_string())
+        }
+        "list_transactions" => {
+            let limit = args
+                .get("limit")
+                .and_then(|v| v.as_i64())
+                .unwrap_or(40)
+                .clamp(1, 100);
+            let search = args.get("search").and_then(|v| v.as_str()).map(str::to_lowercase);
+            let flow = args.get("flow").and_then(|v| v.as_str()).map(str::to_lowercase);
+            // Fetch extra rows so post-filtering can still reach `limit`.
+            let fetch = if search.is_some() || flow.is_some() { 200 } else { limit };
+            let mut txns = list_recent_transactions(db.clone(), Some(fetch))?;
+            if let Some(q) = &search {
+                txns.retain(|t| t.description.to_lowercase().contains(q));
+            }
+            if let Some(f) = &flow {
+                txns.retain(|t| t.flow_type == *f);
+            }
+            let items: Vec<_> = txns
+                .iter()
+                .take(limit as usize)
+                .map(|t| {
+                    json!({
+                        "date": t.txn_date,
+                        "description": t.description,
+                        "amount": round2(t.amount),
+                        "currency": t.currency,
+                        "flow": t.flow_type,
+                        "category": t.category,
+                        "account": t.account_name,
+                    })
+                })
+                .collect();
+            Ok(json!({ "count": items.len(), "transactions": items }))
+        }
+        "find_recurring_transactions" => {
+            let window = args
+                .get("window_days")
+                .and_then(|v| v.as_i64())
+                .unwrap_or(120)
+                .clamp(30, 730);
+            let groups = find_recurring(db, window)?;
+            Ok(json!({ "window_days": window, "recurring": groups }))
+        }
+        "get_liabilities" => {
+            let nw = get_net_worth(db.clone())?;
+            let liabilities: Vec<_> = nw
+                .accounts
+                .iter()
+                .filter(|a| is_liability(&a.account_type, a.balance))
+                .map(|a| {
+                    json!({
+                        "name": a.account_name,
+                        "institution": a.institution,
+                        "type": a.account_type,
+                        "currency": a.currency,
+                        "balance": round2(a.balance),
+                        "balance_usd": round2(a.balance_usd),
+                        "balance_cad": round2(a.balance_cad),
+                        "as_of": a.snapshot_date,
+                    })
+                })
+                .collect();
+            Ok(json!({
+                "liabilities": liabilities,
+                "note": "Negative balances are amounts owed. Credit limits are not tracked, so exact utilization can't be computed."
+            }))
+        }
+        "get_holdings" => {
+            let holdings = load_holdings(db)?;
+            let items: Vec<_> = holdings
+                .iter()
+                .map(|h| {
+                    let market_value = h.last_price.map(|p| round2(p * h.quantity));
+                    json!({
+                        "account": h.account,
+                        "symbol": h.symbol,
+                        "quantity": h.quantity,
+                        "currency": h.currency,
+                        "average_cost": h.average_cost,
+                        "last_price": h.last_price,
+                        "market_value": market_value,
+                    })
+                })
+                .collect();
+            Ok(json!({ "holdings": items }))
+        }
+        "get_goal" => {
+            let goal = get_goal_progress(db.clone())?;
+            serde_json::to_value(goal).map_err(|e| e.to_string())
+        }
+        other => Err(format!("Unknown tool: {other}")),
+    }
+}
+
+/// True when an account represents money owed rather than money held: a credit/loan/mortgage type,
+/// or simply a negative balance.
+fn is_liability(account_type: &str, balance: f64) -> bool {
+    let t = account_type.to_lowercase();
+    t.contains("credit")
+        || t.contains("loan")
+        || t.contains("mortgage")
+        || t.contains("line of credit")
+        || t.contains("liability")
+        || t.contains("debt")
+        || balance < 0.0
+}
+
+/// One detected recurring merchant/charge.
+#[derive(Debug, Serialize)]
+struct RecurringGroup {
+    merchant: String,
+    occurrences: i64,
+    avg_amount: f64,
+    currency: String,
+    first_date: String,
+    last_date: String,
+    est_cadence_days: Option<i64>,
+}
+
+/// Heuristically group recent transactions into recurring charges (subscriptions, rent, loan
+/// payments, salary). Groups by a normalized merchant key and surfaces any merchant seen 2+ times,
+/// with its average amount and rough cadence. Best-effort: it offers candidates for the model to
+/// reason about, not a guaranteed subscription list.
+fn find_recurring(db: &State<AppDb>, window_days: i64) -> Result<Vec<RecurringGroup>, String> {
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    let mut stmt = conn
+        .prepare(
+            "SELECT t.txn_date, t.description, t.amount, t.currency \
+             FROM transactions t JOIN accounts a ON a.id = t.account_id \
+             WHERE a.is_active = 1 AND t.txn_date >= date('now', ?1) \
+             ORDER BY t.txn_date ASC",
+        )
+        .map_err(|e| e.to_string())?;
+    let offset = format!("-{window_days} days");
+    let rows = stmt
+        .query_map(params![offset], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, f64>(2)?,
+                r.get::<_, String>(3)?,
+            ))
+        })
+        .map_err(|e| e.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| e.to_string())?;
+
+    struct Group {
+        descriptions: Vec<String>,
+        amounts: Vec<f64>,
+        dates: Vec<String>,
+        currency: String,
+    }
+    let mut map: HashMap<String, Group> = HashMap::new();
+    for (date, description, amount, currency) in rows {
+        let key = normalize_merchant(&description);
+        if key.is_empty() {
+            continue;
+        }
+        let g = map.entry(key).or_insert_with(|| Group {
+            descriptions: Vec::new(),
+            amounts: Vec::new(),
+            dates: Vec::new(),
+            currency: currency.clone(),
+        });
+        g.descriptions.push(description);
+        g.amounts.push(amount);
+        g.dates.push(date);
+    }
+
+    let mut groups: Vec<RecurringGroup> = map
+        .into_values()
+        .filter(|g| g.amounts.len() >= 2)
+        .map(|g| {
+            let n = g.amounts.len() as f64;
+            let avg = g.amounts.iter().sum::<f64>() / n;
+            let first = g.dates.iter().min().cloned().unwrap_or_default();
+            let last = g.dates.iter().max().cloned().unwrap_or_default();
+            let cadence = cadence_days(&first, &last, g.amounts.len());
+            RecurringGroup {
+                merchant: most_common(&g.descriptions),
+                occurrences: g.amounts.len() as i64,
+                avg_amount: round2(avg),
+                currency: g.currency,
+                first_date: first,
+                last_date: last,
+                est_cadence_days: cadence,
+            }
+        })
+        .collect();
+
+    // Biggest recurring commitments first (magnitude × frequency), capped to keep the result small.
+    groups.sort_by(|a, b| {
+        let wa = a.avg_amount.abs() * a.occurrences as f64;
+        let wb = b.avg_amount.abs() * b.occurrences as f64;
+        wb.partial_cmp(&wa).unwrap_or(std::cmp::Ordering::Equal)
+    });
+    groups.truncate(20);
+    Ok(groups)
+}
+
+/// Reduce a description to a stable merchant key: lowercase, drop digits and symbols, keep the
+/// first few words. "UNITED AIRLINES 0123" and "United Airlines #987" collapse to "united airlines".
+fn normalize_merchant(description: &str) -> String {
+    let cleaned: String = description
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphabetic() || c.is_whitespace() {
+                c.to_ascii_lowercase()
+            } else {
+                ' '
+            }
+        })
+        .collect();
+    cleaned.split_whitespace().take(3).collect::<Vec<_>>().join(" ")
+}
+
+/// The most frequent original description in a group (falls back to the first).
+fn most_common(values: &[String]) -> String {
+    let mut counts: HashMap<&str, usize> = HashMap::new();
+    for v in values {
+        *counts.entry(v.as_str()).or_insert(0) += 1;
+    }
+    counts
+        .into_iter()
+        .max_by_key(|(_, n)| *n)
+        .map(|(v, _)| v.to_string())
+        .unwrap_or_default()
+}
+
+/// Average days between occurrences, from the first/last date and the count. `None` when the dates
+/// don't parse or span no time. Tolerates a trailing time component by reading only `YYYY-MM-DD`.
+fn cadence_days(first: &str, last: &str, count: usize) -> Option<i64> {
+    if count < 2 {
+        return None;
+    }
+    let parse = |s: &str| NaiveDate::parse_from_str(s.get(0..10).unwrap_or(s), "%Y-%m-%d").ok();
+    let span = (parse(last)? - parse(first)?).num_days();
+    if span <= 0 {
+        return None;
+    }
+    Some(span / (count as i64 - 1))
+}
+
+fn round2(x: f64) -> f64 {
+    (x * 100.0).round() / 100.0
 }
 
 /// Outcome of an AI "Refine categories" pass.
@@ -657,4 +1139,86 @@ fn build_context(db: &State<AppDb>, include_real: bool) -> Result<String, String
 
     s.push_str("\n===== END SNAPSHOT =====\n");
     Ok(s)
+}
+
+#[cfg(test)]
+mod agentic_tests {
+    use super::*;
+
+    #[test]
+    fn normalize_merchant_collapses_noise_and_case() {
+        assert_eq!(normalize_merchant("UNITED AIRLINES 0123"), "united airlines");
+        assert_eq!(normalize_merchant("United Airlines #987"), "united airlines");
+        // Keeps at most the first three words so distinct merchants stay distinct.
+        assert_eq!(normalize_merchant("Amazon Web Services Inc"), "amazon web services");
+        assert_eq!(normalize_merchant("  123 456  "), "");
+    }
+
+    #[test]
+    fn most_common_picks_modal_description() {
+        let v = vec![
+            "NETFLIX.COM".to_string(),
+            "NETFLIX.COM".to_string(),
+            "Netflix membership".to_string(),
+        ];
+        assert_eq!(most_common(&v), "NETFLIX.COM");
+    }
+
+    #[test]
+    fn is_liability_detects_credit_loan_and_negative_balances() {
+        assert!(is_liability("credit_card", 0.0));
+        assert!(is_liability("Credit", 500.0));
+        assert!(is_liability("auto_loan", 0.0));
+        assert!(is_liability("chequing", -25.0)); // overdrawn cash is still money owed
+        assert!(!is_liability("savings", 1000.0));
+        assert!(!is_liability("brokerage", 0.0));
+    }
+
+    #[test]
+    fn cadence_days_spreads_occurrences_over_the_span() {
+        // Three monthly hits across ~60 days → ~30-day cadence.
+        assert_eq!(cadence_days("2025-01-01", "2025-03-02", 3), Some(30));
+        // Tolerates a trailing time component.
+        assert_eq!(cadence_days("2025-01-01T00:00:00Z", "2025-01-31", 2), Some(30));
+        // Single occurrence or zero span yields nothing.
+        assert_eq!(cadence_days("2025-01-01", "2025-01-01", 1), None);
+        assert_eq!(cadence_days("2025-01-01", "2025-01-01", 2), None);
+        assert_eq!(cadence_days("bad-date", "2025-01-31", 2), None);
+    }
+
+    #[test]
+    fn round2_rounds_to_cents() {
+        assert_eq!(round2(1234.5678), 1234.57);
+        assert_eq!(round2(-0.005), -0.01);
+        assert_eq!(round2(10.0), 10.0);
+    }
+
+    #[test]
+    fn truncate_for_display_caps_long_strings_safely() {
+        let s = "a".repeat(50);
+        let out = truncate_for_display(&s, 10);
+        assert!(out.starts_with(&"a".repeat(10)));
+        assert!(out.contains("truncated"));
+        // Short strings pass through untouched.
+        assert_eq!(truncate_for_display("short", 10), "short");
+        // Never panics on a multi-byte boundary right at the cap.
+        let mb = "✓✓✓✓✓"; // 3 bytes each
+        let _ = truncate_for_display(mb, 4);
+    }
+
+    #[test]
+    fn finance_tools_are_well_formed() {
+        let tools = finance_tools();
+        assert_eq!(tools.len(), 8);
+        for t in &tools {
+            assert_eq!(t.kind, "function");
+            assert!(!t.function.name.is_empty());
+            assert!(!t.function.description.is_empty());
+            assert_eq!(t.function.parameters["type"], "object");
+        }
+        let names: Vec<&str> = tools.iter().map(|t| t.function.name.as_str()).collect();
+        assert!(names.contains(&"get_cashflow"));
+        assert!(names.contains(&"find_recurring_transactions"));
+        assert!(names.contains(&"get_liabilities"));
+    }
 }

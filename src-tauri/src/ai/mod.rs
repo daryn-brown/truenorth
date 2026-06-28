@@ -139,10 +139,6 @@ impl WireMessage {
         Self::text("system", content)
     }
 
-    pub fn user(content: impl Into<String>) -> Self {
-        Self::text("user", content)
-    }
-
     fn text(role: &str, content: impl Into<String>) -> Self {
         Self {
             role: role.into(),
