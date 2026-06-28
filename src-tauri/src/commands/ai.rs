@@ -268,7 +268,7 @@ pub async fn ai_list_models(db: State<'_, AppDb>) -> Result<Vec<ai::ModelInfo>, 
 }
 
 /// One tool the model invoked while answering, surfaced to the UI as a "Used tool: …" step.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolStep {
     pub name: String,
     /// Raw JSON arguments the model passed.
@@ -1141,6 +1141,219 @@ fn build_context(db: &State<AppDb>, include_real: bool) -> Result<String, String
     Ok(s)
 }
 
+// ---------------------------------------------------------------------------
+// Chat thread persistence
+//
+// Conversations are saved in the local encrypted DB so they survive restarts and keep their full
+// context. A thread groups its messages; deleting a thread cascades to its messages. Assistant
+// turns store their tool-call trace as JSON in `steps_json`.
+// ---------------------------------------------------------------------------
+
+/// A saved conversation, newest activity first in listings.
+#[derive(Debug, Serialize)]
+pub struct ChatThread {
+    pub id: i64,
+    pub title: String,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+/// A persisted message, with any tool-call steps rehydrated for the UI.
+#[derive(Debug, Serialize)]
+pub struct StoredMessage {
+    pub id: i64,
+    pub role: String,
+    pub content: String,
+    pub steps: Vec<ToolStep>,
+    pub created_at: String,
+}
+
+/// Longest auto-generated thread title (derived from the first user message).
+const THREAD_TITLE_MAX: usize = 48;
+
+fn row_to_thread(r: &rusqlite::Row) -> rusqlite::Result<ChatThread> {
+    Ok(ChatThread {
+        id: r.get(0)?,
+        title: r.get(1)?,
+        created_at: r.get(2)?,
+        updated_at: r.get(3)?,
+    })
+}
+
+fn load_thread(conn: &Connection, thread_id: i64) -> rusqlite::Result<Option<ChatThread>> {
+    conn.query_row(
+        "SELECT id, title, created_at, updated_at FROM chat_threads WHERE id = ?1",
+        params![thread_id],
+        row_to_thread,
+    )
+    .optional()
+}
+
+/// Condense a first user message into a short, single-line thread title.
+fn derive_thread_title(content: &str) -> String {
+    let cleaned = content.split_whitespace().collect::<Vec<_>>().join(" ");
+    if cleaned.chars().count() <= THREAD_TITLE_MAX {
+        return cleaned;
+    }
+    let truncated: String = cleaned.chars().take(THREAD_TITLE_MAX).collect();
+    format!("{}…", truncated.trim_end())
+}
+
+/// List saved threads, most recently active first.
+#[tauri::command]
+pub fn ai_list_threads(db: State<AppDb>) -> Result<Vec<ChatThread>, String> {
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    let mut stmt = conn
+        .prepare("SELECT id, title, created_at, updated_at FROM chat_threads ORDER BY updated_at DESC, id DESC")
+        .map_err(|e| e.to_string())?;
+    let threads = stmt
+        .query_map([], row_to_thread)
+        .map_err(|e| e.to_string())?
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(|e| e.to_string())?;
+    Ok(threads)
+}
+
+/// Create a new (empty) thread. Title defaults to "New chat" until the first user message.
+#[tauri::command]
+pub fn ai_create_thread(db: State<AppDb>, title: Option<String>) -> Result<ChatThread, String> {
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    let title = title
+        .map(|t| t.trim().to_string())
+        .filter(|t| !t.is_empty())
+        .unwrap_or_else(|| "New chat".to_string());
+    conn.execute("INSERT INTO chat_threads (title) VALUES (?1)", params![title])
+        .map_err(|e| e.to_string())?;
+    let id = conn.last_insert_rowid();
+    load_thread(&conn, id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "thread vanished after insert".to_string())
+}
+
+/// Rename a thread.
+#[tauri::command]
+pub fn ai_rename_thread(db: State<AppDb>, thread_id: i64, title: String) -> Result<(), String> {
+    let title = title.trim();
+    if title.is_empty() {
+        return Err("title cannot be empty".into());
+    }
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    let changed = conn
+        .execute(
+            "UPDATE chat_threads SET title = ?1, updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') WHERE id = ?2",
+            params![title, thread_id],
+        )
+        .map_err(|e| e.to_string())?;
+    if changed == 0 {
+        return Err("thread not found".into());
+    }
+    Ok(())
+}
+
+/// Delete a thread and all of its messages (cascade).
+#[tauri::command]
+pub fn ai_delete_thread(db: State<AppDb>, thread_id: i64) -> Result<(), String> {
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    conn.execute("DELETE FROM chat_threads WHERE id = ?1", params![thread_id])
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// Return a thread's messages in order, oldest first, with tool steps rehydrated.
+#[tauri::command]
+pub fn ai_get_thread_messages(
+    db: State<AppDb>,
+    thread_id: i64,
+) -> Result<Vec<StoredMessage>, String> {
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, role, content, steps_json, created_at FROM chat_messages \
+             WHERE thread_id = ?1 ORDER BY id",
+        )
+        .map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map(params![thread_id], |r| {
+            let steps_json: Option<String> = r.get(3)?;
+            let steps = steps_json
+                .and_then(|s| serde_json::from_str::<Vec<ToolStep>>(&s).ok())
+                .unwrap_or_default();
+            Ok(StoredMessage {
+                id: r.get(0)?,
+                role: r.get(1)?,
+                content: r.get(2)?,
+                steps,
+                created_at: r.get(4)?,
+            })
+        })
+        .map_err(|e| e.to_string())?
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(|e| e.to_string())?;
+    Ok(rows)
+}
+
+/// Append a message to a thread. The first user message auto-titles a still-default thread, and any
+/// write bumps the thread's `updated_at` so it floats to the top of the list.
+#[tauri::command]
+pub fn ai_append_message(
+    db: State<AppDb>,
+    thread_id: i64,
+    role: String,
+    content: String,
+    steps: Option<Vec<ToolStep>>,
+) -> Result<StoredMessage, String> {
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+
+    let thread = load_thread(&conn, thread_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "thread not found".to_string())?;
+
+    let steps_json = match &steps {
+        Some(s) if !s.is_empty() => Some(serde_json::to_string(s).map_err(|e| e.to_string())?),
+        _ => None,
+    };
+
+    conn.execute(
+        "INSERT INTO chat_messages (thread_id, role, content, steps_json) VALUES (?1, ?2, ?3, ?4)",
+        params![thread_id, role, content, steps_json],
+    )
+    .map_err(|e| e.to_string())?;
+    let id = conn.last_insert_rowid();
+
+    // Auto-title from the first user message while the thread still has its default name.
+    if role == "user" && thread.title == "New chat" {
+        let title = derive_thread_title(&content);
+        if !title.is_empty() {
+            conn.execute(
+                "UPDATE chat_threads SET title = ?1 WHERE id = ?2",
+                params![title, thread_id],
+            )
+            .map_err(|e| e.to_string())?;
+        }
+    }
+    conn.execute(
+        "UPDATE chat_threads SET updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') WHERE id = ?1",
+        params![thread_id],
+    )
+    .map_err(|e| e.to_string())?;
+
+    let created_at: String = conn
+        .query_row(
+            "SELECT created_at FROM chat_messages WHERE id = ?1",
+            params![id],
+            |r| r.get(0),
+        )
+        .map_err(|e| e.to_string())?;
+
+    Ok(StoredMessage {
+        id,
+        role,
+        content,
+        steps: steps.unwrap_or_default(),
+        created_at,
+    })
+}
+
 #[cfg(test)]
 mod agentic_tests {
     use super::*;
@@ -1204,6 +1417,16 @@ mod agentic_tests {
         // Never panics on a multi-byte boundary right at the cap.
         let mb = "✓✓✓✓✓"; // 3 bytes each
         let _ = truncate_for_display(mb, 4);
+    }
+
+    #[test]
+    fn derive_thread_title_cleans_and_caps() {
+        assert_eq!(derive_thread_title("  How's   my\nmoney? "), "How's my money?");
+        let long = "Please give me a very detailed breakdown of every single subscription I pay for";
+        let title = derive_thread_title(long);
+        assert!(title.chars().count() <= THREAD_TITLE_MAX + 1); // +1 for the ellipsis
+        assert!(title.ends_with('…'));
+        assert_eq!(derive_thread_title("   "), "");
     }
 
     #[test]

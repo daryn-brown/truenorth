@@ -102,6 +102,25 @@ CREATE TABLE IF NOT EXISTS app_settings (
     updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
 );
 
+-- AI advisor chat history. A thread groups an ongoing conversation so context is retained
+-- across app restarts; messages cascade-delete with their thread.
+CREATE TABLE IF NOT EXISTS chat_threads (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    title      TEXT    NOT NULL DEFAULT 'New chat',
+    created_at TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+    updated_at TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+);
+
+CREATE TABLE IF NOT EXISTS chat_messages (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    thread_id  INTEGER NOT NULL REFERENCES chat_threads(id) ON DELETE CASCADE,
+    role       TEXT    NOT NULL,
+    content    TEXT    NOT NULL,
+    -- JSON array of tool-call steps for assistant turns; NULL for user turns.
+    steps_json TEXT,
+    created_at TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+);
+
 -- Performance indices
 CREATE INDEX IF NOT EXISTS idx_balance_snapshots_account_date
     ON balance_snapshots (account_id, snapshot_date DESC);
@@ -111,6 +130,9 @@ CREATE INDEX IF NOT EXISTS idx_fx_rates_pair_date
 
 CREATE INDEX IF NOT EXISTS idx_transactions_account_date
     ON transactions (account_id, txn_date DESC);
+
+CREATE INDEX IF NOT EXISTS idx_chat_messages_thread
+    ON chat_messages (thread_id, id);
 
 -- Dedup key for connector-sourced transactions. connector_ref is NULL for manual rows, and
 -- SQLite treats NULLs as distinct, so manual entries never collide on this index.
