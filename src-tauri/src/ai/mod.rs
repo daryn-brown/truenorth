@@ -55,10 +55,134 @@ pub struct ModelInfo {
     pub name: String,
 }
 
+// ---------------------------------------------------------------------------
+// Tool-calling (function-calling) wire types
+//
+// The agentic advisor lets the model pull specific financial data on demand instead of working
+// from one fixed snapshot. These mirror the OpenAI `/chat/completions` tool-calling schema, which
+// both GitHub Models and Ollama's OpenAI-compatible endpoint speak.
+// ---------------------------------------------------------------------------
+
+/// A tool the model may call, advertised in the request. `parameters` is a JSON-Schema object.
+#[derive(Debug, Clone, Serialize)]
+pub struct ToolDef {
+    #[serde(rename = "type")]
+    pub kind: &'static str, // always "function"
+    pub function: FunctionSchema,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct FunctionSchema {
+    pub name: String,
+    pub description: String,
+    pub parameters: serde_json::Value,
+}
+
+impl ToolDef {
+    /// Build a function tool from a name, description, and JSON-Schema parameter object.
+    pub fn function(
+        name: impl Into<String>,
+        description: impl Into<String>,
+        parameters: serde_json::Value,
+    ) -> Self {
+        Self {
+            kind: "function",
+            function: FunctionSchema {
+                name: name.into(),
+                description: description.into(),
+                parameters,
+            },
+        }
+    }
+}
+
+/// One tool call the model requested in an assistant turn.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolCall {
+    #[serde(default)]
+    pub id: String,
+    #[serde(rename = "type", default = "default_tool_type")]
+    pub kind: String,
+    pub function: FunctionCall,
+}
+
+fn default_tool_type() -> String {
+    "function".to_string()
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FunctionCall {
+    pub name: String,
+    /// Raw JSON string of arguments, exactly as the model produced it.
+    #[serde(default)]
+    pub arguments: String,
+}
+
+/// A message in the OpenAI tool-calling schema. Unlike [`ChatMessage`] (the simple role/content
+/// pair exchanged with the frontend), this carries the extra fields needed to drive a tool loop:
+/// an assistant turn's `tool_calls`, and a `tool` turn's `tool_call_id` + `name`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WireMessage {
+    pub role: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_calls: Option<Vec<ToolCall>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_call_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+}
+
+impl WireMessage {
+    pub fn system(content: impl Into<String>) -> Self {
+        Self::text("system", content)
+    }
+
+    fn text(role: &str, content: impl Into<String>) -> Self {
+        Self {
+            role: role.into(),
+            content: Some(content.into()),
+            tool_calls: None,
+            tool_call_id: None,
+            name: None,
+        }
+    }
+
+    /// A `tool` result message answering a specific `tool_call_id`.
+    pub fn tool_result(tool_call_id: impl Into<String>, name: impl Into<String>, content: impl Into<String>) -> Self {
+        Self {
+            role: "tool".into(),
+            content: Some(content.into()),
+            tool_calls: None,
+            tool_call_id: Some(tool_call_id.into()),
+            name: Some(name.into()),
+        }
+    }
+}
+
+impl From<&ChatMessage> for WireMessage {
+    fn from(m: &ChatMessage) -> Self {
+        WireMessage::text(&m.role, m.content.clone())
+    }
+}
+
 #[derive(Serialize)]
 struct ChatRequest<'a> {
     model: &'a str,
     messages: &'a [ChatMessage],
+    #[serde(skip_serializing_if = "Option::is_none")]
+    temperature: Option<f32>,
+}
+
+#[derive(Serialize)]
+struct ToolChatRequest<'a> {
+    model: &'a str,
+    messages: &'a [WireMessage],
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tools: Option<&'a [ToolDef]>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tool_choice: Option<&'static str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     temperature: Option<f32>,
 }
@@ -196,6 +320,58 @@ pub async fn chat_completion(
         return Err(AiError::Message("The model returned an empty response.".into()));
     }
     Ok(content)
+}
+
+/// POST to an OpenAI-compatible `/chat/completions` endpoint with `tools` advertised, returning the
+/// full assistant message — which may carry `tool_calls` instead of (or alongside) `content`. The
+/// caller drives the agentic loop: execute any requested calls, append the results as `tool`
+/// messages, and call again until the model returns a plain answer. Passing an empty `tools` slice
+/// makes this a normal completion (no tool advertising).
+pub async fn chat_completion_tools(
+    base_url: &str,
+    api_key: Option<&str>,
+    model: &str,
+    messages: &[WireMessage],
+    tools: &[ToolDef],
+) -> Result<WireMessage, AiError> {
+    let url = format!("{}/chat/completions", base_url.trim_end_matches('/'));
+    let tools_opt = if tools.is_empty() { None } else { Some(tools) };
+    let mut req = http_client()?.post(&url).json(&ToolChatRequest {
+        model,
+        messages,
+        tools: tools_opt,
+        tool_choice: tools_opt.map(|_| "auto"),
+        temperature: Some(0.2),
+    });
+    if let Some(key) = api_key {
+        req = req.bearer_auth(key);
+    }
+
+    let resp = req.send().await.map_err(map_connect_error)?;
+    let status = resp.status();
+    let body = resp.text().await?;
+    if !status.is_success() {
+        return Err(AiError::Message(friendly_http_error(status, &body)));
+    }
+
+    let parsed: ToolChatCompletion = serde_json::from_str(&body)
+        .map_err(|e| AiError::Message(format!("Unexpected response from the model API: {e}")))?;
+    parsed
+        .choices
+        .into_iter()
+        .next()
+        .map(|c| c.message)
+        .ok_or_else(|| AiError::Message("The model returned no choices.".into()))
+}
+
+#[derive(Deserialize)]
+struct ToolChatCompletion {
+    choices: Vec<ToolChoice>,
+}
+
+#[derive(Deserialize)]
+struct ToolChoice {
+    message: WireMessage,
 }
 
 /// List available GitHub Models from the catalog (best-effort; used to populate the picker).

@@ -25,9 +25,44 @@ export interface AiSettingsInput {
 
 export type ChatRole = "system" | "user" | "assistant";
 
+/** One tool the advisor invoked while answering, surfaced as a "Used tool" step. */
+export interface ToolStep {
+  name: string;
+  /** Raw JSON arguments the model passed. */
+  arguments: string;
+  /** JSON result returned to the model (truncated for display). */
+  result: string;
+}
+
 export interface ChatMessage {
   role: ChatRole;
   content: string;
+  /** Tool-call trace for assistant turns; absent for user/system messages. */
+  steps?: ToolStep[];
+}
+
+/** Reply from `ai_chat`: the assistant's answer plus the tools it called to get there. */
+export interface AiChatResponse {
+  role: ChatRole;
+  content: string;
+  steps: ToolStep[];
+}
+
+/** A saved conversation (mirrors the Rust `ChatThread`). */
+export interface ChatThread {
+  id: number;
+  title: string;
+  created_at: string;
+  updated_at: string;
+}
+
+/** A persisted message loaded from a thread (mirrors the Rust `StoredMessage`). */
+export interface StoredMessage {
+  id: number;
+  role: ChatRole;
+  content: string;
+  steps: ToolStep[];
+  created_at: string;
 }
 
 export interface ModelInfo {
