@@ -45,7 +45,9 @@ never count them as variable spending or income.\n\
 names in the transaction list; infer the likely purpose of a purchase from the merchant.\n\
 - You are an educational tool, not a licensed financial or tax advisor; note significant caveats \
 briefly when they matter, without disclaiming every sentence.\n\
-- Never invent balances, transactions, or accounts that are not in the snapshot.";
+- Never invent balances, transactions, accounts, cost basis, or gains that are not in the data. If \
+a figure (such as a holding's average cost) is missing, say so rather than estimating it, and never \
+relabel or mix currencies.";
 
 // ---------------------------------------------------------------------------
 // app_settings helpers
@@ -419,6 +421,13 @@ fn build_system_preamble(db: &State<AppDb>) -> Result<String, String> {
          you need to gather the real figures before answering — never guess at balances, spending, \
          holdings, or debts you can look up. For broad questions (e.g. \"how's my money management?\") \
          combine several tools: cashflow + recurring charges + liabilities + holdings + the goal.\n\
+         NEVER FABRICATE NUMBERS. Use only values returned by tools. If a tool returns null or omits \
+         a field (for example a holding with no average_cost or cost_basis), treat it as UNKNOWN: do \
+         not estimate, guess, infer, or back-calculate it, and do not derive anything from it — no \
+         gain/loss, percent return, or unit cost. Say plainly that the data is unavailable and, when \
+         useful, how to get it (connect that brokerage via SnapTrade, or enter the cost manually). \
+         Report every amount in the exact currency the tool gives for it; never relabel CAD as USD \
+         (or vice versa) and never add or compare amounts in different currencies without converting.\n\
          Today is {today}. The user's home currency is {home_currency}. They have {active_accounts} \
          active account(s). Always label amounts with their currency (USD or CAD).\n\
          Format the final answer as clean GitHub-flavored markdown: short **bold** section headers, \
@@ -482,7 +491,10 @@ fn finance_tools() -> Vec<ToolDef> {
         ),
         ToolDef::function(
             "get_holdings",
-            "Investment holdings across brokerage accounts: symbol, quantity, average cost, last price, currency, and estimated market value.",
+            "Investment holdings across brokerage accounts: symbol, quantity, currency, last price, \
+             and market value. Also returns average_cost, cost_basis, and unrealized_gain, but ONLY \
+             when the data source provided a cost basis (these are null otherwise, with \
+             cost_basis_known=false). Never infer gain/loss for holdings whose cost basis is null.",
             no_params(),
         ),
         ToolDef::function(
@@ -605,22 +617,48 @@ fn execute_finance_tool(
         }
         "get_holdings" => {
             let holdings = load_holdings(db)?;
+            let missing_cost = holdings.iter().filter(|h| h.average_cost.is_none()).count();
             let items: Vec<_> = holdings
                 .iter()
                 .map(|h| {
                     let market_value = h.last_price.map(|p| round2(p * h.quantity));
+                    // Only derive cost figures when the brokerage actually supplied an average
+                    // cost. When it didn't, these stay null so the model can't infer gain/loss.
+                    let cost_basis = h.average_cost.map(|c| round2(c * h.quantity));
+                    let unrealized_gain = match (h.average_cost, h.last_price) {
+                        (Some(cost), Some(price)) => Some(round2((price - cost) * h.quantity)),
+                        _ => None,
+                    };
                     json!({
                         "account": h.account,
                         "symbol": h.symbol,
                         "quantity": h.quantity,
                         "currency": h.currency,
                         "average_cost": h.average_cost,
+                        "cost_basis_known": h.average_cost.is_some(),
                         "last_price": h.last_price,
                         "market_value": market_value,
+                        "cost_basis": cost_basis,
+                        "unrealized_gain": unrealized_gain,
                     })
                 })
                 .collect();
-            Ok(json!({ "holdings": items }))
+            let note = if missing_cost > 0 {
+                format!(
+                    "{missing_cost} holding(s) have no average_cost because the data source (e.g. \
+                     SimpleFIN via Robinhood/Questrade) did not provide cost basis. For those, \
+                     average_cost, cost_basis, and unrealized_gain are null — you MUST NOT \
+                     estimate, infer, or fabricate gain/loss, percent return, or unit cost for \
+                     them; state plainly that cost basis is unavailable (the user can connect via \
+                     SnapTrade or enter it manually). Report each holding's amounts in its own \
+                     `currency`; never relabel or mix USD and CAD."
+                )
+            } else {
+                "Report each holding's amounts in its own `currency`; never relabel or mix USD and \
+                 CAD."
+                    .to_string()
+            };
+            Ok(json!({ "holdings": items, "note": note }))
         }
         "get_goal" => {
             let goal = get_goal_progress(db.clone())?;
