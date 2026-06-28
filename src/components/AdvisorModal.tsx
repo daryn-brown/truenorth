@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { AiProvider, AiSettings, ChatMessage, ModelInfo } from "../types/ai";
+import MarkdownMessage from "./MarkdownMessage";
+import ToolTrace from "./ToolTrace";
 import {
   aiChat,
   aiGetSettings,
@@ -353,16 +355,20 @@ export default function AdvisorModal({ isOpen, onClose }: Props) {
 
 function Bubble({ message }: { message: ChatMessage }) {
   const isUser = message.role === "user";
+  if (isUser) {
+    return (
+      <div className="flex justify-end">
+        <div className="max-w-[85%] whitespace-pre-wrap rounded-2xl bg-indigo-600 px-3.5 py-2 text-sm text-white">
+          {message.content}
+        </div>
+      </div>
+    );
+  }
   return (
-    <div className={`flex ${isUser ? "justify-end" : "justify-start"}`}>
-      <div
-        className={`max-w-[85%] whitespace-pre-wrap rounded-2xl px-3.5 py-2 text-sm ${
-          isUser
-            ? "bg-indigo-600 text-white"
-            : "border border-slate-700 bg-slate-800 text-slate-200"
-        }`}
-      >
-        {message.content}
+    <div className="flex justify-start">
+      <div className="max-w-[85%] rounded-2xl border border-slate-700 bg-slate-800 px-3.5 py-2 text-slate-200">
+        <MarkdownMessage content={message.content} />
+        {message.steps && message.steps.length > 0 && <ToolTrace steps={message.steps} />}
       </div>
     </div>
   );

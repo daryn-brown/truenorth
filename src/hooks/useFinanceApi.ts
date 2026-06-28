@@ -1,9 +1,13 @@
 import { invoke } from "@tauri-apps/api/core";
 import type {
+  AiChatResponse,
   AiSettings,
   AiSettingsInput,
   ChatMessage,
+  ChatThread,
   ModelInfo,
+  StoredMessage,
+  ToolStep,
 } from "../types/ai";
 import type {
   Account,
@@ -210,9 +214,38 @@ export const aiGithubCliLogin = (): Promise<AiSettings> =>
 export const aiListModels = (): Promise<ModelInfo[]> =>
   invoke("ai_list_models");
 
-/** Send the conversation; the backend prepends a grounding snapshot of your finances. */
-export const aiChat = (messages: ChatMessage[]): Promise<ChatMessage> =>
+/** Send the conversation; the advisor calls finance tools on demand and returns a tool trace. */
+export const aiChat = (messages: ChatMessage[]): Promise<AiChatResponse> =>
   invoke("ai_chat", { messages });
+
+/** List saved chat threads, most recently active first. */
+export const aiListThreads = (): Promise<ChatThread[]> =>
+  invoke("ai_list_threads");
+
+/** Create a new (empty) thread; title defaults until the first user message. */
+export const aiCreateThread = (title?: string): Promise<ChatThread> =>
+  invoke("ai_create_thread", { title });
+
+/** Rename a thread. */
+export const aiRenameThread = (threadId: number, title: string): Promise<void> =>
+  invoke("ai_rename_thread", { threadId, title });
+
+/** Delete a thread and all of its messages. */
+export const aiDeleteThread = (threadId: number): Promise<void> =>
+  invoke("ai_delete_thread", { threadId });
+
+/** Load a thread's messages in order, with tool steps rehydrated. */
+export const aiGetThreadMessages = (threadId: number): Promise<StoredMessage[]> =>
+  invoke("ai_get_thread_messages", { threadId });
+
+/** Append a message to a thread; returns the stored row. */
+export const aiAppendMessage = (
+  threadId: number,
+  role: ChatMessage["role"],
+  content: string,
+  steps?: ToolStep[],
+): Promise<StoredMessage> =>
+  invoke("ai_append_message", { threadId, role, content, steps });
 
 /**
  * Ask the configured model to label recent transactions by spending category and flag any that
