@@ -1,18 +1,31 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import type { AiProvider, AiSettings, ChatMessage, ModelInfo } from "../types/ai";
-import MarkdownMessage from "./MarkdownMessage";
-import ToolTrace from "./ToolTrace";
+import type {
+  AiProvider,
+  AiSettings,
+  ChatMessage,
+  ChatThread,
+  ModelInfo,
+} from "../types/ai";
 import {
+  aiAppendMessage,
   aiChat,
+  aiCreateThread,
+  aiDeleteThread,
   aiGetSettings,
+  aiGetThreadMessages,
   aiGithubCliLogin,
   aiListModels,
+  aiListThreads,
   aiSaveSettings,
   aiSetGithubToken,
 } from "../hooks/useFinanceApi";
+import MarkdownMessage from "./MarkdownMessage";
+import ToolTrace from "./ToolTrace";
 
 interface Props {
-  isOpen: boolean;
+  /** Whether the panel is expanded (vs. collapsed to a slim rail). */
+  open: boolean;
+  onOpen: () => void;
   onClose: () => void;
 }
 
@@ -41,13 +54,18 @@ const isGithubAccessError = (msg: string) =>
     msg,
   );
 
-export default function AdvisorModal({ isOpen, onClose }: Props) {
+export default function AdvisorPanel({ open, onOpen, onClose }: Props) {
   const [settings, setSettings] = useState<AiSettings | null>(null);
   const [showSettings, setShowSettings] = useState(false);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  // Thread persistence: saved conversations the user can switch between or delete.
+  const [threads, setThreads] = useState<ChatThread[]>([]);
+  const [activeThreadId, setActiveThreadId] = useState<number | null>(null);
+  const [threadsOpen, setThreadsOpen] = useState(false);
 
   // Editable settings draft (mirrors `settings` until saved).
   const [provider, setProvider] = useState<AiProvider>("github");
@@ -63,6 +81,7 @@ export default function AdvisorModal({ isOpen, onClose }: Props) {
   const [loadingModels, setLoadingModels] = useState(false);
 
   const scrollRef = useRef<HTMLDivElement>(null);
+  const initedRef = useRef(false);
 
   const applySettings = useCallback((s: AiSettings) => {
     setSettings(s);
@@ -73,36 +92,85 @@ export default function AdvisorModal({ isOpen, onClose }: Props) {
     setIncludeRealData(s.include_real_data);
   }, []);
 
-  // Load settings whenever the modal opens.
+  const refreshThreads = useCallback(async () => {
+    try {
+      setThreads(await aiListThreads());
+    } catch {
+      // Non-fatal: the chat still works without an up-to-date list.
+    }
+  }, []);
+
+  // Load a saved thread's messages into the view.
+  const openThread = useCallback(async (id: number) => {
+    setError(null);
+    setShowSettings(false);
+    setThreadsOpen(false);
+    setActiveThreadId(id);
+    try {
+      const msgs = await aiGetThreadMessages(id);
+      setMessages(
+        msgs.map((m) => ({ role: m.role, content: m.content, steps: m.steps })),
+      );
+    } catch (e) {
+      setError(String(e));
+    }
+  }, []);
+
+  // Start a fresh conversation. The thread row is created lazily on the first send.
+  const newChat = useCallback(() => {
+    setActiveThreadId(null);
+    setMessages([]);
+    setError(null);
+    setShowSettings(false);
+    setThreadsOpen(false);
+  }, []);
+
+  // Load settings each time the panel opens; load threads once and resume the most recent.
   useEffect(() => {
-    if (!isOpen) return;
+    if (!open) return;
     setError(null);
     aiGetSettings()
       .then((s) => {
         applySettings(s);
-        // Nudge first-time users straight to setup when GitHub is selected but unconfigured.
         if (s.provider === "github" && !s.has_github_token) setShowSettings(true);
       })
       .catch((e) => setError(String(e)));
-  }, [isOpen, applySettings]);
+
+    if (!initedRef.current) {
+      initedRef.current = true;
+      aiListThreads()
+        .then((ts) => {
+          setThreads(ts);
+          if (ts.length > 0) void openThread(ts[0].id);
+        })
+        .catch((e) => setError(String(e)));
+    }
+  }, [open, applySettings, openThread]);
 
   // Keep the latest message in view.
   useEffect(() => {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "smooth" });
   }, [messages, busy]);
 
-  const runChat = useCallback(async (convo: ChatMessage[]) => {
-    setBusy(true);
-    setError(null);
-    try {
+  // Ensure a thread exists to attach messages to, creating one on demand.
+  const ensureThread = useCallback(async (): Promise<number> => {
+    if (activeThreadId != null) return activeThreadId;
+    const t = await aiCreateThread();
+    setActiveThreadId(t.id);
+    setThreads((prev) => [t, ...prev]);
+    return t.id;
+  }, [activeThreadId]);
+
+  // Call the model with the conversation, then append + persist the assistant reply.
+  const generate = useCallback(
+    async (convo: ChatMessage[], threadId: number) => {
       const reply = await aiChat(convo);
       setMessages((m) => [...m, reply]);
-    } catch (e) {
-      setError(String(e));
-    } finally {
-      setBusy(false);
-    }
-  }, []);
+      await aiAppendMessage(threadId, "assistant", reply.content, reply.steps);
+      await refreshThreads();
+    },
+    [refreshThreads],
+  );
 
   const send = useCallback(
     async (text: string) => {
@@ -111,17 +179,48 @@ export default function AdvisorModal({ isOpen, onClose }: Props) {
       const next: ChatMessage[] = [...messages, { role: "user", content }];
       setMessages(next);
       setInput("");
-      await runChat(next);
+      setBusy(true);
+      setError(null);
+      try {
+        const threadId = await ensureThread();
+        await aiAppendMessage(threadId, "user", content);
+        await generate(next, threadId);
+      } catch (e) {
+        setError(String(e));
+      } finally {
+        setBusy(false);
+      }
     },
-    [messages, busy, runChat],
+    [messages, busy, ensureThread, generate],
   );
 
-  // After a failed send the conversation already ends with the user's turn (no assistant reply was
-  // appended), so retry just re-runs it as-is.
+  // After a failed send the conversation already ends with the user's turn (the assistant reply was
+  // never appended) and that user turn is already persisted, so retry only re-generates the answer.
   const retry = useCallback(async () => {
-    if (busy || messages.length === 0) return;
-    await runChat(messages);
-  }, [busy, messages, runChat]);
+    if (busy || messages.length === 0 || activeThreadId == null) return;
+    setBusy(true);
+    setError(null);
+    try {
+      await generate(messages, activeThreadId);
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setBusy(false);
+    }
+  }, [busy, messages, activeThreadId, generate]);
+
+  const handleDeleteThread = useCallback(
+    async (id: number) => {
+      try {
+        await aiDeleteThread(id);
+        setThreads((prev) => prev.filter((t) => t.id !== id));
+        if (activeThreadId === id) newChat();
+      } catch (e) {
+        setError(String(e));
+      }
+    },
+    [activeThreadId, newChat],
+  );
 
   // Reuse the local GitHub CLI session (`gh auth token`) as the token — nothing to create or
   // paste. Returns whether a working token was stored.
@@ -193,162 +292,243 @@ export default function AdvisorModal({ isOpen, onClose }: Props) {
     }
   };
 
-  if (!isOpen) return null;
+  // Collapsed: a slim, always-present rail so the chat is one click away.
+  if (!open) {
+    return (
+      <div className="flex h-full w-12 shrink-0 flex-col items-center border-l border-slate-800 bg-slate-900 py-3">
+        <button
+          onClick={onOpen}
+          title="Open finance brain"
+          className="flex flex-col items-center gap-2 rounded-lg px-2 py-2 text-slate-400 hover:bg-slate-800 hover:text-white"
+        >
+          <span className="text-lg">🧠</span>
+          <span className="text-[10px] font-semibold uppercase tracking-wider [writing-mode:vertical-rl]">
+            Ask AI
+          </span>
+        </button>
+      </div>
+    );
+  }
 
   const githubReady = settings?.has_github_token ?? false;
   const canChat = provider === "ollama" || githubReady;
+  const activeThread = threads.find((t) => t.id === activeThreadId);
+  const headerTitle = activeThread?.title ?? "Finance brain";
 
   return (
-    <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm"
-      onClick={(e) => e.target === e.currentTarget && onClose()}
-    >
-      <div className="flex h-[80vh] w-full max-w-2xl flex-col rounded-2xl border border-slate-700 bg-slate-900 shadow-2xl">
-        {/* Header */}
-        <div className="flex items-center justify-between border-b border-slate-800 px-5 py-3">
-          <div className="flex items-center gap-2">
-            <span className="text-base font-semibold text-white">🧠 Finance brain</span>
-            <span className="rounded-full border border-slate-700 bg-slate-800 px-2 py-0.5 text-[10px] uppercase tracking-wider text-slate-400">
-              {provider === "github" ? "GitHub Models" : "Ollama · local"}
-            </span>
-          </div>
-          <div className="flex items-center gap-1">
-            <button
-              onClick={() => setShowSettings((v) => !v)}
-              title="AI provider settings"
-              className="rounded-lg border border-slate-700 px-2.5 py-1 text-xs text-slate-400 hover:bg-slate-800"
-            >
-              ⚙️ Settings
-            </button>
-            <button
-              onClick={onClose}
-              className="rounded-lg border border-slate-700 px-2.5 py-1 text-xs text-slate-400 hover:bg-slate-800"
-            >
-              ✕
-            </button>
-          </div>
+    <div className="relative flex h-full w-[380px] shrink-0 flex-col border-l border-slate-800 bg-slate-900 lg:w-[440px]">
+      {/* Header */}
+      <div className="flex items-center justify-between gap-2 border-b border-slate-800 px-3 py-2.5">
+        <div className="flex min-w-0 items-center gap-1.5">
+          <button
+            onClick={() => setThreadsOpen((v) => !v)}
+            title="Chat history"
+            className="rounded-lg border border-slate-700 px-2 py-1 text-xs text-slate-400 hover:bg-slate-800"
+          >
+            ☰
+          </button>
+          <span className="truncate text-sm font-semibold text-white" title={headerTitle}>
+            {headerTitle}
+          </span>
         </div>
+        <div className="flex shrink-0 items-center gap-1">
+          <button
+            onClick={newChat}
+            title="New chat"
+            className="rounded-lg border border-slate-700 px-2 py-1 text-xs text-slate-400 hover:bg-slate-800"
+          >
+            ＋
+          </button>
+          <button
+            onClick={() => setShowSettings((v) => !v)}
+            title="AI provider settings"
+            className="rounded-lg border border-slate-700 px-2 py-1 text-xs text-slate-400 hover:bg-slate-800"
+          >
+            ⚙️
+          </button>
+          <button
+            onClick={onClose}
+            title="Collapse panel"
+            className="rounded-lg border border-slate-700 px-2 py-1 text-xs text-slate-400 hover:bg-slate-800"
+          >
+            »
+          </button>
+        </div>
+      </div>
 
-        {error && (
-          <div className="mx-5 mt-3 rounded-lg border border-red-700/50 bg-red-900/20 px-3 py-2 text-xs text-red-300">
-            <p>{error}</p>
-            {provider === "github" && isGithubAccessError(error) && messages.length > 0 && (
-              <button
-                onClick={() => void cliLoginAndRetry()}
-                disabled={busy || cliBusy}
-                className="mt-2 rounded-md border border-red-600/60 bg-red-800/40 px-2.5 py-1 font-medium text-red-100 hover:bg-red-800/70 disabled:opacity-50"
-              >
-                {cliBusy ? "Signing in…" : "Use my GitHub CLI login and retry"}
-              </button>
+      <div className="border-b border-slate-800 px-3 py-1.5">
+        <span className="rounded-full border border-slate-700 bg-slate-800 px-2 py-0.5 text-[10px] uppercase tracking-wider text-slate-400">
+          {provider === "github" ? "GitHub Models" : "Ollama · local"}
+        </span>
+      </div>
+
+      {error && (
+        <div className="mx-3 mt-3 rounded-lg border border-red-700/50 bg-red-900/20 px-3 py-2 text-xs text-red-300">
+          <p>{error}</p>
+          {provider === "github" && isGithubAccessError(error) && messages.length > 0 && (
+            <button
+              onClick={() => void cliLoginAndRetry()}
+              disabled={busy || cliBusy}
+              className="mt-2 rounded-md border border-red-600/60 bg-red-800/40 px-2.5 py-1 font-medium text-red-100 hover:bg-red-800/70 disabled:opacity-50"
+            >
+              {cliBusy ? "Signing in…" : "Use my GitHub CLI login and retry"}
+            </button>
+          )}
+        </div>
+      )}
+
+      {showSettings ? (
+        <SettingsPanel
+          provider={provider}
+          setProvider={setProvider}
+          githubModel={githubModel}
+          setGithubModel={setGithubModel}
+          ollamaModel={ollamaModel}
+          setOllamaModel={setOllamaModel}
+          ollamaUrl={ollamaUrl}
+          setOllamaUrl={setOllamaUrl}
+          includeRealData={includeRealData}
+          setIncludeRealData={setIncludeRealData}
+          tokenInput={tokenInput}
+          setTokenInput={setTokenInput}
+          hasToken={githubReady}
+          onSaveToken={handleSaveToken}
+          savingToken={savingToken}
+          onUseCliLogin={useGithubCliLogin}
+          cliBusy={cliBusy}
+          models={models}
+          loadingModels={loadingModels}
+          onLoadModels={handleLoadModels}
+          onSave={handleSaveSettings}
+          saving={savingSettings}
+        />
+      ) : (
+        <>
+          {/* Messages */}
+          <div ref={scrollRef} className="flex-1 space-y-3 overflow-y-auto px-4 py-4">
+            {messages.length === 0 ? (
+              <div className="flex h-full flex-col items-center justify-center gap-4 text-center">
+                <p className="max-w-sm text-sm text-slate-400">
+                  Ask anything about your finances. I call tools on your accounts, net worth,
+                  cashflow, goal, holdings, and transactions to answer.
+                </p>
+                <div className="grid w-full max-w-md gap-2">
+                  {SUGGESTIONS.map((q) => (
+                    <button
+                      key={q}
+                      disabled={!canChat}
+                      onClick={() => void send(q)}
+                      className="rounded-lg border border-slate-700 bg-slate-800/50 px-3 py-2 text-left text-xs text-slate-300 hover:bg-slate-800 disabled:opacity-40"
+                    >
+                      {q}
+                    </button>
+                  ))}
+                </div>
+                {!canChat && (
+                  <p className="text-xs text-amber-400">
+                    Add a GitHub token in Settings to start (or switch to Ollama).
+                  </p>
+                )}
+              </div>
+            ) : (
+              messages.map((m, i) => <Bubble key={i} message={m} />)
+            )}
+            {busy && (
+              <div className="flex items-center gap-2 text-xs text-slate-500">
+                <span className="h-2 w-2 animate-pulse rounded-full bg-indigo-400" />
+                Thinking…
+              </div>
             )}
           </div>
-        )}
 
-        {showSettings ? (
-          <SettingsPanel
-            provider={provider}
-            setProvider={setProvider}
-            githubModel={githubModel}
-            setGithubModel={setGithubModel}
-            ollamaModel={ollamaModel}
-            setOllamaModel={setOllamaModel}
-            ollamaUrl={ollamaUrl}
-            setOllamaUrl={setOllamaUrl}
-            includeRealData={includeRealData}
-            setIncludeRealData={setIncludeRealData}
-            tokenInput={tokenInput}
-            setTokenInput={setTokenInput}
-            hasToken={githubReady}
-            onSaveToken={handleSaveToken}
-            savingToken={savingToken}
-            onUseCliLogin={useGithubCliLogin}
-            cliBusy={cliBusy}
-            models={models}
-            loadingModels={loadingModels}
-            onLoadModels={handleLoadModels}
-            onSave={handleSaveSettings}
-            saving={savingSettings}
-          />
-        ) : (
-          <>
-            {/* Messages */}
-            <div ref={scrollRef} className="flex-1 space-y-3 overflow-y-auto px-5 py-4">
-              {messages.length === 0 ? (
-                <div className="flex h-full flex-col items-center justify-center gap-4 text-center">
-                  <p className="max-w-sm text-sm text-slate-400">
-                    Ask anything about your finances. I read your accounts, net worth, cashflow,
-                    goal, holdings, and recent transactions to answer.
-                  </p>
-                  <div className="grid w-full max-w-md gap-2">
-                    {SUGGESTIONS.map((q) => (
-                      <button
-                        key={q}
-                        disabled={!canChat}
-                        onClick={() => void send(q)}
-                        className="rounded-lg border border-slate-700 bg-slate-800/50 px-3 py-2 text-left text-xs text-slate-300 hover:bg-slate-800 disabled:opacity-40"
-                      >
-                        {q}
-                      </button>
-                    ))}
-                  </div>
-                  {!canChat && (
-                    <p className="text-xs text-amber-400">
-                      Add a GitHub token in Settings to start (or switch to Ollama).
-                    </p>
-                  )}
-                </div>
+          {/* Composer */}
+          <div className="border-t border-slate-800 px-4 py-3">
+            <div className="flex items-end gap-2">
+              <textarea
+                value={input}
+                onChange={(e) => setInput(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" && !e.shiftKey) {
+                    e.preventDefault();
+                    void send(input);
+                  }
+                }}
+                placeholder={canChat ? "Ask about your money…" : "Configure a provider in Settings first"}
+                rows={1}
+                disabled={!canChat || busy}
+                className={`${inputClass} max-h-32 resize-none disabled:opacity-50`}
+              />
+              <button
+                onClick={() => void send(input)}
+                disabled={!canChat || busy || !input.trim()}
+                className="rounded-lg bg-indigo-600 px-4 py-2 text-sm font-medium text-white hover:bg-indigo-500 disabled:opacity-40"
+              >
+                Send
+              </button>
+            </div>
+            <p className="mt-2 text-[11px] text-slate-500">
+              {provider === "github" ? (
+                <>
+                  {includeRealData
+                    ? "Your real balances & transactions are sent to GitHub Models to answer."
+                    : "Privacy mode: only rounded aggregates are sent to GitHub Models."}
+                </>
               ) : (
-                messages.map((m, i) => <Bubble key={i} message={m} />)
-              )}
-              {busy && (
-                <div className="flex items-center gap-2 text-xs text-slate-500">
-                  <span className="h-2 w-2 animate-pulse rounded-full bg-indigo-400" />
-                  Thinking…
-                </div>
-              )}
-            </div>
+                "Running locally via Ollama — nothing leaves your device."
+              )}{" "}
+              Educational only, not licensed financial advice.
+            </p>
+          </div>
+        </>
+      )}
 
-            {/* Composer */}
-            <div className="border-t border-slate-800 px-5 py-3">
-              <div className="flex items-end gap-2">
-                <textarea
-                  value={input}
-                  onChange={(e) => setInput(e.target.value)}
-                  onKeyDown={(e) => {
-                    if (e.key === "Enter" && !e.shiftKey) {
-                      e.preventDefault();
-                      void send(input);
-                    }
-                  }}
-                  placeholder={canChat ? "Ask about your money…" : "Configure a provider in Settings first"}
-                  rows={1}
-                  disabled={!canChat || busy}
-                  className={`${inputClass} max-h-32 resize-none disabled:opacity-50`}
-                />
-                <button
-                  onClick={() => void send(input)}
-                  disabled={!canChat || busy || !input.trim()}
-                  className="rounded-lg bg-indigo-600 px-4 py-2 text-sm font-medium text-white hover:bg-indigo-500 disabled:opacity-40"
-                >
-                  Send
-                </button>
-              </div>
-              <p className="mt-2 text-[11px] text-slate-500">
-                {provider === "github" ? (
-                  <>
-                    {includeRealData
-                      ? "Your real balances & transactions are sent to GitHub Models to answer."
-                      : "Privacy mode: only rounded aggregates are sent to GitHub Models."}
-                  </>
-                ) : (
-                  "Running locally via Ollama — nothing leaves your device."
-                )}{" "}
-                Educational only, not licensed financial advice.
-              </p>
+      {/* Thread history drawer */}
+      {threadsOpen && (
+        <div className="absolute inset-0 z-10 flex">
+          <div className="flex w-64 flex-col border-r border-slate-800 bg-slate-900">
+            <div className="flex items-center justify-between border-b border-slate-800 px-3 py-2.5">
+              <span className="text-xs font-semibold text-slate-300">Chats</span>
+              <button
+                onClick={newChat}
+                className="rounded-md border border-slate-700 px-2 py-1 text-[11px] text-slate-300 hover:bg-slate-800"
+              >
+                ＋ New
+              </button>
             </div>
-          </>
-        )}
-      </div>
+            <div className="flex-1 space-y-1 overflow-y-auto p-2">
+              {threads.length === 0 ? (
+                <p className="px-2 py-4 text-center text-xs text-slate-600">No saved chats yet.</p>
+              ) : (
+                threads.map((t) => (
+                  <div
+                    key={t.id}
+                    className={`group flex items-center gap-1 rounded-lg px-2 py-1.5 ${
+                      t.id === activeThreadId ? "bg-slate-800" : "hover:bg-slate-800/60"
+                    }`}
+                  >
+                    <button
+                      onClick={() => void openThread(t.id)}
+                      className="flex-1 truncate text-left text-xs text-slate-300"
+                      title={t.title}
+                    >
+                      {t.title}
+                    </button>
+                    <button
+                      onClick={() => void handleDeleteThread(t.id)}
+                      title="Delete chat"
+                      className="text-xs text-slate-600 opacity-0 transition-opacity hover:text-red-400 group-hover:opacity-100"
+                    >
+                      🗑
+                    </button>
+                  </div>
+                ))
+              )}
+            </div>
+          </div>
+          {/* Click-away closes the drawer. */}
+          <div className="flex-1 bg-black/40" onClick={() => setThreadsOpen(false)} />
+        </div>
+      )}
     </div>
   );
 }
@@ -366,7 +546,7 @@ function Bubble({ message }: { message: ChatMessage }) {
   }
   return (
     <div className="flex justify-start">
-      <div className="max-w-[85%] rounded-2xl border border-slate-700 bg-slate-800 px-3.5 py-2 text-slate-200">
+      <div className="max-w-[90%] rounded-2xl border border-slate-700 bg-slate-800 px-3.5 py-2 text-slate-200">
         <MarkdownMessage content={message.content} />
         {message.steps && message.steps.length > 0 && <ToolTrace steps={message.steps} />}
       </div>
@@ -402,7 +582,7 @@ interface SettingsProps {
 function SettingsPanel(p: SettingsProps) {
   const isGithub = p.provider === "github";
   return (
-    <div className="flex-1 space-y-5 overflow-y-auto px-5 py-4">
+    <div className="flex-1 space-y-5 overflow-y-auto px-4 py-4">
       {/* Provider */}
       <div>
         <label className="mb-1.5 block text-xs font-medium text-slate-400">Provider</label>
