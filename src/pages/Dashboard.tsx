@@ -5,6 +5,8 @@ import type {
   AddBalanceSnapshotPayload,
   CashflowSummary,
   Currency,
+  FireInputs,
+  FirePlan,
   GoalProgress,
   NetWorth,
   NetWorthDelta,
@@ -18,6 +20,7 @@ import {
   backfillNetWorthHistory,
   deleteAccount,
   getCashflowSummary,
+  getFirePlan,
   getGoalProgress,
   getNetWorth,
   getNetWorthDelta,
@@ -26,11 +29,13 @@ import {
   listAccounts,
   refreshFxRates,
   refreshFxRatesIfStale,
+  setFireInputs,
   setSeattleAssumptions,
   updateAccountCurrency,
 } from "../hooks/useFinanceApi";
 import NetWorthCard from "../components/NetWorthCard";
 import GoalCountdownCard from "../components/GoalCountdownCard";
+import FirePlannerCard from "../components/FirePlannerCard";
 import SeattleSimulatorCard from "../components/SeattleSimulatorCard";
 import CashflowCard from "../components/CashflowCard";
 import AccountList from "../components/AccountList";
@@ -58,6 +63,7 @@ export default function Dashboard({
   const [netWorth, setNetWorth] = useState<NetWorth | null>(null);
   const [delta, setDelta] = useState<NetWorthDelta | null>(null);
   const [goal, setGoal] = useState<GoalProgress | null>(null);
+  const [firePlan, setFirePlan] = useState<FirePlan | null>(null);
   const [projection, setProjection] = useState<SeattleProjection | null>(null);
   const [cashflow, setCashflow] = useState<CashflowSummary | null>(null);
   const [history, setHistory] = useState<NetWorthHistoryPoint[]>([]);
@@ -82,11 +88,12 @@ export default function Dashboard({
       } catch (err) {
         console.error("Auto FX refresh failed:", err);
       }
-      const [accs, nw, nwDelta, goalProgress, proj, cf, hist] = await Promise.all([
+      const [accs, nw, nwDelta, goalProgress, fire, proj, cf, hist] = await Promise.all([
         listAccounts(),
         getNetWorth(),
         getNetWorthDelta(),
         getGoalProgress(),
+        getFirePlan(),
         getSeattleProjection(),
         getCashflowSummary(),
         getNetWorthHistory(),
@@ -95,6 +102,7 @@ export default function Dashboard({
       setNetWorth(nw);
       setDelta(nwDelta);
       setGoal(goalProgress);
+      setFirePlan(fire);
       setProjection(proj);
       setCashflow(cf);
       setHistory(hist);
@@ -141,6 +149,11 @@ export default function Dashboard({
   const handleUpdateAssumptions = useCallback(async (a: SeattleAssumptions) => {
     const updated = await setSeattleAssumptions(a);
     setProjection(updated);
+  }, []);
+
+  const handleUpdateFireInputs = useCallback(async (inputs: FireInputs) => {
+    const updated = await setFireInputs(inputs);
+    setFirePlan(updated);
   }, []);
 
   const refreshCashflow = useCallback(async () => {
@@ -273,6 +286,10 @@ export default function Dashboard({
 
         {/* $100k countdown / CoastFIRE */}
         <GoalCountdownCard goal={goal} loading={loading} />
+
+        {/* Generic FIRE planner — neutral defaults, customizable per user */}
+        <FirePlannerCard plan={firePlan} loading={loading} onUpdate={handleUpdateFireInputs} />
+
 
         {/* Seattle transition simulator */}
         <SeattleSimulatorCard

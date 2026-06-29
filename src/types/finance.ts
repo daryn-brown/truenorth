@@ -164,6 +164,40 @@ export interface GoalProgress {
   days_to_goal: number | null;
 }
 
+/**
+ * Generic FIRE planner inputs (neutral defaults; the user enters their own, persisted locally).
+ * Mirrors the Rust `FireInputs`.
+ */
+export interface FireInputs {
+  current_age: number;
+  annual_expenses_usd: number;
+  swr_pct: number;
+  annual_return_pct: number;
+  retirement_age: number;
+  /** 0 = derive from the user's ~30-day net-worth pace. */
+  monthly_contribution_usd: number;
+}
+
+/** Computed FIRE/CoastFIRE targets + timeline. Mirrors the Rust `FirePlan`. */
+export interface FirePlan {
+  inputs: FireInputs;
+  current_usd: number;
+  monthly_contribution_usd: number;
+  contribution_is_derived: boolean;
+  fire_number: number;
+  coast_number: number;
+  fire_progress: number;
+  coast_progress: number;
+  already_fire: boolean;
+  already_coast: boolean;
+  coast_months: number | null;
+  coast_age: number | null;
+  coast_date: string | null;
+  fire_months: number | null;
+  fire_age: number | null;
+  fire_date: string | null;
+}
+
 /** Editable levers behind the Seattle projection. Mirrors the Rust `SeattleAssumptions`. */
 export interface SeattleAssumptions {
   current_net_monthly_usd: number;

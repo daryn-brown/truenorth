@@ -189,7 +189,7 @@ the Apple/Windows signing secrets to sign automatically. See [`docs/releasing.md
 1. ✅ Manual multi-currency net-worth MVP (+ JSON/CSV import)
 2. ✅ SnapTrade brokerage sync (read-only balances + holdings)
 3. 🔄 SimpleFIN bank sync (read-only balances + holdings) + direct institution APIs (Questrade: cash + equity)
-4. Transactions & goals
+4. 🔄 Transactions & goals (incl. a generic, customizable **FIRE planner** — FIRE/CoastFIRE targets + projected ages)
 5. 🔄 Model-agnostic AI "second brain" — GitHub Models + local Ollama shipped (Azure later)
 6. Hardening & polish
 

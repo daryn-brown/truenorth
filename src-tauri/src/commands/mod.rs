@@ -1,6 +1,7 @@
 pub mod accounts;
 pub mod ai;
 pub mod cashflow;
+pub mod fire;
 pub mod fx;
 pub mod goals;
 pub mod import;
