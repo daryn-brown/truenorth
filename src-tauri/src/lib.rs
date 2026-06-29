@@ -41,6 +41,8 @@ pub fn run() {
             commands::net_worth::backfill_net_worth_history,
             commands::goals::get_goal_progress,
             commands::goals::set_goal_target,
+            commands::fire::get_fire_plan,
+            commands::fire::set_fire_inputs,
             commands::cashflow::get_cashflow_summary,
             commands::cashflow::list_recent_transactions,
             commands::cashflow::set_transaction_flow,
