@@ -36,8 +36,8 @@ import type {
   SnapTradeStatus,
   SnapTradeSyncSummary,
   TxnRule,
-  WealthBenchmark,
-  WealthInputs,
+  ProgressMetrics,
+  ProgressInputs,
 } from "../types/finance";
 
 export const listAccounts = (): Promise<Account[]> =>
@@ -87,13 +87,13 @@ export const getFirePlan = (): Promise<FirePlan> => invoke("get_fire_plan");
 export const setFireInputs = (inputs: FireInputs): Promise<FirePlan> =>
   invoke("set_fire_inputs", { inputs });
 
-/** Net worth vs. income-based formulas (Millionaire Next Door) + accumulation velocity. */
-export const getWealthBenchmark = (): Promise<WealthBenchmark> =>
-  invoke("get_wealth_benchmark");
+/** Freedom runway + salary milestones (forward-looking progress metrics). */
+export const getProgressMetrics = (): Promise<ProgressMetrics> =>
+  invoke("get_progress_metrics");
 
-/** Persist edited wealth-benchmark inputs; returns the recomputed benchmark. */
-export const setWealthInputs = (inputs: WealthInputs): Promise<WealthBenchmark> =>
-  invoke("set_wealth_inputs", { inputs });
+/** Persist edited progress inputs; returns the recomputed metrics. */
+export const setProgressInputs = (inputs: ProgressInputs): Promise<ProgressMetrics> =>
+  invoke("set_progress_inputs", { inputs });
 
 /** Forward net-worth projection: status quo vs. dropping Job 2 in the Seattle move. */
 export const getSeattleProjection = (): Promise<SeattleProjection> =>
