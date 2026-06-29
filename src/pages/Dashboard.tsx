@@ -13,6 +13,8 @@ import type {
   NetWorthHistoryPoint,
   SeattleAssumptions,
   SeattleProjection,
+  WealthBenchmark,
+  WealthInputs,
 } from "../types/finance";
 import {
   addAccount,
@@ -26,16 +28,19 @@ import {
   getNetWorthDelta,
   getNetWorthHistory,
   getSeattleProjection,
+  getWealthBenchmark,
   listAccounts,
   refreshFxRates,
   refreshFxRatesIfStale,
   setFireInputs,
   setSeattleAssumptions,
+  setWealthInputs,
   updateAccountCurrency,
 } from "../hooks/useFinanceApi";
 import NetWorthCard from "../components/NetWorthCard";
 import GoalCountdownCard from "../components/GoalCountdownCard";
 import FirePlannerCard from "../components/FirePlannerCard";
+import WealthBenchmarkCard from "../components/WealthBenchmarkCard";
 import SeattleSimulatorCard from "../components/SeattleSimulatorCard";
 import CashflowCard from "../components/CashflowCard";
 import AccountList from "../components/AccountList";
@@ -64,6 +69,7 @@ export default function Dashboard({
   const [delta, setDelta] = useState<NetWorthDelta | null>(null);
   const [goal, setGoal] = useState<GoalProgress | null>(null);
   const [firePlan, setFirePlan] = useState<FirePlan | null>(null);
+  const [wealth, setWealth] = useState<WealthBenchmark | null>(null);
   const [projection, setProjection] = useState<SeattleProjection | null>(null);
   const [cashflow, setCashflow] = useState<CashflowSummary | null>(null);
   const [history, setHistory] = useState<NetWorthHistoryPoint[]>([]);
@@ -88,12 +94,13 @@ export default function Dashboard({
       } catch (err) {
         console.error("Auto FX refresh failed:", err);
       }
-      const [accs, nw, nwDelta, goalProgress, fire, proj, cf, hist] = await Promise.all([
+      const [accs, nw, nwDelta, goalProgress, fire, wb, proj, cf, hist] = await Promise.all([
         listAccounts(),
         getNetWorth(),
         getNetWorthDelta(),
         getGoalProgress(),
         getFirePlan(),
+        getWealthBenchmark(),
         getSeattleProjection(),
         getCashflowSummary(),
         getNetWorthHistory(),
@@ -103,6 +110,7 @@ export default function Dashboard({
       setDelta(nwDelta);
       setGoal(goalProgress);
       setFirePlan(fire);
+      setWealth(wb);
       setProjection(proj);
       setCashflow(cf);
       setHistory(hist);
@@ -154,6 +162,11 @@ export default function Dashboard({
   const handleUpdateFireInputs = useCallback(async (inputs: FireInputs) => {
     const updated = await setFireInputs(inputs);
     setFirePlan(updated);
+  }, []);
+
+  const handleUpdateWealthInputs = useCallback(async (inputs: WealthInputs) => {
+    const updated = await setWealthInputs(inputs);
+    setWealth(updated);
   }, []);
 
   const refreshCashflow = useCallback(async () => {
@@ -266,23 +279,25 @@ export default function Dashboard({
         </div>
       </header>
 
-      <main className="mx-auto max-w-3xl px-6 py-8 space-y-6">
+      <main className="mx-auto max-w-5xl px-6 py-8 grid grid-cols-1 md:grid-cols-2 gap-6 items-start">
         {fxError && (
-          <div className="rounded-lg bg-red-900/20 border border-red-700/50 px-4 py-3 text-sm text-red-400">
+          <div className="md:col-span-2 rounded-lg bg-red-900/20 border border-red-700/50 px-4 py-3 text-sm text-red-400">
             FX refresh failed: {fxError}
           </div>
         )}
 
         {/* Net worth summary */}
-        <NetWorthCard
-          netWorth={netWorth}
-          delta={delta}
-          homeCurrency={homeCurrency}
-          onToggleCurrency={() =>
-            setHomeCurrency((c) => (c === "CAD" ? "USD" : "CAD"))
-          }
-          loading={loading}
-        />
+        <div className="md:col-span-2">
+          <NetWorthCard
+            netWorth={netWorth}
+            delta={delta}
+            homeCurrency={homeCurrency}
+            onToggleCurrency={() =>
+              setHomeCurrency((c) => (c === "CAD" ? "USD" : "CAD"))
+            }
+            loading={loading}
+          />
+        </div>
 
         {/* $100k countdown / CoastFIRE */}
         <GoalCountdownCard goal={goal} loading={loading} />
@@ -290,6 +305,8 @@ export default function Dashboard({
         {/* Generic FIRE planner — neutral defaults, customizable per user */}
         <FirePlannerCard plan={firePlan} loading={loading} onUpdate={handleUpdateFireInputs} />
 
+        {/* Wealth benchmark vs. income-based formulas */}
+        <WealthBenchmarkCard benchmark={wealth} loading={loading} onUpdate={handleUpdateWealthInputs} />
 
         {/* Seattle transition simulator */}
         <SeattleSimulatorCard
@@ -299,39 +316,45 @@ export default function Dashboard({
         />
 
         {/* Monthly cashflow + fixed/variable tagging */}
-        <CashflowCard
-          summary={cashflow}
-          homeCurrency={homeCurrency}
-          loading={loading}
-          onChanged={refreshCashflow}
-        />
+        <div className="md:col-span-2">
+          <CashflowCard
+            summary={cashflow}
+            homeCurrency={homeCurrency}
+            loading={loading}
+            onChanged={refreshCashflow}
+          />
+        </div>
 
         {/* Net worth chart */}
-        <NetWorthChart
-          data={chartData}
-          currency={homeCurrency}
-          onBackfill={handleBackfill}
-          backfilling={backfilling}
-          note={chartNote}
-        />
+        <div className="md:col-span-2">
+          <NetWorthChart
+            data={chartData}
+            currency={homeCurrency}
+            onBackfill={handleBackfill}
+            backfilling={backfilling}
+            note={chartNote}
+          />
+        </div>
 
         {/* Account list */}
-        <AccountList
-          accounts={accounts}
-          netWorthBreakdown={netWorth?.accounts ?? []}
-          homeCurrency={homeCurrency}
-          onAddAccount={() => setModal({ open: true, mode: "add_account" })}
-          onDeleteAccount={handleDeleteAccount}
-          onUpdateBalance={(account) =>
-            setModal({ open: true, mode: "update_balance", account })
-          }
-          onEditCurrency={(account) =>
-            setModal({ open: true, mode: "edit_currency", account })
-          }
-        />
+        <div className="md:col-span-2">
+          <AccountList
+            accounts={accounts}
+            netWorthBreakdown={netWorth?.accounts ?? []}
+            homeCurrency={homeCurrency}
+            onAddAccount={() => setModal({ open: true, mode: "add_account" })}
+            onDeleteAccount={handleDeleteAccount}
+            onUpdateBalance={(account) =>
+              setModal({ open: true, mode: "update_balance", account })
+            }
+            onEditCurrency={(account) =>
+              setModal({ open: true, mode: "edit_currency", account })
+            }
+          />
+        </div>
 
         {accounts.length === 0 && !loading && (
-          <p className="text-center text-xs text-slate-600 pt-2">
+          <p className="md:col-span-2 text-center text-xs text-slate-600 pt-2">
             All data is stored locally and encrypted. Nothing leaves your device.
           </p>
         )}

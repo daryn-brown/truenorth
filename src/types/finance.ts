@@ -198,6 +198,28 @@ export interface FirePlan {
   fire_date: string | null;
 }
 
+/** Editable inputs for the wealth benchmark. Mirrors the Rust `WealthInputs`. */
+export interface WealthInputs {
+  current_age: number;
+  gross_income_usd: number;
+  years_earning: number;
+}
+
+export type AccumulatorStatus = "Under" | "Average" | "Prodigious";
+
+/** Net worth vs. income-based formulas + velocity. Mirrors the Rust `WealthBenchmark`. */
+export interface WealthBenchmark {
+  inputs: WealthInputs;
+  current_usd: number;
+  expected_usd: number;
+  prodigious_usd: number;
+  adjusted_usd: number;
+  ratio: number;
+  status: AccumulatorStatus;
+  velocity_usd: number;
+  adjusted_progress: number;
+}
+
 /** Editable levers behind the Seattle projection. Mirrors the Rust `SeattleAssumptions`. */
 export interface SeattleAssumptions {
   current_net_monthly_usd: number;
