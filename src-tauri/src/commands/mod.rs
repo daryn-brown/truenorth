@@ -10,3 +10,4 @@ pub mod questrade;
 pub mod simplefin;
 pub mod simulator;
 pub mod snaptrade;
+pub mod wealth;
