@@ -19,6 +19,8 @@ import type {
   ClassifiedTransaction,
   FlowType,
   FxRate,
+  FireInputs,
+  FirePlan,
   GoalProgress,
   ImportPayload,
   ImportSummary,
@@ -75,6 +77,13 @@ export const getGoalProgress = (): Promise<GoalProgress> =>
 /** Update the headline net-worth milestone (USD); returns recomputed progress. */
 export const setGoalTarget = (targetUsd: number): Promise<GoalProgress> =>
   invoke("set_goal_target", { targetUsd });
+
+/** Generic FIRE plan: FIRE/CoastFIRE numbers + projected ages from net worth and saved inputs. */
+export const getFirePlan = (): Promise<FirePlan> => invoke("get_fire_plan");
+
+/** Persist edited FIRE inputs; returns the recomputed plan. */
+export const setFireInputs = (inputs: FireInputs): Promise<FirePlan> =>
+  invoke("set_fire_inputs", { inputs });
 
 /** Forward net-worth projection: status quo vs. dropping Job 2 in the Seattle move. */
 export const getSeattleProjection = (): Promise<SeattleProjection> =>
