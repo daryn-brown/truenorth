@@ -98,7 +98,7 @@ export default function FirePlannerCard({ plan, loading, onUpdate }: Props) {
   };
 
   return (
-    <div className="rounded-2xl border border-slate-700 bg-gradient-to-br from-slate-800 to-slate-900 p-6 shadow-xl">
+    <div className="flex h-full flex-col rounded-2xl border border-slate-700 bg-gradient-to-br from-slate-800 to-slate-900 p-6 shadow-xl">
       <div className="flex items-start justify-between gap-3">
         <div>
           <p className="text-sm font-medium uppercase tracking-widest text-slate-400">
