@@ -651,7 +651,7 @@ fn window_since(window_days: i64) -> String {
 }
 
 /// Compute the cashflow summary over the trailing `window_days` across active accounts.
-fn compute_cashflow(conn: &Connection, window_days: i64) -> rusqlite::Result<CashflowSummary> {
+pub(crate) fn compute_cashflow(conn: &Connection, window_days: i64) -> rusqlite::Result<CashflowSummary> {
     let window_days = window_days.clamp(1, 3650);
     let since = window_since(window_days);
     let usd_rates = load_usd_rates(conn)?;

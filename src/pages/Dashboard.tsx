@@ -13,8 +13,8 @@ import type {
   NetWorthHistoryPoint,
   SeattleAssumptions,
   SeattleProjection,
-  WealthBenchmark,
-  WealthInputs,
+  ProgressMetrics,
+  ProgressInputs,
 } from "../types/finance";
 import {
   addAccount,
@@ -28,19 +28,19 @@ import {
   getNetWorthDelta,
   getNetWorthHistory,
   getSeattleProjection,
-  getWealthBenchmark,
+  getProgressMetrics,
   listAccounts,
   refreshFxRates,
   refreshFxRatesIfStale,
   setFireInputs,
   setSeattleAssumptions,
-  setWealthInputs,
+  setProgressInputs,
   updateAccountCurrency,
 } from "../hooks/useFinanceApi";
 import NetWorthCard from "../components/NetWorthCard";
 import GoalCountdownCard from "../components/GoalCountdownCard";
 import FirePlannerCard from "../components/FirePlannerCard";
-import WealthBenchmarkCard from "../components/WealthBenchmarkCard";
+import ProgressCard from "../components/ProgressCard";
 import SeattleSimulatorCard from "../components/SeattleSimulatorCard";
 import CashflowCard from "../components/CashflowCard";
 import AccountList from "../components/AccountList";
@@ -69,7 +69,7 @@ export default function Dashboard({
   const [delta, setDelta] = useState<NetWorthDelta | null>(null);
   const [goal, setGoal] = useState<GoalProgress | null>(null);
   const [firePlan, setFirePlan] = useState<FirePlan | null>(null);
-  const [wealth, setWealth] = useState<WealthBenchmark | null>(null);
+  const [progress, setProgress] = useState<ProgressMetrics | null>(null);
   const [projection, setProjection] = useState<SeattleProjection | null>(null);
   const [cashflow, setCashflow] = useState<CashflowSummary | null>(null);
   const [history, setHistory] = useState<NetWorthHistoryPoint[]>([]);
@@ -100,7 +100,7 @@ export default function Dashboard({
         getNetWorthDelta(),
         getGoalProgress(),
         getFirePlan(),
-        getWealthBenchmark(),
+        getProgressMetrics(),
         getSeattleProjection(),
         getCashflowSummary(),
         getNetWorthHistory(),
@@ -110,7 +110,7 @@ export default function Dashboard({
       setDelta(nwDelta);
       setGoal(goalProgress);
       setFirePlan(fire);
-      setWealth(wb);
+      setProgress(wb);
       setProjection(proj);
       setCashflow(cf);
       setHistory(hist);
@@ -164,9 +164,9 @@ export default function Dashboard({
     setFirePlan(updated);
   }, []);
 
-  const handleUpdateWealthInputs = useCallback(async (inputs: WealthInputs) => {
-    const updated = await setWealthInputs(inputs);
-    setWealth(updated);
+  const handleUpdateProgressInputs = useCallback(async (inputs: ProgressInputs) => {
+    const updated = await setProgressInputs(inputs);
+    setProgress(updated);
   }, []);
 
   const refreshCashflow = useCallback(async () => {
@@ -279,7 +279,7 @@ export default function Dashboard({
         </div>
       </header>
 
-      <main className="mx-auto max-w-5xl px-6 py-8 grid grid-cols-1 md:grid-cols-2 gap-6 items-start">
+      <main className="mx-auto max-w-5xl px-6 py-8 grid grid-cols-1 md:grid-cols-2 gap-6 items-stretch">
         {fxError && (
           <div className="md:col-span-2 rounded-lg bg-red-900/20 border border-red-700/50 px-4 py-3 text-sm text-red-400">
             FX refresh failed: {fxError}
@@ -305,8 +305,8 @@ export default function Dashboard({
         {/* Generic FIRE planner — neutral defaults, customizable per user */}
         <FirePlannerCard plan={firePlan} loading={loading} onUpdate={handleUpdateFireInputs} />
 
-        {/* Wealth benchmark vs. income-based formulas */}
-        <WealthBenchmarkCard benchmark={wealth} loading={loading} onUpdate={handleUpdateWealthInputs} />
+        {/* Forward-looking progress: freedom runway + salary milestones */}
+        <ProgressCard metrics={progress} loading={loading} onUpdate={handleUpdateProgressInputs} />
 
         {/* Seattle transition simulator */}
         <SeattleSimulatorCard
