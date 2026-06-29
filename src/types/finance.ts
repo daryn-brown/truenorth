@@ -198,26 +198,32 @@ export interface FirePlan {
   fire_date: string | null;
 }
 
-/** Editable inputs for the wealth benchmark. Mirrors the Rust `WealthInputs`. */
-export interface WealthInputs {
-  current_age: number;
-  gross_income_usd: number;
+/** Editable inputs for the progress metrics. Mirrors the Rust `ProgressInputs`. */
+export interface ProgressInputs {
+  base_salary_usd: number;
+  /** 0 = derive from the last ~90 days of cashflow. */
+  monthly_expenses_usd: number;
   years_earning: number;
 }
 
-export type AccumulatorStatus = "Under" | "Average" | "Prodigious";
+/** One salary-multiple milestone. Mirrors the Rust `Milestone`. */
+export interface Milestone {
+  multiple: number;
+  target_usd: number;
+  reached: boolean;
+  progress: number;
+}
 
-/** Net worth vs. income-based formulas + velocity. Mirrors the Rust `WealthBenchmark`. */
-export interface WealthBenchmark {
-  inputs: WealthInputs;
+/** Freedom runway + salary milestones. Mirrors the Rust `ProgressMetrics`. */
+export interface ProgressMetrics {
+  inputs: ProgressInputs;
   current_usd: number;
-  expected_usd: number;
-  prodigious_usd: number;
-  adjusted_usd: number;
-  ratio: number;
-  status: AccumulatorStatus;
-  velocity_usd: number;
-  adjusted_progress: number;
+  monthly_expenses_usd: number;
+  expenses_derived: boolean;
+  freedom_months: number | null;
+  freedom_years: number | null;
+  salary_multiple: number;
+  milestones: Milestone[];
 }
 
 /** Editable levers behind the Seattle projection. Mirrors the Rust `SeattleAssumptions`. */
