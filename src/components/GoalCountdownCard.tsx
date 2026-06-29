@@ -48,7 +48,7 @@ export default function GoalCountdownCard({ goal, loading }: Props) {
   const paceNegative = goal.daily_rate_usd !== null && goal.daily_rate_usd <= 0;
 
   return (
-    <div className="rounded-2xl border border-slate-700 bg-gradient-to-br from-slate-800 to-slate-900 p-6 shadow-xl">
+    <div className="flex h-full flex-col rounded-2xl border border-slate-700 bg-gradient-to-br from-slate-800 to-slate-900 p-6 shadow-xl">
       <div className="flex items-center justify-between">
         <p className="text-sm font-medium uppercase tracking-widest text-slate-400">
           Road to {target}
