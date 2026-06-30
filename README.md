@@ -14,19 +14,20 @@ questions about your own data.
 history. By default it runs in **open mode** (secrets in a local file, no password prompts — see [Privacy](#privacy)).
 
 🔄 **Phase 2–3 in progress — real account sync.** Connect Robinhood, Questrade, Wealthsimple and
-more through **SnapTrade** (free for a single user), and banks through **SimpleFIN** — both pull
-**real, read-only balances + holdings** straight into your net worth. You can also connect an
-institution's **own API directly** (the **Direct** tab) — **Questrade** is supported today, pulling
-full cash + equity. An **agentic AI advisor** that queries your own data with read-only tools ships
-too (GitHub Models or local Ollama) — see [`docs/ai.md`](docs/ai.md). Setup lives in
-[`docs/snaptrade.md`](docs/snaptrade.md), [`docs/simplefin.md`](docs/simplefin.md), and
-[`docs/questrade.md`](docs/questrade.md).
+more through **SnapTrade** (free for a single user), and banks through **SimpleFIN** or **Teller**
+(free for US banks) — all pull **real, read-only balances + holdings** straight into your net worth.
+You can also connect an institution's **own API directly** (the **Direct** tab) — **Questrade** is
+supported today, pulling full cash + equity. An **agentic AI advisor** that queries your own data
+with read-only tools ships too (GitHub Models or local Ollama) — see [`docs/ai.md`](docs/ai.md).
+Setup lives in [`docs/snaptrade.md`](docs/snaptrade.md), [`docs/simplefin.md`](docs/simplefin.md),
+[`docs/teller.md`](docs/teller.md), and [`docs/questrade.md`](docs/questrade.md).
 
 ## Scope (now)
 **Financial transparency + easy decision-making.** Everything is **read-only**.
 - Aggregation: brokerages via **SnapTrade** (free single-user), banks via **SimpleFIN Bridge**
-  (one ~$15/yr connector covers Chase + Bask + Scotiabank), **Questrade** via its own free API
-  (full cash + equity, under the **Direct** tab), plus **manual/CSV** fallback.
+  (one ~$15/yr connector covers Chase + Bask + Scotiabank) or **Teller** (free, US banks),
+  **Questrade** via its own free API (full cash + equity, under the **Direct** tab), plus
+  **manual/CSV** fallback.
 - **Multi-currency net worth** — any account currency converted into USD + CAD totals — with history chart + dashboard.
 - Transaction review (search/filter/categorize) + goals.
 - **Model-agnostic AI** (GitHub Models / Ollama / Azure) with a local-only privacy mode.
@@ -69,13 +70,14 @@ flowchart TB
             c_snap["snaptrade<br/>status · save_credentials<br/>login · sync · disconnect"]
             c_sf["simplefin<br/>status · connect<br/>sync · disconnect"]
             c_qt["questrade<br/>status · connect<br/>sync · disconnect"]
+            c_te["teller<br/>status · save_config<br/>add_enrollment · sync · disconnect"]
         end
 
         subgraph SVC["Domain logic · services"]
             direction LR
             d_db["db<br/>schema · crypto · secrets"]
             d_fx["fx<br/>Yahoo client · rate store"]
-            d_conn["connector<br/>AccountConnector trait · registry<br/>snaptrade: signing + client<br/>simplefin: bridge client<br/>questrade: direct API client"]
+            d_conn["connector<br/>AccountConnector trait · registry<br/>snaptrade: signing + client<br/>simplefin: bridge client<br/>questrade: direct API client<br/>teller: mTLS client"]
         end
 
         state[["Managed state<br/>AppDb = Mutex‹Connection›<br/>ConnectorRegistry"]]
@@ -92,6 +94,7 @@ flowchart TB
     snaptrade(["🌐 SnapTrade API<br/>read-only brokerage sync"])
     simplefin(["🌐 SimpleFIN Bridge<br/>read-only bank sync"])
     questrade(["🌐 Questrade API<br/>read-only cash + equity sync"])
+    teller(["🌐 Teller API<br/>read-only US bank sync · free"])
 
     user --> pages
     api ==>|"Tauri IPC · invoke() · serde JSON"| builder
@@ -101,6 +104,7 @@ flowchart TB
     d_conn -->|"HTTPS · reqwest · signed"| snaptrade
     d_conn -->|"HTTPS · reqwest · Basic auth"| simplefin
     d_conn -->|"HTTPS · reqwest · Bearer (refresh token)"| questrade
+    d_conn -->|"HTTPS · reqwest · mTLS + token"| teller
 
     classDef feNode fill:#dbeafe,stroke:#2563eb,color:#1e3a8a;
     classDef coreNode fill:#ffedd5,stroke:#ea580c,color:#7c2d12;
@@ -110,11 +114,11 @@ flowchart TB
     classDef ext fill:#fee2e2,stroke:#dc2626,color:#7f1d1d;
 
     class pages,comps,api feNode;
-    class builder,c_acc,c_nw,c_imp,c_fx,c_snap,c_sf,c_qt,d_db,d_fx,d_conn coreNode;
+    class builder,c_acc,c_nw,c_imp,c_fx,c_snap,c_sf,c_qt,c_te,d_db,d_fx,d_conn coreNode;
     class state stateNode;
     class db store;
     class kc os;
-    class yahoo,snaptrade,simplefin,questrade ext;
+    class yahoo,snaptrade,simplefin,questrade,teller ext;
 ```
 
 **Layers**
@@ -123,15 +127,16 @@ flowchart TB
   `ConnectionsModal`) call typed `invoke()` bindings in `useFinanceApi.ts`; no business logic lives here.
 - **Rust core (`src-tauri`)** — `lib.rs` builds the Tauri app, registers managed state, and routes
   IPC to `#[tauri::command]` handlers (`accounts`, `net_worth`, `import`, `fx`, `snaptrade`,
-  `simplefin`, `questrade`). Domain logic sits in services: `db` (schema + `crypto` key management +
-  keychain `secrets`), `fx` (Yahoo client + rate store), and a `connector` trait/registry whose
-  `snaptrade`, `simplefin`, and `questrade` modules power read-only account sync.
+  `simplefin`, `questrade`, `teller`). Domain logic sits in services: `db` (schema + `crypto` key
+  management + keychain `secrets`), `fx` (Yahoo client + rate store), and a `connector` trait/registry
+  whose `snaptrade`, `simplefin`, `questrade`, and `teller` modules power read-only account sync.
 - **State** — a single `AppDb(Mutex<Connection>)` and the `ConnectorRegistry`, shared across commands.
 - **Persistence** — SQLite encrypted with SQLCipher (`finance-second-brain.db`); the key is generated
   once and stored in the macOS Keychain / Windows Credential Manager via `keyring`. SnapTrade,
-  SimpleFIN, and Questrade secrets live in the same keychain — never on disk.
+  SimpleFIN, Questrade, and Teller secrets live in the same secret store — never on disk in the clear.
 - **External** — read-only HTTPS calls to Yahoo Finance (USD↔CAD rate), the SnapTrade and SimpleFIN
-  aggregators, and Questrade's own API (full cash + equity); everything else is local.
+  aggregators, Teller (free US bank balances over mTLS), and Questrade's own API (full cash + equity);
+  everything else is local.
 
 ### Request flow — "Refresh FX"
 
@@ -180,6 +185,7 @@ the Apple/Windows signing secrets to sign automatically. See [`docs/releasing.md
 - [`docs/import.md`](docs/import.md) — importing accounts + balance history (JSON/CSV) and how net-worth history is computed.
 - [`docs/snaptrade.md`](docs/snaptrade.md) — connecting brokerages via SnapTrade (read-only) and how sync feeds net worth.
 - [`docs/simplefin.md`](docs/simplefin.md) — connecting banks via SimpleFIN (read-only) and how sync feeds net worth.
+- [`docs/teller.md`](docs/teller.md) — connecting US banks via Teller for free (read-only) and how sync feeds net worth.
 - [`docs/questrade.md`](docs/questrade.md) — connecting Questrade directly (read-only cash + equity) and how it complements SimpleFIN.
 - [`docs/ai.md`](docs/ai.md) — the AI advisor: GitHub Models vs local Ollama, setup, the agentic tools it calls, saved chats, what data is sent, and privacy mode.
 - [`docs/releasing.md`](docs/releasing.md) — release pipeline, build targets, and code-signing setup.
