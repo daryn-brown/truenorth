@@ -7,6 +7,8 @@ import type {
   SimpleFinSyncSummary,
   SnapTradeStatus,
   SnapTradeSyncSummary,
+  TellerStatus,
+  TellerSyncSummary,
 } from "../types/finance";
 import {
   questradeConnect,
@@ -24,6 +26,11 @@ import {
   snaptradeListUsers,
   snaptradeSaveCredentials,
   snaptradeSync,
+  tellerAddEnrollment,
+  tellerDisconnect,
+  tellerGetStatus,
+  tellerSaveConfig,
+  tellerSync,
 } from "../hooks/useFinanceApi";
 
 interface Props {
@@ -33,14 +40,82 @@ interface Props {
   onChanged: () => void;
 }
 
-type Provider = "snaptrade" | "simplefin" | "direct";
+type Provider = "snaptrade" | "simplefin" | "teller" | "direct";
 
 const SNAPTRADE_DASHBOARD = "https://dashboard.snaptrade.com";
 const SIMPLEFIN_BRIDGE = "https://bridge.simplefin.org";
 const QUESTRADE_API_CENTRE = "https://login.questrade.com/APIAccess/UserApps.aspx";
+const TELLER_DASHBOARD = "https://teller.io";
+const TELLER_CONNECT_SRC = "https://cdn.teller.io/connect/connect.js";
 
 const inputClass =
   "w-full rounded-lg border border-slate-600 bg-slate-800 px-3 py-2 text-sm text-slate-200 placeholder-slate-600 focus:outline-none focus:ring-2 focus:ring-indigo-500";
+
+// --- Teller Connect (loaded on demand from Teller's CDN) -------------------
+
+/** The enrollment object Teller Connect hands back on success. */
+interface TellerConnectEnrollment {
+  accessToken: string;
+  enrollment?: {
+    id?: string;
+    institution?: { name?: string };
+  };
+}
+
+interface TellerConnectHandle {
+  open: () => void;
+}
+
+interface TellerConnectFactory {
+  setup: (options: {
+    applicationId: string;
+    environment: string;
+    products?: string[];
+    selectAccount?: string;
+    onSuccess: (enrollment: TellerConnectEnrollment) => void;
+    onExit?: () => void;
+    onFailure?: (failure: unknown) => void;
+  }) => TellerConnectHandle;
+}
+
+declare global {
+  interface Window {
+    TellerConnect?: TellerConnectFactory;
+  }
+}
+
+/** Load the Teller Connect script once and resolve with the global factory. */
+function loadTellerConnect(): Promise<TellerConnectFactory> {
+  return new Promise((resolve, reject) => {
+    if (window.TellerConnect) {
+      resolve(window.TellerConnect);
+      return;
+    }
+    const done = () =>
+      window.TellerConnect
+        ? resolve(window.TellerConnect)
+        : reject(new Error("Teller Connect loaded but was unavailable."));
+    const fail = () =>
+      reject(
+        new Error(
+          "Couldn't load Teller Connect. Check your internet connection, or paste an access token below instead.",
+        ),
+      );
+
+    const existing = document.getElementById("teller-connect-script") as HTMLScriptElement | null;
+    if (existing) {
+      existing.addEventListener("load", done);
+      existing.addEventListener("error", fail);
+      return;
+    }
+    const script = document.createElement("script");
+    script.id = "teller-connect-script";
+    script.src = TELLER_CONNECT_SRC;
+    script.onload = done;
+    script.onerror = fail;
+    document.body.appendChild(script);
+  });
+}
 
 export default function ConnectionsModal({ isOpen, onClose, onChanged }: Props) {
   const [provider, setProvider] = useState<Provider>("snaptrade");
@@ -60,7 +135,7 @@ export default function ConnectionsModal({ isOpen, onClose, onChanged }: Props) 
           move money. Secrets are stored locally on this device, in your app data folder.
         </p>
 
-        <div className="mb-5 grid grid-cols-3 gap-1 rounded-lg border border-slate-700 bg-slate-800/60 p-1">
+        <div className="mb-5 grid grid-cols-2 gap-1 rounded-lg border border-slate-700 bg-slate-800/60 p-1">
           <TabButton
             active={provider === "snaptrade"}
             onClick={() => setProvider("snaptrade")}
@@ -74,6 +149,12 @@ export default function ConnectionsModal({ isOpen, onClose, onChanged }: Props) 
             hint="via SimpleFIN"
           />
           <TabButton
+            active={provider === "teller"}
+            onClick={() => setProvider("teller")}
+            label="US banks"
+            hint="via Teller (free)"
+          />
+          <TabButton
             active={provider === "direct"}
             onClick={() => setProvider("direct")}
             label="Direct"
@@ -85,6 +166,8 @@ export default function ConnectionsModal({ isOpen, onClose, onChanged }: Props) 
           <SnapTradePanel onChanged={onChanged} />
         ) : provider === "simplefin" ? (
           <SimpleFinPanel onChanged={onChanged} />
+        ) : provider === "teller" ? (
+          <TellerPanel onChanged={onChanged} />
         ) : (
           <DirectConnectionsPanel onChanged={onChanged} />
         )}
@@ -692,6 +775,411 @@ function SimpleFinPanel({ onChanged }: { onChanged: () => void }) {
             className="text-xs font-medium text-red-400 hover:text-red-300 disabled:opacity-50"
           >
             {busy === "disconnect" ? "Disconnecting…" : "Disconnect SimpleFIN"}
+          </button>
+        </div>
+      )}
+    </>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Teller — free US bank balances
+// ---------------------------------------------------------------------------
+
+function TellerPanel({ onChanged }: { onChanged: () => void }) {
+  const [status, setStatus] = useState<TellerStatus | null>(null);
+  const [applicationId, setApplicationId] = useState("");
+  const [environment, setEnvironment] = useState("sandbox");
+  const [certificate, setCertificate] = useState("");
+  const [privateKey, setPrivateKey] = useState("");
+  const [editingConfig, setEditingConfig] = useState(false);
+  const [showPaste, setShowPaste] = useState(false);
+  const [pasteToken, setPasteToken] = useState("");
+  const [busy, setBusy] = useState<
+    null | "config" | "link" | "sync" | "disconnect"
+  >(null);
+  const [error, setError] = useState<string | null>(null);
+  const [info, setInfo] = useState<string | null>(null);
+  const [summary, setSummary] = useState<TellerSyncSummary | null>(null);
+
+  const refreshStatus = useCallback(async () => {
+    try {
+      const next = await tellerGetStatus();
+      setStatus(next);
+      setApplicationId(next.application_id ?? "");
+      setEnvironment(next.environment ?? "sandbox");
+    } catch (err) {
+      setError(messageOf(err));
+    }
+  }, []);
+
+  useEffect(() => {
+    void refreshStatus();
+  }, [refreshStatus]);
+
+  const handleSaveConfig = async () => {
+    setBusy("config");
+    setError(null);
+    setInfo(null);
+    try {
+      const next = await tellerSaveConfig(
+        applicationId.trim(),
+        environment,
+        certificate.trim() ? certificate : null,
+        privateKey.trim() ? privateKey : null,
+      );
+      setStatus(next);
+      setApplicationId(next.application_id ?? "");
+      setEnvironment(next.environment ?? "sandbox");
+      setCertificate("");
+      setPrivateKey("");
+      setEditingConfig(false);
+      setInfo("Teller configuration saved.");
+    } catch (err) {
+      setError(messageOf(err));
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  // Verify + store an access token (from Teller Connect or pasted by hand).
+  const addEnrollment = useCallback(
+    async (token: string, institution: string | null, enrollmentId: string | null) => {
+      setBusy("link");
+      setError(null);
+      setInfo(null);
+      try {
+        const next = await tellerAddEnrollment(token, institution, enrollmentId);
+        setStatus(next);
+        setPasteToken("");
+        setShowPaste(false);
+        setInfo("Bank linked. Click “Sync now” to pull balances.");
+      } catch (err) {
+        setError(messageOf(err));
+      } finally {
+        setBusy(null);
+      }
+    },
+    [],
+  );
+
+  const handleLink = async () => {
+    if (!status?.application_id) return;
+    setBusy("link");
+    setError(null);
+    setInfo(null);
+    try {
+      const factory = await loadTellerConnect();
+      const handle = factory.setup({
+        applicationId: status.application_id,
+        environment: status.environment,
+        products: ["balance"],
+        selectAccount: "multiple",
+        onSuccess: (enrollment) => {
+          void addEnrollment(
+            enrollment.accessToken,
+            enrollment.enrollment?.institution?.name ?? null,
+            enrollment.enrollment?.id ?? null,
+          );
+        },
+        onExit: () => setBusy((b) => (b === "link" ? null : b)),
+        onFailure: (failure) => {
+          setError(
+            messageOf(failure) ||
+              "Teller Connect couldn’t finish. You can paste an access token instead.",
+          );
+          setBusy(null);
+        },
+      });
+      handle.open();
+    } catch (err) {
+      setError(messageOf(err));
+      setBusy(null);
+    }
+  };
+
+  const handlePaste = async () => {
+    if (!pasteToken.trim()) return;
+    await addEnrollment(pasteToken.trim(), null, null);
+  };
+
+  const handleSync = async () => {
+    setBusy("sync");
+    setError(null);
+    setInfo(null);
+    setSummary(null);
+    try {
+      const result = await tellerSync();
+      setSummary(result);
+      await refreshStatus();
+      onChanged();
+    } catch (err) {
+      setError(messageOf(err));
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const handleDisconnect = async () => {
+    if (
+      !confirm(
+        "Disconnect Teller? Linked banks will be hidden and synced balances stop updating. Your saved certificate is also removed. Your history is kept.",
+      )
+    ) {
+      return;
+    }
+    setBusy("disconnect");
+    setError(null);
+    setInfo(null);
+    try {
+      const next = await tellerDisconnect();
+      setStatus(next);
+      setSummary(null);
+      onChanged();
+      setInfo("Teller disconnected.");
+    } catch (err) {
+      setError(messageOf(err));
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const isConfigured =
+    !!status?.application_id &&
+    (status.environment === "sandbox" || status.has_certificate);
+  const isConnected = status?.is_connected ?? false;
+  const showConfigForm = editingConfig || !isConfigured;
+  const certRequired = environment !== "sandbox";
+
+  return (
+    <>
+      <p className="mb-4 text-xs text-slate-400">
+        Connect US banks for free through{" "}
+        <button
+          type="button"
+          onClick={() => void openUrl(TELLER_DASHBOARD)}
+          className="text-indigo-400 underline hover:text-indigo-300"
+        >
+          Teller
+        </button>
+        . Create a free app in Teller’s dashboard, paste its application id (and certificate for
+        live data) below, then link your bank.
+      </p>
+
+      {/* Step 1 — Application & certificate */}
+      <Section step={1} title="Teller application" done={isConfigured}>
+        {showConfigForm ? (
+          <div className="space-y-3">
+            <div>
+              <label className="mb-1 block text-xs text-slate-500">Application id</label>
+              <input
+                value={applicationId}
+                onChange={(e) => setApplicationId(e.target.value)}
+                placeholder="app_xxxxxxxxxxxxxxxxxx"
+                spellCheck={false}
+                className={`${inputClass} font-mono text-xs`}
+              />
+            </div>
+            <div>
+              <label className="mb-1 block text-xs text-slate-500">Environment</label>
+              <select
+                value={environment}
+                onChange={(e) => setEnvironment(e.target.value)}
+                className={inputClass}
+              >
+                <option value="sandbox">Sandbox (test data, no certificate)</option>
+                <option value="development">Development (real data, free)</option>
+                <option value="production">Production (real data)</option>
+              </select>
+            </div>
+            <div>
+              <label className="mb-1 block text-xs text-slate-500">
+                Client certificate (PEM){certRequired ? "" : " — optional in sandbox"}
+              </label>
+              <textarea
+                value={certificate}
+                onChange={(e) => setCertificate(e.target.value)}
+                placeholder={
+                  status?.has_certificate
+                    ? "A certificate is already saved — leave blank to keep it"
+                    : "-----BEGIN CERTIFICATE-----"
+                }
+                spellCheck={false}
+                rows={3}
+                className={`${inputClass} resize-none font-mono text-[11px]`}
+              />
+            </div>
+            <div>
+              <label className="mb-1 block text-xs text-slate-500">Private key (PEM)</label>
+              <textarea
+                value={privateKey}
+                onChange={(e) => setPrivateKey(e.target.value)}
+                placeholder={
+                  status?.has_certificate
+                    ? "Leave blank to keep the saved key"
+                    : "-----BEGIN PRIVATE KEY-----"
+                }
+                spellCheck={false}
+                rows={3}
+                className={`${inputClass} resize-none font-mono text-[11px]`}
+              />
+            </div>
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={handleSaveConfig}
+                disabled={busy !== null || !applicationId.trim()}
+                className="flex-1 rounded-lg bg-indigo-600 py-2 text-sm font-semibold text-white hover:bg-indigo-500 disabled:opacity-50 transition-colors"
+              >
+                {busy === "config" ? "Saving…" : "Save configuration"}
+              </button>
+              {isConfigured && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setEditingConfig(false);
+                    setCertificate("");
+                    setPrivateKey("");
+                    setApplicationId(status?.application_id ?? "");
+                    setEnvironment(status?.environment ?? "sandbox");
+                  }}
+                  className="rounded-lg border border-slate-600 px-4 py-2 text-sm font-medium text-slate-300 hover:bg-slate-700 transition-colors"
+                >
+                  Cancel
+                </button>
+              )}
+            </div>
+          </div>
+        ) : (
+          <div className="flex items-center justify-between gap-3 text-sm text-slate-300">
+            <span className="min-w-0">
+              <span className="block truncate font-mono text-xs">{status?.application_id}</span>
+              <span className="text-xs text-slate-500">
+                {status?.environment}
+                {status?.has_certificate ? " · certificate saved" : " · no certificate"}
+              </span>
+            </span>
+            <button
+              type="button"
+              onClick={() => setEditingConfig(true)}
+              className="shrink-0 text-xs text-slate-400 underline hover:text-slate-200"
+            >
+              Edit
+            </button>
+          </div>
+        )}
+      </Section>
+
+      {/* Step 2 — Link a bank */}
+      <Section step={2} title="Link a bank" disabled={!isConfigured} done={isConnected}>
+        <div className="space-y-3">
+          <div className="flex items-center justify-between gap-3">
+            <p className="text-xs text-slate-500">
+              {status?.enrollment_count
+                ? `${status.enrollment_count} bank${status.enrollment_count === 1 ? "" : "s"} linked`
+                : "Opens Teller Connect to log in to your bank"}
+            </p>
+            <button
+              type="button"
+              onClick={handleLink}
+              disabled={busy !== null || !isConfigured}
+              className="shrink-0 rounded-lg bg-indigo-600 px-4 py-2 text-sm font-semibold text-white hover:bg-indigo-500 disabled:opacity-50 transition-colors"
+            >
+              {busy === "link" ? "Linking…" : status?.is_connected ? "Link another" : "Link a bank"}
+            </button>
+          </div>
+
+          {showPaste ? (
+            <div className="space-y-2">
+              <textarea
+                value={pasteToken}
+                onChange={(e) => setPasteToken(e.target.value)}
+                placeholder="Paste a Teller access token (token_…)"
+                spellCheck={false}
+                rows={2}
+                className={`${inputClass} resize-none font-mono text-xs`}
+              />
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={handlePaste}
+                  disabled={busy !== null || !pasteToken.trim() || !isConfigured}
+                  className="rounded-lg bg-slate-700 px-3 py-1.5 text-xs font-semibold text-white hover:bg-slate-600 disabled:opacity-50 transition-colors"
+                >
+                  {busy === "link" ? "Adding…" : "Add token"}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setShowPaste(false);
+                    setPasteToken("");
+                  }}
+                  className="text-xs text-slate-400 underline hover:text-slate-200"
+                >
+                  Cancel
+                </button>
+              </div>
+            </div>
+          ) : (
+            <button
+              type="button"
+              onClick={() => setShowPaste(true)}
+              disabled={!isConfigured}
+              className="text-xs text-slate-500 underline hover:text-slate-300 disabled:opacity-50"
+            >
+              Already have an access token?
+            </button>
+          )}
+        </div>
+      </Section>
+
+      {/* Step 3 — Sync */}
+      <Section step={3} title="Sync balances" disabled={!isConnected} last>
+        <div className="flex items-center justify-between gap-3">
+          <p className="text-xs text-slate-500">
+            {status?.account_count
+              ? `${status.account_count} account${status.account_count === 1 ? "" : "s"} connected`
+              : "No accounts synced yet"}
+            {status?.last_synced_at ? ` · last synced ${formatStamp(status.last_synced_at)}` : ""}
+          </p>
+          <button
+            type="button"
+            onClick={handleSync}
+            disabled={busy !== null || !isConnected}
+            className="shrink-0 rounded-lg bg-indigo-600 px-4 py-2 text-sm font-semibold text-white hover:bg-indigo-500 disabled:opacity-50 transition-colors"
+          >
+            {busy === "sync" ? "Syncing…" : "Sync now"}
+          </button>
+        </div>
+
+        {summary && (
+          <div className="mt-3 space-y-2">
+            <p className="rounded-lg bg-emerald-900/20 border border-emerald-700/40 px-3 py-2 text-xs text-emerald-300">
+              Synced {summary.accounts_synced} account
+              {summary.accounts_synced === 1 ? "" : "s"}. Net worth is up to date.
+            </p>
+            {summary.warnings.length > 0 && (
+              <ul className="rounded-lg bg-amber-900/20 border border-amber-700/40 px-3 py-2 text-xs text-amber-300 space-y-1">
+                {summary.warnings.map((w, i) => (
+                  <li key={i}>• {w}</li>
+                ))}
+              </ul>
+            )}
+          </div>
+        )}
+      </Section>
+
+      <Feedback info={info} error={error} />
+
+      {(isConnected || status?.has_certificate) && (
+        <div className="pt-4">
+          <button
+            type="button"
+            onClick={handleDisconnect}
+            disabled={busy !== null}
+            className="text-xs font-medium text-red-400 hover:text-red-300 disabled:opacity-50"
+          >
+            {busy === "disconnect" ? "Disconnecting…" : "Disconnect Teller"}
           </button>
         </div>
       )}
