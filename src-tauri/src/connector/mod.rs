@@ -8,6 +8,7 @@ pub use manual::ManualConnector;
 pub mod questrade;
 pub mod simplefin;
 pub mod snaptrade;
+pub mod teller;
 
 // ---------------------------------------------------------------------------
 // Domain types returned by connectors

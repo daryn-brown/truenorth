@@ -3,7 +3,7 @@ export type Currency = "USD" | "CAD";
 
 export type Jurisdiction = "US" | "CA";
 
-export type ConnectorKind = "manual" | "snaptrade" | "simplefin" | "questrade";
+export type ConnectorKind = "manual" | "snaptrade" | "simplefin" | "questrade" | "teller";
 
 /** Matches the `account_types` reference table. */
 export type AccountTypeId =
@@ -359,6 +359,31 @@ export interface SimpleFinSyncSummary {
   transactions_synced: number;
   synced_at: string;
   /** Non-fatal messages SimpleFIN returned (e.g. an institution needs re-auth). */
+  warnings: string[];
+}
+
+/** Teller connection state, mirrored from the Rust `TellerStatus`. */
+export interface TellerStatus {
+  /** At least one enrollment (access token) is stored. */
+  is_connected: boolean;
+  /** A client certificate + private key are stored (required for development/production). */
+  has_certificate: boolean;
+  /** `sandbox`, `development`, or `production`. */
+  environment: string;
+  /** Public Teller application id (`app_…`). */
+  application_id: string | null;
+  /** How many enrollments (institution logins) are stored. */
+  enrollment_count: number;
+  /** Number of active accounts connected via Teller. */
+  account_count: number;
+  last_synced_at: string | null;
+}
+
+/** Result of a Teller sync, mirrored from the Rust `TellerSyncSummary`. */
+export interface TellerSyncSummary {
+  accounts_synced: number;
+  synced_at: string;
+  /** Non-fatal messages (e.g. one enrollment needs re-authentication). */
   warnings: string[];
 }
 

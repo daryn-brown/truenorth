@@ -35,6 +35,8 @@ import type {
   SimpleFinSyncSummary,
   SnapTradeStatus,
   SnapTradeSyncSummary,
+  TellerStatus,
+  TellerSyncSummary,
   TxnRule,
   ProgressMetrics,
   ProgressInputs,
@@ -212,6 +214,38 @@ export const questradeSync = (): Promise<QuestradeSyncSummary> =>
 
 export const questradeDisconnect = (): Promise<QuestradeStatus> =>
   invoke("questrade_disconnect");
+
+// --- Teller (free US bank balances) ----------------------------------------
+
+export const tellerGetStatus = (): Promise<TellerStatus> =>
+  invoke("teller_get_status");
+
+/**
+ * Save the Teller application id + environment, and optionally the client certificate / private
+ * key (PEM). Pass both `certificate` and `privateKey`, or neither. The development and production
+ * environments require a certificate.
+ */
+export const tellerSaveConfig = (
+  applicationId: string,
+  environment: string,
+  certificate: string | null,
+  privateKey: string | null,
+): Promise<TellerStatus> =>
+  invoke("teller_save_config", { applicationId, environment, certificate, privateKey });
+
+/** Store an access token from Teller Connect (verified by listing accounts before it's saved). */
+export const tellerAddEnrollment = (
+  accessToken: string,
+  institution: string | null,
+  enrollmentId: string | null,
+): Promise<TellerStatus> =>
+  invoke("teller_add_enrollment", { accessToken, institution, enrollmentId });
+
+export const tellerSync = (): Promise<TellerSyncSummary> =>
+  invoke("teller_sync");
+
+export const tellerDisconnect = (): Promise<TellerStatus> =>
+  invoke("teller_disconnect");
 
 // --- AI advisor ("second brain", Phase 5) ----------------------------------
 

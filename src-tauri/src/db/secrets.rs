@@ -23,6 +23,15 @@ pub const SIMPLEFIN_ACCESS_URL: &str = "simplefin-access-url";
 pub const QUESTRADE_REFRESH_TOKEN: &str = "questrade-refresh-token";
 /// Secret-store entry name for the GitHub Models personal access token (the AI advisor's key).
 pub const GITHUB_MODELS_TOKEN: &str = "github-models-token";
+/// Secret-store entry name for the user's Teller enrollments — a JSON array of `{ access_token,
+/// institution, enrollment_id }`. Each Teller Connect enrollment yields one access token, and an
+/// access token is useless without the matching client certificate, so it's treated as a secret.
+pub const TELLER_ENROLLMENTS: &str = "teller-enrollments";
+/// Secret-store entry name for the Teller client certificate (PEM). Required for Teller's
+/// `development`/`production` environments (mTLS).
+pub const TELLER_CERT_PEM: &str = "teller-certificate-pem";
+/// Secret-store entry name for the Teller client private key (PEM) that pairs with the certificate.
+pub const TELLER_KEY_PEM: &str = "teller-private-key-pem";
 
 /// Store (or overwrite) a secret.
 pub fn set_secret(account: &str, value: &str) -> Result<(), SecretStoreError> {
