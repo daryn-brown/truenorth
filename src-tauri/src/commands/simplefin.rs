@@ -132,8 +132,28 @@ fn friendly(e: SimpleFinError) -> String {
 // DB reconcile helpers (synchronous — never run while awaiting)
 // ---------------------------------------------------------------------------
 
-/// Upsert one SimpleFIN account (keyed by `connector_ref`) and write today's balance snapshot,
-/// which the net-worth pipeline picks up automatically. Returns the local account row id.
+/// The date to file a balance snapshot under: SimpleFIN's reported `balance-date` (the day the
+/// institution last refreshed the figure), converted to `YYYY-MM-DD`. Falls back to `today` when
+/// SimpleFIN omits it, and is clamped so a bad (future) timestamp can never file a snapshot ahead
+/// of today — which would otherwise become the permanent "latest" balance and block real updates.
+///
+/// Filing by the reported date (rather than always "today") is what keeps a stale account honest:
+/// when the Bridge can't refresh an institution it keeps returning the last-known balance with an
+/// old `balance-date`, so re-syncing simply rewrites that same old-dated snapshot instead of
+/// minting a fresh "today" one. The account's "as of" date then visibly lags, surfacing the stall
+/// instead of hiding it behind a balance that looks current but hasn't moved in weeks.
+fn snapshot_date_for(balance_date: Option<i64>, today: &str) -> String {
+    let date = epoch_to_date(balance_date, today);
+    if date.as_str() > today {
+        today.to_string()
+    } else {
+        date
+    }
+}
+
+/// Upsert one SimpleFIN account (keyed by `connector_ref`) and write its balance snapshot — dated
+/// by SimpleFIN's `balance-date` (see [`snapshot_date_for`]) so a stale balance stays visibly
+/// stale — which the net-worth pipeline picks up automatically. Returns the local account row id.
 fn upsert_account(
     conn: &Connection,
     account: &SimpleFinAccount,
@@ -178,11 +198,12 @@ fn upsert_account(
     };
 
     if let Some(total) = account.balance {
+        let snapshot_date = snapshot_date_for(account.balance_date, today);
         conn.execute(
             "INSERT OR REPLACE INTO balance_snapshots \
              (account_id, snapshot_date, balance, currency, source) \
              VALUES (?1, ?2, ?3, ?4, 'simplefin')",
-            params![account_id, today, total, currency],
+            params![account_id, snapshot_date, total, currency],
         )?;
     }
 
@@ -568,6 +589,91 @@ mod tests {
     fn epoch_to_date_converts_or_falls_back() {
         assert_eq!(epoch_to_date(Some(1_700_000_000), "2025-01-01"), "2023-11-14");
         assert_eq!(epoch_to_date(None, "2025-01-01"), "2025-01-01");
+    }
+
+    #[test]
+    fn snapshot_date_prefers_balance_date_and_clamps_future() {
+        // A real (past) balance-date is used as-is — that is what keeps a stale account honest.
+        assert_eq!(snapshot_date_for(Some(1_700_000_000), "2025-07-01"), "2023-11-14");
+        // Missing balance-date falls back to today.
+        assert_eq!(snapshot_date_for(None, "2025-07-01"), "2025-07-01");
+        // A future balance-date (clock skew / bad data) is clamped so it can't become a
+        // permanent "latest" that blocks real updates.
+        assert_eq!(snapshot_date_for(Some(4_102_444_800), "2025-07-01"), "2025-07-01");
+    }
+
+    fn stale_credit_card(balance_date: Option<i64>) -> SimpleFinAccount {
+        SimpleFinAccount {
+            id: "cc-scotia".into(),
+            name: "Scotiabank Visa".into(),
+            currency: "CAD".into(),
+            balance: Some(-1234.56),
+            balance_date,
+            institution: Some("Scotiabank".into()),
+            holdings: vec![],
+            transactions: vec![],
+        }
+    }
+
+    #[test]
+    fn files_balance_snapshot_under_simplefin_balance_date() {
+        let conn = Connection::open_in_memory().unwrap();
+        crate::db::apply_schema(&conn).unwrap();
+
+        // SimpleFIN reports the card's balance as of 2023-11-14 (epoch 1_700_000_000).
+        let card = stale_credit_card(Some(1_700_000_000));
+        let id = upsert_account(&conn, &card, "2025-07-01", "2025-07-01T00:00:00Z").unwrap();
+
+        // The snapshot is filed under the reported balance-date, not "today".
+        let (date, balance): (String, f64) = conn
+            .query_row(
+                "SELECT snapshot_date, balance FROM balance_snapshots WHERE account_id = ?1",
+                params![id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(date, "2023-11-14");
+        assert_eq!(balance, -1234.56);
+
+        // Re-syncing days later with the SAME stale balance-date rewrites that same dated row —
+        // it must NOT mint a fresh "today" snapshot, which is what used to hide the stall and make
+        // the balance look current while it hadn't actually moved in weeks.
+        upsert_account(&conn, &card, "2025-07-05", "2025-07-05T00:00:00Z").unwrap();
+        let rows: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM balance_snapshots WHERE account_id = ?1",
+                params![id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(rows, 1);
+        let latest: String = conn
+            .query_row(
+                "SELECT snapshot_date FROM balance_snapshots \
+                 WHERE account_id = ?1 ORDER BY snapshot_date DESC LIMIT 1",
+                params![id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(latest, "2023-11-14");
+    }
+
+    #[test]
+    fn balance_snapshot_without_balance_date_falls_back_to_today() {
+        let conn = Connection::open_in_memory().unwrap();
+        crate::db::apply_schema(&conn).unwrap();
+
+        // A healthy account that omits balance-date is still filed under today.
+        let card = stale_credit_card(None);
+        let id = upsert_account(&conn, &card, "2025-07-01", "2025-07-01T00:00:00Z").unwrap();
+        let date: String = conn
+            .query_row(
+                "SELECT snapshot_date FROM balance_snapshots WHERE account_id = ?1",
+                params![id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(date, "2025-07-01");
     }
 
     #[test]
