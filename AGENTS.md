@@ -25,3 +25,20 @@ co-author trailers, but **you must not add them in the first place**.
 - Write a normal message (subject + optional body). **No AI/bot co-author trailers.**
 - After committing, you may verify with:
   `git log --format='%an <%ae>%n%b' -n 5 | grep -i 'co-authored-by' || echo clean`
+
+## Always bump the version with every shippable change
+
+The app ships an in-app auto-updater that only offers a build whose `version` is **higher**
+than what's installed. So **every** change that ships (a fix or feature, not a docs-only or
+CI-only tweak) **must** bump the version, or the user can't update to it.
+
+- Bump [semver](https://semver.org/) in **all four** files, kept in sync:
+  - `package.json` -> `version`
+  - `src-tauri/tauri.conf.json` -> `version`
+  - `src-tauri/Cargo.toml` -> `package.version`
+  - `src-tauri/Cargo.lock` -> the `[[package]] name = "truenorth"` entry's `version`
+- Choose the bump by impact: **patch** for bug fixes, **minor** for backwards-compatible
+  features, **major** for breaking changes.
+- Do the bump in the same PR as the change (before opening the PR), authored by the owner.
+- Publishing the GitHub Release/tag is still a manual step (see [`docs/releasing.md`](docs/releasing.md));
+  bumping the version here is what makes that release installable.
