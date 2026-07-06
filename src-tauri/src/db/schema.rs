@@ -238,6 +238,17 @@ pub fn seed_defaults(conn: &Connection) -> SqlResult<()> {
     )?;
     seed_txn_rules(conn)?;
     seed_txn_rules_v2(conn)?;
+    purge_inferred_snapshots(conn)?;
+    Ok(())
+}
+
+/// Remove reconstructed balance snapshots left over from the retired "reconstruct from
+/// transactions" feature (rows stamped `source = 'backfill'`). Net-worth history is now driven
+/// only by observed balances, so any inferred rows are cleared on launch to keep the trend — and
+/// the delta computation, which reads every snapshot — grounded in real data. Idempotent: once the
+/// rows are gone (and nothing writes new ones) this is a cheap no-op.
+fn purge_inferred_snapshots(conn: &Connection) -> SqlResult<()> {
+    conn.execute("DELETE FROM balance_snapshots WHERE source = 'backfill'", [])?;
     Ok(())
 }
 
@@ -314,6 +325,46 @@ mod tests {
         let conn = open_test_db();
         // Idempotent — applying twice must not fail
         apply_schema(&conn).unwrap();
+    }
+
+    #[test]
+    fn seed_defaults_purges_inferred_backfill_snapshots() {
+        // A database upgraded from a version that reconstructed history still holds `backfill`
+        // rows. seed_defaults clears them (idempotently) while leaving observed snapshots intact.
+        let conn = open_test_db();
+        conn.execute(
+            "INSERT INTO accounts (name, institution, account_type, currency, jurisdiction) \
+             VALUES ('Chase Checking', 'Chase', 'chequing', 'USD', 'US')",
+            [],
+        )
+        .unwrap();
+        let account_id = conn.last_insert_rowid();
+        conn.execute(
+            "INSERT INTO balance_snapshots (account_id, snapshot_date, balance, currency, source) \
+             VALUES (?1, '2025-01-01', 100.0, 'USD', 'backfill'), \
+                    (?1, '2025-02-01', 200.0, 'USD', 'manual')",
+            params![account_id],
+        )
+        .unwrap();
+
+        seed_defaults(&conn).unwrap();
+
+        let inferred: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM balance_snapshots WHERE source = 'backfill'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(inferred, 0);
+        let real: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM balance_snapshots WHERE source = 'manual'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(real, 1);
     }
 
     #[test]

@@ -13,7 +13,6 @@ import type {
   Account,
   AddAccountPayload,
   AddBalanceSnapshotPayload,
-  BackfillResult,
   CashflowSummary,
   CategorizeResult,
   ClassifiedTransaction,
@@ -70,10 +69,6 @@ export const getNetWorthHistory = (): Promise<NetWorthHistoryPoint[]> =>
 
 export const getNetWorthDelta = (): Promise<NetWorthDelta> =>
   invoke("get_net_worth_delta");
-
-/** Reconstruct historical balance snapshots from transactions so the chart has a trend to draw. */
-export const backfillNetWorthHistory = (): Promise<BackfillResult> =>
-  invoke("backfill_net_worth_history");
 
 export const getGoalProgress = (): Promise<GoalProgress> =>
   invoke("get_goal_progress");

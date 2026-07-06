@@ -19,7 +19,6 @@ import type {
 import {
   addAccount,
   addBalanceSnapshot,
-  backfillNetWorthHistory,
   deleteAccount,
   getCashflowSummary,
   getFirePlan,
@@ -80,8 +79,6 @@ export default function Dashboard({
   const [connectOpen, setConnectOpen] = useState(false);
   const [refreshingFx, setRefreshingFx] = useState(false);
   const [fxError, setFxError] = useState<string | null>(null);
-  const [backfilling, setBackfilling] = useState(false);
-  const [chartNote, setChartNote] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -203,27 +200,6 @@ export default function Dashboard({
     value: homeCurrency === "CAD" ? point.total_cad : point.total_usd,
   }));
 
-  const handleBackfill = useCallback(async () => {
-    setBackfilling(true);
-    setChartNote(null);
-    try {
-      const res = await backfillNetWorthHistory();
-      await load();
-      if (res.distinct_dates < 2) {
-        setChartNote(
-          res.snapshots_created > 0
-            ? "Reconstructed some history, but there still aren't enough dated transactions to draw a trend."
-            : "Not enough dated transactions to reconstruct history yet.",
-        );
-      }
-    } catch (err) {
-      console.error("Backfill failed:", err);
-      setChartNote("Could not reconstruct history. Please try again.");
-    } finally {
-      setBackfilling(false);
-    }
-  }, [load]);
-
   return (
     <div className="min-h-screen bg-slate-950 text-white">
       {/* Header */}
@@ -330,9 +306,6 @@ export default function Dashboard({
           <NetWorthChart
             data={chartData}
             currency={homeCurrency}
-            onBackfill={handleBackfill}
-            backfilling={backfilling}
-            note={chartNote}
           />
         </div>
 
