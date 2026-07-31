@@ -9,12 +9,13 @@ use rusqlite::{params, Connection, OptionalExtension};
 use serde::Serialize;
 use tauri::State;
 
+use crate::commands::accounts::aggregated_account_jurisdiction;
 use crate::connector::simplefin::{
     claim_access_url, SimpleFinAccount, SimpleFinAccountSet, SimpleFinClient, SimpleFinError,
     SimpleFinHolding, SimpleFinTransaction,
 };
 use crate::db::secrets::{self, SIMPLEFIN_ACCESS_URL};
-use crate::db::AppDb;
+use crate::db::{reconcile_aggregated_questrade_accounts, AppDb};
 
 const SETTING_LAST_SYNCED: &str = "simplefin_last_synced_at";
 
@@ -108,15 +109,6 @@ fn map_account_type(name: &str, has_holdings: bool) -> String {
     kind.to_string()
 }
 
-/// Map an account currency to the jurisdiction the rest of the app reasons about.
-fn jurisdiction_for(currency: &str) -> &'static str {
-    if currency.eq_ignore_ascii_case("CAD") {
-        "CA"
-    } else {
-        "US"
-    }
-}
-
 /// Turn a SimpleFIN error into a user-facing message.
 fn friendly(e: SimpleFinError) -> String {
     if e.is_auth() {
@@ -161,17 +153,19 @@ fn upsert_account(
     now: &str,
 ) -> rusqlite::Result<i64> {
     let reported_currency = &account.currency;
-    let jurisdiction = jurisdiction_for(reported_currency);
     let account_type = map_account_type(&account.name, !account.holdings.is_empty());
     let institution = account
         .institution
         .clone()
         .unwrap_or_else(|| "SimpleFIN".to_string());
+    let jurisdiction =
+        aggregated_account_jurisdiction(reported_currency, Some(institution.as_str()));
 
     // Keyed by connector_ref. On an existing account we deliberately do NOT overwrite the stored
     // currency/jurisdiction: aggregators sometimes mislabel a foreign account's currency (e.g.
     // SimpleFIN reporting a Jamaican JMD account as CAD). The user can correct it via
     // `update_account_currency`, and preserving the stored value keeps that fix across syncs.
+    // Questrade jurisdiction is normalized by `reconcile_aggregated_questrade_accounts`.
     let existing: Option<(i64, String)> = conn
         .query_row(
             "SELECT id, currency FROM accounts WHERE connector_kind = 'simplefin' AND connector_ref = ?1",
@@ -392,6 +386,7 @@ pub async fn simplefin_sync(db: State<'_, AppDb>) -> Result<SimpleFinSyncSummary
             .map_err(|e| e.to_string())?;
         }
 
+        reconcile_aggregated_questrade_accounts(&tx).map_err(|e| e.to_string())?;
         set_setting(&tx, SETTING_LAST_SYNCED, &now).map_err(|e| e.to_string())?;
         tx.commit().map_err(|e| e.to_string())?;
     }
@@ -441,10 +436,14 @@ mod tests {
     }
 
     #[test]
-    fn jurisdiction_follows_currency() {
-        assert_eq!(jurisdiction_for("CAD"), "CA");
-        assert_eq!(jurisdiction_for("cad"), "CA");
-        assert_eq!(jurisdiction_for("USD"), "US");
+    fn jurisdiction_uses_currency_except_for_questrade() {
+        assert_eq!(aggregated_account_jurisdiction("CAD", None), "CA");
+        assert_eq!(aggregated_account_jurisdiction("cad", None), "CA");
+        assert_eq!(aggregated_account_jurisdiction("USD", None), "US");
+        assert_eq!(
+            aggregated_account_jurisdiction("USD", Some("Questrade")),
+            "CA"
+        );
     }
 
     #[test]

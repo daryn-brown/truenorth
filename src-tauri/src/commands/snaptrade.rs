@@ -13,9 +13,10 @@ use rusqlite::{params, Connection, OptionalExtension};
 use serde::Serialize;
 use tauri::State;
 
+use crate::commands::accounts::aggregated_account_jurisdiction;
 use crate::connector::snaptrade::{SnapAccount, SnapPosition, SnapTradeClient, SnapTradeError};
 use crate::db::secrets::{self, SNAPTRADE_CONSUMER_KEY, SNAPTRADE_USER_SECRET};
-use crate::db::AppDb;
+use crate::db::{reconcile_aggregated_questrade_accounts, AppDb};
 
 /// Non-secret identifiers live in `app_settings`; secrets live in the OS keychain.
 const SETTING_CLIENT_ID: &str = "snaptrade_client_id";
@@ -111,16 +112,6 @@ fn map_account_type(raw_type: Option<&str>, name: Option<&str>) -> String {
         "brokerage"
     };
     kind.to_string()
-}
-
-/// SnapTrade reports balances in the account's native currency; we map that to the
-/// jurisdiction the rest of the app reasons about.
-fn jurisdiction_for(currency: &str) -> &'static str {
-    if currency.eq_ignore_ascii_case("CAD") {
-        "CA"
-    } else {
-        "US"
-    }
 }
 
 /// Turn a SnapTrade API error into a user-facing message.
@@ -383,7 +374,6 @@ pub async fn snaptrade_sync(db: State<'_, AppDb>) -> Result<SnapTradeSyncSummary
                 .currency
                 .clone()
                 .unwrap_or_else(|| "USD".to_string());
-            let jurisdiction = jurisdiction_for(&reported_currency);
             let account_type =
                 map_account_type(account.raw_type.as_deref(), account.name.as_deref());
             let display_name = account
@@ -395,6 +385,8 @@ pub async fn snaptrade_sync(db: State<'_, AppDb>) -> Result<SnapTradeSyncSummary
                 .institution_name
                 .clone()
                 .unwrap_or_else(|| "SnapTrade".to_string());
+            let jurisdiction =
+                aggregated_account_jurisdiction(&reported_currency, Some(institution.as_str()));
 
             // Upsert the account, keyed by (connector_kind, connector_ref). On an existing account
             // we preserve the stored currency/jurisdiction so a user correction (see
@@ -468,6 +460,7 @@ pub async fn snaptrade_sync(db: State<'_, AppDb>) -> Result<SnapTradeSyncSummary
             }
         }
 
+        reconcile_aggregated_questrade_accounts(&tx).map_err(|e| e.to_string())?;
         set_setting(&tx, SETTING_LAST_SYNCED, &now).map_err(|e| e.to_string())?;
         tx.commit().map_err(|e| e.to_string())?;
     }
@@ -547,11 +540,15 @@ mod tests {
     }
 
     #[test]
-    fn jurisdiction_follows_currency() {
-        assert_eq!(jurisdiction_for("CAD"), "CA");
-        assert_eq!(jurisdiction_for("cad"), "CA");
-        assert_eq!(jurisdiction_for("USD"), "US");
-        assert_eq!(jurisdiction_for("EUR"), "US");
+    fn jurisdiction_uses_currency_except_for_questrade() {
+        assert_eq!(aggregated_account_jurisdiction("CAD", None), "CA");
+        assert_eq!(aggregated_account_jurisdiction("cad", None), "CA");
+        assert_eq!(aggregated_account_jurisdiction("USD", None), "US");
+        assert_eq!(aggregated_account_jurisdiction("EUR", None), "US");
+        assert_eq!(
+            aggregated_account_jurisdiction("USD", Some("Questrade")),
+            "CA"
+        );
     }
 
     #[test]

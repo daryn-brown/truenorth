@@ -44,7 +44,8 @@ For each account SimpleFIN reports, TrueNorth (in a single transaction):
 - **Upserts the account**, keyed by its SimpleFIN account id (`connector_ref`), so re-syncing
   updates the existing row instead of creating duplicates. The account type is inferred from the
   account name (e.g. chequing, savings, credit, TFSA, RRSP, brokerage) and the jurisdiction from the
-  account currency (CAD → CA, otherwise US).
+  account currency (CAD → CA, otherwise US). Questrade accounts are always classified as CA,
+  including USD-denominated accounts.
 - **Writes today's balance snapshot** (`source = 'simplefin'`). Because net worth and the history
   chart read the latest snapshot per account, your real balance appears immediately.
 - **Replaces the account's holdings** with any positions the institution reports (symbol, shares,
@@ -62,7 +63,8 @@ message as a **warning** under the sync summary.
 > case. If a brokerage balance looks too low, connect that broker directly instead: see
 > [**Questrade (direct API)**](questrade.md), under the **Direct** tab. The direct connector pulls
 > the full account value (cash **and** equity) and automatically hides the redundant cash-only
-> SimpleFIN duplicate so net worth isn't double-counted.
+> SimpleFIN duplicate so net worth isn't double-counted. Future SimpleFIN syncs keep that duplicate
+> hidden while the direct Questrade account remains active.
 
 Sync is **manual** ("Sync now"). Automatic/background sync is deferred to a later phase.
 

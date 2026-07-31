@@ -21,7 +21,7 @@ use crate::connector::questrade::{
     QuestradePosition,
 };
 use crate::db::secrets::{self, QUESTRADE_REFRESH_TOKEN};
-use crate::db::AppDb;
+use crate::db::{reconcile_aggregated_questrade_accounts, AppDb};
 
 const SETTING_LAST_SYNCED: &str = "questrade_last_synced_at";
 
@@ -253,22 +253,6 @@ fn reconcile_account(
     Ok(count)
 }
 
-/// Deactivate any active aggregator-managed (SimpleFIN/SnapTrade) account that points at Questrade.
-/// These are the redundant, often cash-only duplicates of the accounts we now sync directly; soft-
-/// deleting them (history preserved) stops net worth from double-counting. Manual accounts are
-/// deliberately left alone. Returns the number hidden.
-fn deactivate_duplicate_aggregator_accounts(
-    conn: &Connection,
-    now: &str,
-) -> rusqlite::Result<usize> {
-    conn.execute(
-        "UPDATE accounts SET is_active = 0, updated_at = ?1 \
-         WHERE is_active = 1 AND connector_kind IN ('simplefin', 'snaptrade') \
-         AND lower(institution) LIKE '%questrade%'",
-        params![now],
-    )
-}
-
 // ---------------------------------------------------------------------------
 // Commands
 // ---------------------------------------------------------------------------
@@ -385,7 +369,7 @@ pub async fn questrade_sync(db: State<'_, AppDb>) -> Result<QuestradeSyncSummary
         }
 
         duplicates_hidden =
-            deactivate_duplicate_aggregator_accounts(&tx, &now).map_err(|e| e.to_string())?;
+            reconcile_aggregated_questrade_accounts(&tx).map_err(|e| e.to_string())?;
 
         set_setting(&tx, SETTING_LAST_SYNCED, &now).map_err(|e| e.to_string())?;
         tx.commit().map_err(|e| e.to_string())?;
@@ -647,6 +631,14 @@ mod tests {
         let conn = Connection::open_in_memory().unwrap();
         crate::db::apply_schema(&conn).unwrap();
 
+        // An active direct account enables suppression of aggregator-managed Questrade rows.
+        conn.execute(
+            "INSERT INTO accounts (name, institution, account_type, currency, jurisdiction, \
+             connector_kind, connector_ref, is_active) \
+             VALUES ('TFSA direct', 'Questrade', 'tfsa', 'CAD', 'CA', 'questrade', 'qt-1', 1)",
+            [],
+        )
+        .unwrap();
         // A SimpleFIN-aggregated Questrade account (the redundant cash-only duplicate).
         conn.execute(
             "INSERT INTO accounts (name, institution, account_type, currency, jurisdiction, \
@@ -672,8 +664,7 @@ mod tests {
         )
         .unwrap();
 
-        let hidden =
-            deactivate_duplicate_aggregator_accounts(&conn, "2025-01-01T00:00:00Z").unwrap();
+        let hidden = reconcile_aggregated_questrade_accounts(&conn).unwrap();
         assert_eq!(hidden, 1);
 
         let active_simplefin_questrade: i64 = conn
@@ -693,7 +684,7 @@ mod tests {
                 |r| r.get(0),
             )
             .unwrap();
-        // Chase + the manual Questrade account remain active.
-        assert_eq!(active_total, 2);
+        // The direct account, Chase, and the manual Questrade account remain active.
+        assert_eq!(active_total, 3);
     }
 }

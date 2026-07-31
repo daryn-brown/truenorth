@@ -52,6 +52,23 @@ pub struct AddBalanceSnapshotPayload {
     pub snapshot_date: String,
 }
 
+fn is_questrade_institution(institution: &str) -> bool {
+    institution.to_ascii_lowercase().contains("questrade")
+}
+
+/// Aggregators do not report an explicit jurisdiction, so currency is the fallback. Questrade is
+/// always Canadian even when an account is denominated in USD.
+pub(crate) fn aggregated_account_jurisdiction(
+    currency: &str,
+    institution: Option<&str>,
+) -> &'static str {
+    if currency.eq_ignore_ascii_case("CAD") || institution.is_some_and(is_questrade_institution) {
+        "CA"
+    } else {
+        "US"
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Commands
 // ---------------------------------------------------------------------------
@@ -284,5 +301,19 @@ mod tests {
         assert!(normalize_currency("DOLLAR").is_err());
         assert!(normalize_currency("US1").is_err());
         assert!(normalize_currency("").is_err());
+    }
+
+    #[test]
+    fn aggregated_jurisdiction_keeps_questrade_in_canada() {
+        assert_eq!(aggregated_account_jurisdiction("CAD", None), "CA");
+        assert_eq!(aggregated_account_jurisdiction("USD", None), "US");
+        assert_eq!(
+            aggregated_account_jurisdiction("USD", Some("Questrade")),
+            "CA"
+        );
+        assert_eq!(
+            aggregated_account_jurisdiction("USD", Some("QUESTRADE, INC.")),
+            "CA"
+        );
     }
 }

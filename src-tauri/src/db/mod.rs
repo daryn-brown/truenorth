@@ -7,7 +7,7 @@ pub mod crypto;
 mod schema;
 pub mod secret_store;
 pub mod secrets;
-pub use schema::{apply_schema, seed_defaults};
+pub use schema::{apply_schema, reconcile_aggregated_questrade_accounts, seed_defaults};
 
 // Kept unchanged across the "TrueNorth" rebrand: renaming this file (or the app's bundle
 // identifier, which determines the app-data directory) would orphan the existing encrypted
