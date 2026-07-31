@@ -20,10 +20,10 @@ const JURISDICTION_COLORS: Record<string, string> = {
   CA: "bg-red-900/40 text-red-300 border-red-700/50",
 };
 
-/** The portfolios the user thinks in terms of: US (USD) vs Canada/International (CAD + JMD …). */
+/** Jurisdictional portfolios; an account can still be denominated in another currency. */
 const PORTFOLIO_GROUPS: { key: string; label: string; flag: string }[] = [
-  { key: "US", label: "USD Portfolio", flag: "🇺🇸" },
-  { key: "CA", label: "CAD / International", flag: "🇨🇦" },
+  { key: "US", label: "US Portfolio", flag: "🇺🇸" },
+  { key: "CA", label: "Canada / International", flag: "🇨🇦" },
 ];
 
 const fmt = (value: number, currency: string) =>

@@ -150,6 +150,29 @@ pub fn apply_schema(conn: &Connection) -> SqlResult<()> {
     Ok(())
 }
 
+/// Normalize aggregator-managed Questrade accounts and suppress them while direct Questrade data is
+/// active. This runs on launch and after every relevant connector sync so ordering cannot revive a
+/// redundant account or restore an old USD-derived US jurisdiction.
+pub fn reconcile_aggregated_questrade_accounts(conn: &Connection) -> SqlResult<usize> {
+    conn.execute(
+        "UPDATE accounts SET jurisdiction = 'CA', \
+         updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') \
+         WHERE connector_kind IN ('simplefin', 'snaptrade') \
+         AND lower(institution) LIKE '%questrade%' AND jurisdiction != 'CA'",
+        [],
+    )?;
+
+    conn.execute(
+        "UPDATE accounts SET is_active = 0, \
+         updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') \
+         WHERE is_active = 1 AND connector_kind IN ('simplefin', 'snaptrade') \
+         AND lower(institution) LIKE '%questrade%' \
+         AND EXISTS (SELECT 1 FROM accounts AS direct \
+                     WHERE direct.connector_kind = 'questrade' AND direct.is_active = 1)",
+        [],
+    )
+}
+
 /// Add `column` to `table` when it isn't already present. Idempotent: a no-op once the column
 /// exists, so it's safe to run on every launch.
 fn add_column_if_missing(
@@ -239,6 +262,7 @@ pub fn seed_defaults(conn: &Connection) -> SqlResult<()> {
     seed_txn_rules(conn)?;
     seed_txn_rules_v2(conn)?;
     purge_inferred_snapshots(conn)?;
+    reconcile_aggregated_questrade_accounts(conn)?;
     Ok(())
 }
 
@@ -325,6 +349,47 @@ mod tests {
         let conn = open_test_db();
         // Idempotent — applying twice must not fail
         apply_schema(&conn).unwrap();
+    }
+
+    #[test]
+    fn seed_defaults_reconciles_aggregated_questrade_accounts() {
+        let conn = open_test_db();
+        conn.execute(
+            "INSERT INTO accounts (name, institution, account_type, currency, jurisdiction, \
+             connector_kind, connector_ref) \
+             VALUES ('TFSA', 'Questrade', 'tfsa', 'USD', 'US', 'simplefin', 'sf-1')",
+            [],
+        )
+        .unwrap();
+
+        seed_defaults(&conn).unwrap();
+        let (jurisdiction, is_active): (String, i64) = conn
+            .query_row(
+                "SELECT jurisdiction, is_active FROM accounts WHERE connector_kind = 'simplefin'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(jurisdiction, "CA");
+        assert_eq!(is_active, 1);
+
+        conn.execute(
+            "INSERT INTO accounts (name, institution, account_type, currency, jurisdiction, \
+             connector_kind, connector_ref) \
+             VALUES ('TFSA direct', 'Questrade', 'tfsa', 'CAD', 'CA', 'questrade', 'qt-1')",
+            [],
+        )
+        .unwrap();
+        seed_defaults(&conn).unwrap();
+
+        let aggregator_active: i64 = conn
+            .query_row(
+                "SELECT is_active FROM accounts WHERE connector_kind = 'simplefin'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(aggregator_active, 0);
     }
 
     #[test]

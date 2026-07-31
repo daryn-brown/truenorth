@@ -19,6 +19,14 @@ use base64::Engine;
 use serde_json::Value;
 use thiserror::Error;
 
+const TRANSACTION_LOOKBACK_DAYS: i64 = 90;
+
+fn transaction_start_date(now: chrono::DateTime<chrono::Utc>) -> String {
+    (now - chrono::Duration::days(TRANSACTION_LOOKBACK_DAYS))
+        .timestamp()
+        .to_string()
+}
+
 #[derive(Debug, Error)]
 pub enum SimpleFinError {
     #[error("HTTP error: {0}")]
@@ -152,14 +160,12 @@ impl SimpleFinClient {
     }
 
     /// Fetch accounts with balances, holdings, and recent transactions. A `start-date` bounds the
-    /// transaction window (the trailing ~120 days) so payloads stay small; balances and holdings
-    /// are always current regardless of the window.
+    /// transaction window to SimpleFIN Bridge's 90-day limit; balances and holdings are always
+    /// current regardless of the window.
     pub async fn fetch_accounts(&self) -> Result<SimpleFinAccountSet, SimpleFinError> {
         let (endpoint, user, pass) = accounts_endpoint(&self.access_url)?;
         // SimpleFIN expects `start-date` as UNIX epoch seconds.
-        let start_date = (chrono::Utc::now() - chrono::Duration::days(120))
-            .timestamp()
-            .to_string();
+        let start_date = transaction_start_date(chrono::Utc::now());
         let resp = self
             .http
             .get(&endpoint)
@@ -407,6 +413,20 @@ mod tests {
         // Valid base64 but not a URL.
         let not_a_url = base64::engine::general_purpose::STANDARD.encode("hello world");
         assert!(decode_setup_token(&not_a_url).is_err());
+    }
+
+    #[test]
+    fn transaction_window_matches_bridge_limit() {
+        let now = chrono::DateTime::parse_from_rfc3339("2026-07-31T12:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        let start = chrono::DateTime::from_timestamp(
+            transaction_start_date(now).parse::<i64>().unwrap(),
+            0,
+        )
+        .unwrap();
+
+        assert_eq!(now.signed_duration_since(start), chrono::Duration::days(90));
     }
 
     #[test]

@@ -61,7 +61,8 @@ For each account SnapTrade reports, TrueNorth (in a single transaction):
 - **Upserts the account**, keyed by its SnapTrade account id (`connector_ref`), so re-syncing
   updates the existing row instead of creating duplicates. The account type is inferred from the
   brokerage's label (e.g. TFSA, RRSP, Roth IRA, 401(k)), and jurisdiction from the account currency
-  (CAD → CA, otherwise US).
+  (CAD → CA, otherwise US). Questrade accounts are always classified as CA, including
+  USD-denominated accounts.
 - **Writes today's balance snapshot** (`source = 'snaptrade'`). Because net worth and the history
   chart read the latest snapshot per account, your real balance appears immediately.
 - **Replaces the account's holdings** with the current positions (symbol, units, price, average

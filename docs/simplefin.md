@@ -6,7 +6,7 @@ Synced balances flow straight into the existing multi-currency net worth and his
 sync writes one balance snapshot per account, so no part of the net-worth pipeline changes.
 
 Everything is **read-only**. SimpleFIN only ever exposes balances and transactions — there is no
-way to move money — and TrueNorth requests `balances-only` data.
+way to move money — and TrueNorth requests the most recent 90 days of transaction history.
 
 SimpleFIN complements [SnapTrade](snaptrade.md): use **SnapTrade** for brokerages (Robinhood,
 Questrade, Wealthsimple) and **SimpleFIN** for banks and cards. You can run both at once.
@@ -31,8 +31,8 @@ Open the app, click **🔗 Connect** in the header, and choose the **Banks** tab
 1. **SimpleFIN setup token** — paste your setup token and click **Connect**. TrueNorth claims the
    token, exchanges it for an access URL, verifies the access URL works, and stores it in your
    **OS keychain** (macOS Keychain / Windows Credential Manager) — never on disk or in the database.
-2. **Sync balances** — click **Sync now**. TrueNorth pulls your accounts and balances and updates
-   your net worth.
+2. **Sync balances** — click **Sync now**. TrueNorth pulls your accounts, balances, and the most
+   recent 90 days of transactions, then updates your net worth.
 
 To connect more institutions, add them in your SimpleFIN bridge — they appear automatically on the
 next sync. To rotate credentials, click **Use a new token** and claim a fresh setup token.
@@ -44,12 +44,15 @@ For each account SimpleFIN reports, TrueNorth (in a single transaction):
 - **Upserts the account**, keyed by its SimpleFIN account id (`connector_ref`), so re-syncing
   updates the existing row instead of creating duplicates. The account type is inferred from the
   account name (e.g. chequing, savings, credit, TFSA, RRSP, brokerage) and the jurisdiction from the
-  account currency (CAD → CA, otherwise US).
+  account currency (CAD → CA, otherwise US). Questrade accounts are always classified as CA,
+  including USD-denominated accounts.
 - **Writes today's balance snapshot** (`source = 'simplefin'`). Because net worth and the history
   chart read the latest snapshot per account, your real balance appears immediately.
 - **Replaces the account's holdings** with any positions the institution reports (symbol, shares,
   per-share price + average cost derived from SimpleFIN's market-value and cost-basis totals), so
   closed positions disappear. Most banks report no holdings — that's expected.
+- **Imports transactions from the trailing 90 days**, keyed by SimpleFIN transaction id so later
+  syncs update existing records instead of duplicating them.
 
 If SimpleFIN reports a per-connection problem (for example, an institution needs to be
 re-authenticated at the bridge), the sync still succeeds for everything else and surfaces the
@@ -60,7 +63,8 @@ message as a **warning** under the sync summary.
 > case. If a brokerage balance looks too low, connect that broker directly instead: see
 > [**Questrade (direct API)**](questrade.md), under the **Direct** tab. The direct connector pulls
 > the full account value (cash **and** equity) and automatically hides the redundant cash-only
-> SimpleFIN duplicate so net worth isn't double-counted.
+> SimpleFIN duplicate so net worth isn't double-counted. Future SimpleFIN syncs keep that duplicate
+> hidden while the direct Questrade account remains active.
 
 Sync is **manual** ("Sync now"). Automatic/background sync is deferred to a later phase.
 
@@ -74,8 +78,9 @@ revoke access, also disable or delete the token in your SimpleFIN bridge.
 
 - **Secrets never touch disk.** The SimpleFIN access URL — which embeds HTTP Basic credentials — is
   stored only in the OS keychain. Nothing about SimpleFIN is written to the database except the
-  non-secret accounts and balances you sync.
-- **Read-only by design.** TrueNorth requests `balances-only` data from the SimpleFIN protocol.
+  non-secret accounts, balances, holdings, and transactions you sync.
+- **Read-only by design.** TrueNorth requests account data and a 90-day transaction window from the
+  SimpleFIN protocol.
 - **Direct HTTPS.** Requests go only to your SimpleFIN server (e.g. `bridge.simplefin.org`) over
   HTTPS (rustls). No third party sees your data.
 - Nothing related to SimpleFIN is committed to the repo; `.env`, `*.db`, and `*.sqlite` are
