@@ -19,12 +19,13 @@ use base64::Engine;
 use serde_json::Value;
 use thiserror::Error;
 
-const TRANSACTION_LOOKBACK_DAYS: i64 = 90;
+const TRANSACTION_CALENDAR_DAYS: i64 = 90;
 
-fn transaction_start_date(now: chrono::DateTime<chrono::Utc>) -> String {
-    (now - chrono::Duration::days(TRANSACTION_LOOKBACK_DAYS))
-        .timestamp()
-        .to_string()
+fn transaction_date_range(now: chrono::DateTime<chrono::Utc>) -> (String, String) {
+    // Some upstream providers count both boundary dates. An elapsed 90-day interval can therefore
+    // span 91 calendar dates, so request 89 elapsed days and pin the end to the same instant.
+    let start = now - chrono::Duration::days(TRANSACTION_CALENDAR_DAYS - 1);
+    (start.timestamp().to_string(), now.timestamp().to_string())
 }
 
 #[derive(Debug, Error)]
@@ -159,18 +160,21 @@ impl SimpleFinClient {
         }
     }
 
-    /// Fetch accounts with balances, holdings, and recent transactions. A `start-date` bounds the
-    /// transaction window to SimpleFIN Bridge's 90-day limit; balances and holdings are always
-    /// current regardless of the window.
+    /// Fetch accounts with balances, holdings, and recent transactions. Explicit `start-date` and
+    /// `end-date` values keep the request within SimpleFIN Bridge's 90-calendar-day limit; balances
+    /// and holdings are always current regardless of the transaction window.
     pub async fn fetch_accounts(&self) -> Result<SimpleFinAccountSet, SimpleFinError> {
         let (endpoint, user, pass) = accounts_endpoint(&self.access_url)?;
-        // SimpleFIN expects `start-date` as UNIX epoch seconds.
-        let start_date = transaction_start_date(chrono::Utc::now());
+        // SimpleFIN expects both date bounds as UNIX epoch seconds.
+        let (start_date, end_date) = transaction_date_range(chrono::Utc::now());
         let resp = self
             .http
             .get(&endpoint)
             .basic_auth(user, (!pass.is_empty()).then_some(pass))
-            .query(&[("start-date", start_date.as_str())])
+            .query(&[
+                ("start-date", start_date.as_str()),
+                ("end-date", end_date.as_str()),
+            ])
             .send()
             .await?;
         let status = resp.status();
@@ -416,17 +420,20 @@ mod tests {
     }
 
     #[test]
-    fn transaction_window_matches_bridge_limit() {
+    fn transaction_window_stays_inside_bridge_limit() {
         let now = chrono::DateTime::parse_from_rfc3339("2026-07-31T12:00:00Z")
             .unwrap()
             .with_timezone(&chrono::Utc);
-        let start = chrono::DateTime::from_timestamp(
-            transaction_start_date(now).parse::<i64>().unwrap(),
-            0,
-        )
-        .unwrap();
+        let (start, end) = transaction_date_range(now);
+        let start = chrono::DateTime::from_timestamp(start.parse::<i64>().unwrap(), 0).unwrap();
+        let end = chrono::DateTime::from_timestamp(end.parse::<i64>().unwrap(), 0).unwrap();
 
-        assert_eq!(now.signed_duration_since(start), chrono::Duration::days(90));
+        assert_eq!(end, now);
+        assert_eq!(
+            end.signed_duration_since(start),
+            chrono::Duration::days(89)
+        );
+        assert!(end.signed_duration_since(start) < chrono::Duration::days(90));
     }
 
     #[test]
