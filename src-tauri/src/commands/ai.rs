@@ -290,6 +290,38 @@ pub struct AiChatResponse {
 /// Hard cap on agentic round-trips, so a confused model can't loop forever on tool calls.
 const MAX_TOOL_ITERATIONS: usize = 6;
 
+/// Choose which Ollama model to actually use. The stored default is `llama3.1`, but a user may
+/// never have pulled it (or pulled it under a tag like `llama3.1:8b`), which would make every
+/// request fail with "model not found". Given the list of installed model ids, prefer an exact
+/// match, then any model in the same family (same text before the `:` tag), then simply the first
+/// installed model — so the advisor "just works" against whatever the user has. With nothing
+/// installed we keep the configured id so the normal not-found/not-running error still surfaces.
+fn pick_ollama_model(configured: &str, installed: &[String]) -> String {
+    if installed.is_empty() || installed.iter().any(|m| m == configured) {
+        return configured.to_string();
+    }
+    fn base(s: &str) -> &str {
+        s.split(':').next().unwrap_or(s)
+    }
+    if let Some(m) = installed.iter().find(|m| base(m) == base(configured)) {
+        return m.clone();
+    }
+    installed[0].clone()
+}
+
+/// Resolve the Ollama model to use by consulting the locally-installed models (see
+/// [`pick_ollama_model`]). Falls back to the configured id if the list can't be fetched, so a
+/// stopped Ollama still yields its usual "couldn't reach the AI provider" hint.
+async fn resolve_ollama_model(base_url: &str, configured: &str) -> String {
+    match ai::list_ollama_models(base_url).await {
+        Ok(models) => {
+            let ids: Vec<String> = models.into_iter().map(|m| m.id).collect();
+            pick_ollama_model(configured, &ids)
+        }
+        Err(_) => configured.to_string(),
+    }
+}
+
 #[tauri::command]
 pub async fn ai_chat(
     db: State<'_, AppDb>,
@@ -304,7 +336,8 @@ pub async fn ai_chat(
 
     // Resolve the endpoint, key, and model for the chosen provider once.
     let (base_url, api_key, model) = if provider == "ollama" {
-        (ollama_url, None, ollama_model)
+        let model = resolve_ollama_model(&ollama_url, &ollama_model).await;
+        (ollama_url, None, model)
     } else {
         let token = token.filter(|t| !t.trim().is_empty()).ok_or(
             "Add a GitHub token (with the models:read scope) in AI settings first, or switch to Ollama.",
@@ -937,6 +970,14 @@ Reply with ONLY a JSON array, no prose, no code fences. Each element: \
         ChatMessage { role: "user".into(), content: user },
     ];
 
+    // For Ollama, use a model the user actually has installed (the stored default may never have
+    // been pulled), so categorization doesn't fail with "model not found".
+    let ollama_model = if provider == "ollama" {
+        resolve_ollama_model(&ollama_url, &ollama_model).await
+    } else {
+        ollama_model
+    };
+
     // 3) Call the model with no DB lock held.
     let reply = if provider == "ollama" {
         ai::chat_completion(&ollama_url, None, &ollama_model, &messages)
@@ -1395,6 +1436,19 @@ pub fn ai_append_message(
 #[cfg(test)]
 mod agentic_tests {
     use super::*;
+
+    #[test]
+    fn pick_ollama_model_prefers_exact_then_family_then_first() {
+        let installed = vec!["qwen2.5:14b".to_string(), "llama3.1:8b".to_string()];
+        // Exact match wins.
+        assert_eq!(pick_ollama_model("qwen2.5:14b", &installed), "qwen2.5:14b");
+        // Same family (stored default `llama3.1` vs installed `llama3.1:8b`) resolves to the tag.
+        assert_eq!(pick_ollama_model("llama3.1", &installed), "llama3.1:8b");
+        // Unknown model falls back to the first installed one so the advisor still works.
+        assert_eq!(pick_ollama_model("mistral", &installed), "qwen2.5:14b");
+        // Nothing installed → keep the configured id so the normal "not found" error surfaces.
+        assert_eq!(pick_ollama_model("llama3.1", &[]), "llama3.1");
+    }
 
     #[test]
     fn normalize_merchant_collapses_noise_and_case() {

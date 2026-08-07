@@ -18,7 +18,8 @@ more through **SnapTrade** (free for a single user), and banks through **SimpleF
 (free for US banks) — all pull **real, read-only balances + holdings** straight into your net worth.
 You can also connect an institution's **own API directly** (the **Direct** tab) — **Questrade** is
 supported today, pulling full cash + equity. An **agentic AI advisor** that queries your own data
-with read-only tools ships too (GitHub Models or local Ollama) — see [`docs/ai.md`](docs/ai.md).
+with read-only tools ships too (runs on a local **Ollama** model — GitHub Models has been retired by
+GitHub) — see [`docs/ai.md`](docs/ai.md).
 Setup lives in [`docs/snaptrade.md`](docs/snaptrade.md), [`docs/simplefin.md`](docs/simplefin.md),
 [`docs/teller.md`](docs/teller.md), and [`docs/questrade.md`](docs/questrade.md).
 
@@ -30,7 +31,7 @@ Setup lives in [`docs/snaptrade.md`](docs/snaptrade.md), [`docs/simplefin.md`](d
   **manual/CSV** fallback.
 - **Multi-currency net worth** — any account currency converted into USD + CAD totals — with history chart + dashboard.
 - Transaction review (search/filter/categorize) + goals.
-- **Model-agnostic AI** (GitHub Models / Ollama / Azure) with a local-only privacy mode.
+- **Local AI advisor** (local **Ollama**; the free GitHub Models option was retired by GitHub) with a local-only privacy mode.
 
 **Deferred (separate, guarded module later):** automated trading / order execution.
 
@@ -210,10 +211,10 @@ next to the database, at-rest encryption no longer protects against someone who 
 files. Existing keychain-held secrets are migrated into the file once on first launch (the single
 remaining prompt); afterwards the keychain is never touched.
 
-**AI advisor.** Ask questions about your own data via **GitHub Models** (free with your GitHub
-account) or a fully-local **Ollama** model, from a collapsible side panel with **saved chats**. With
+**AI advisor.** Ask questions about your own data via a fully-local **Ollama** model, from a
+collapsible side panel with **saved chats**. (The previous free **GitHub Models** option has been
+retired by GitHub; the app detects this and tells you to switch to Ollama.) With
 real-data mode on, the advisor is **agentic** — it calls read-only tools that query your local
-database on demand and answers in markdown, showing which tools it used. With GitHub Models those
-tool results are sent to GitHub's API to generate the answer; a **privacy mode** disables the tools
-and sends only rounded aggregates instead of exact balances and transactions. With Ollama, nothing
-leaves your device. See [`docs/ai.md`](docs/ai.md).
+database on demand and answers in markdown, showing which tools it used. A **privacy mode** disables
+the tools and sends only rounded aggregates instead of exact balances and transactions. With Ollama,
+nothing leaves your device. See [`docs/ai.md`](docs/ai.md).
