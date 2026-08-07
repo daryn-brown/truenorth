@@ -16,14 +16,39 @@ runs:
 
 | Provider | Cost | Where it runs | What's sent off-device |
 | --- | --- | --- | --- |
-| **GitHub Models** | Free with your GitHub account | GitHub's API | Your question + a snapshot of your finances (or only rounded aggregates in privacy mode) |
 | **Ollama** | Free | Fully local on your machine | Nothing — never leaves your device |
+| **GitHub Models** | ⚠️ **Retired by GitHub** | GitHub's API | Your question + a snapshot of your finances (or only rounded aggregates in privacy mode) |
 
-## Option A — GitHub Models (free, recommended)
+> **⚠️ GitHub Models has been retired.** GitHub has shut down the free GitHub Models inference
+> service, so it now returns an error (HTTP 410) instead of answers — no token change can bring it
+> back. **Use Ollama (below) to keep the advisor working for free and fully offline.** If GitHub
+> Models is your selected provider, TrueNorth will tell you it's retired and to switch. You can also
+> point the app at any other OpenAI-compatible API.
 
-[GitHub Models](https://github.com/marketplace/models) gives you free access to frontier models
-(OpenAI GPT-4o, etc.) using a **GitHub personal access token** as the API key. If you have a GitHub
-account, you already have access.
+## Option A — Ollama (fully local, free, recommended)
+
+[Ollama](https://ollama.com) runs open models entirely on your machine — nothing is ever sent off
+your device, regardless of the privacy setting. It's now the recommended provider.
+
+1. Install Ollama and pull a model:
+   ```sh
+   ollama pull llama3.1
+   ```
+   (Ollama serves an OpenAI-compatible API on `http://localhost:11434` while running.)
+2. In **🧠 Ask AI → ⚙️ Settings**, select **Ollama (local)**. The default URL
+   (`http://localhost:11434/v1`) works out of the box. TrueNorth automatically uses a model you've
+   actually pulled — if the stored default (`llama3.1`) isn't installed, it falls back to one that
+   is — so you can also just click **Load available models** to pick a specific one.
+3. Ask away. If Ollama isn't running you'll get a "couldn't reach the AI provider" hint — start it
+   with `ollama serve` (or just launch the app).
+
+## Option B — GitHub Models (retired)
+
+> **This provider no longer works** — GitHub retired the GitHub Models inference API, so requests
+> fail with HTTP 410. The steps below are kept for reference only; use **Ollama** instead.
+
+[GitHub Models](https://github.com/marketplace/models) previously gave free access to frontier models
+(OpenAI GPT-4o, etc.) using a **GitHub personal access token** as the API key.
 
 1. Create a token at [**github.com/settings/tokens**](https://github.com/settings/tokens).
    - A **fine-grained** token works; the only permission it needs is the **`models:read`** scope
@@ -32,33 +57,11 @@ account, you already have access.
 2. In TrueNorth, open **🧠 Ask AI → ⚙️ Settings**, make sure **GitHub Models** is selected, paste the
    token into **GitHub token**, and click **Save**. The token is stored locally (never shown again,
    never sent anywhere except GitHub's API as the bearer token).
-3. Optionally click **Load available models** and pick one. The default is `openai/gpt-4o-mini`,
-   which is fast and well within the free tier.
+3. Optionally click **Load available models** and pick one. The default is `openai/gpt-4o-mini`.
 4. Ask away.
 
-> **Free-tier limits.** GitHub Models has per-minute and per-day request limits. If you hit them
-> you'll see a clear "rate limited" message — wait a moment, or switch to a smaller model or to
-> Ollama.
-
 Model ids are `publisher/model` (for example `openai/gpt-4o-mini`, `openai/gpt-4o`,
-`meta/llama-3.1-8b-instruct`). The full list is in the
-[model catalog](https://github.com/marketplace/models).
-
-## Option B — Ollama (fully local, fully private)
-
-[Ollama](https://ollama.com) runs open models entirely on your machine — nothing is ever sent off
-your device, regardless of the privacy setting.
-
-1. Install Ollama and pull a model:
-   ```sh
-   ollama pull llama3.1
-   ```
-   (Ollama serves an OpenAI-compatible API on `http://localhost:11434` while running.)
-2. In **🧠 Ask AI → ⚙️ Settings**, select **Ollama (local)**. The default URL
-   (`http://localhost:11434/v1`) and model (`llama3.1`) work out of the box; click **Load available
-   models** to pick another that you've pulled.
-3. Ask away. If Ollama isn't running you'll get a "couldn't reach the AI provider" hint — start it
-   with `ollama serve` (or just launch the app).
+`meta/llama-3.1-8b-instruct`).
 
 ## How answers are produced
 

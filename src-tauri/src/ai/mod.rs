@@ -212,6 +212,11 @@ fn http_client() -> Result<Client, AiError> {
 
 /// Turn a non-2xx provider response into an actionable message.
 fn friendly_http_error(status: StatusCode, body: &str) -> String {
+    // GitHub Models retirement (HTTP 410) means the whole free provider is going away — no token
+    // change can fix it, so point the user straight at switching providers.
+    if let Some(msg) = github_models_retirement_message(body) {
+        return msg;
+    }
     // GitHub Models "no_access" (usually 403) means the token in use can't reach the model, so it
     // gets a token-focused message regardless of the status code.
     if let Some(msg) = no_access_message(body) {
@@ -230,6 +235,10 @@ fn friendly_http_error(status: StatusCode, body: &str) -> String {
         404 => format!(
             "Model or endpoint not found (HTTP {status}). Check the selected model id. {snippet}"
         ),
+        410 => format!(
+            "The AI provider reported this service has been retired (HTTP {status}). If you were \
+             using GitHub Models, switch to Ollama (local) in AI settings. {snippet}"
+        ),
         429 => format!(
             "Rate limited by the AI provider (HTTP {status}). The GitHub Models free tier has \
              per-minute and per-day limits — wait a moment and try again, or switch models."
@@ -237,6 +246,24 @@ fn friendly_http_error(status: StatusCode, body: &str) -> String {
         500..=599 => format!("The AI provider had a server error (HTTP {status}). {snippet}"),
         _ => format!("AI provider error (HTTP {status}). {snippet}"),
     }
+}
+
+/// Detect GitHub Models' retirement responses (HTTP 410, error code `github_models_retirement*`,
+/// e.g. `github_models_retirement_brownout`). GitHub is shutting the free GitHub Models provider
+/// down, so no token change will bring it back — the user has to switch providers. Returns `None`
+/// for unrelated errors.
+fn github_models_retirement_message(body: &str) -> Option<String> {
+    if !body.contains("github_models_retirement") {
+        return None;
+    }
+    Some(
+        "GitHub Models has been retired by GitHub, so it can no longer answer questions — this is \
+         not a problem with your token. In AI settings, switch the provider to \"Ollama (local)\" \
+         to keep using the advisor for free and fully offline: install it from https://ollama.com, \
+         run `ollama pull llama3.1` (or any model), then pick Ollama in Settings. You can also \
+         point the app at another OpenAI-compatible API."
+            .to_string(),
+    )
 }
 
 /// Detect GitHub Models "no access" responses (usually HTTP 403, `code: no_access`). In practice
@@ -488,5 +515,27 @@ mod tests {
     fn no_access_message_ignores_other_errors() {
         assert!(no_access_message(r#"{"error":{"code":"rate_limited"}}"#).is_none());
         assert!(no_access_message("").is_none());
+    }
+
+    #[test]
+    fn retirement_message_detects_brownout_and_points_to_ollama() {
+        let body = r#"{"error":{"code":"github_models_retirement_brownout","message":"GitHub Models is temporarily unavailable as part of a scheduled retirement brownout."}}"#;
+        let msg = github_models_retirement_message(body).expect("should detect retirement");
+        assert!(msg.contains("retired"), "explains it's retired: {msg}");
+        assert!(msg.contains("Ollama"), "points at Ollama: {msg}");
+    }
+
+    #[test]
+    fn retirement_message_ignores_other_errors() {
+        assert!(github_models_retirement_message(r#"{"error":{"code":"no_access"}}"#).is_none());
+        assert!(github_models_retirement_message("").is_none());
+    }
+
+    #[test]
+    fn friendly_http_error_routes_retirement_410() {
+        let body = r#"{"error":{"code":"github_models_retirement_brownout","message":"..."}}"#;
+        let msg = friendly_http_error(StatusCode::GONE, body);
+        assert!(msg.contains("retired"), "410 brownout gets the retirement copy: {msg}");
+        assert!(msg.contains("Ollama"));
     }
 }

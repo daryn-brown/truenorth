@@ -593,7 +593,7 @@ function SettingsPanel(p: SettingsProps) {
               isGithub ? "bg-indigo-600 text-white" : "text-slate-400 hover:bg-slate-800"
             }`}
           >
-            GitHub Models (free)
+            GitHub Models (retired)
           </button>
           <button
             onClick={() => p.setProvider("ollama")}
@@ -601,13 +601,20 @@ function SettingsPanel(p: SettingsProps) {
               !isGithub ? "bg-indigo-600 text-white" : "text-slate-400 hover:bg-slate-800"
             }`}
           >
-            Ollama (local)
+            Ollama (local, free)
           </button>
         </div>
       </div>
 
       {isGithub ? (
         <>
+          {/* GitHub Models has been retired by GitHub — warn and steer to Ollama. */}
+          <div className="rounded-lg border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-[11px] leading-relaxed text-amber-200">
+            ⚠️ GitHub has <span className="font-semibold">retired GitHub Models</span>, so this
+            provider no longer returns answers (requests fail with HTTP 410). Switch to{" "}
+            <span className="font-semibold">Ollama (local, free)</span> above to keep using the
+            advisor — it runs on your own machine and nothing leaves your device.
+          </div>
           {/* Token */}
           <div>
             <label className="mb-1.5 block text-xs font-medium text-slate-400">
@@ -668,7 +675,8 @@ function SettingsPanel(p: SettingsProps) {
           />
           <p className="mt-1 text-[11px] text-slate-500">
             Runs models locally. Install from ollama.com, then{" "}
-            <span className="font-mono text-slate-400">ollama pull llama3.1</span>.
+            <span className="font-mono text-slate-400">ollama pull llama3.1</span>. TrueNorth
+            automatically uses a model you've already pulled.
           </p>
         </div>
       )}
