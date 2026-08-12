@@ -18,8 +18,8 @@ more through **SnapTrade** (free for a single user), and banks through **SimpleF
 (free for US banks) — all pull **real, read-only balances + holdings** straight into your net worth.
 You can also connect an institution's **own API directly** (the **Direct** tab) — **Questrade** is
 supported today, pulling full cash + equity. An **agentic AI advisor** that queries your own data
-with read-only tools ships too (runs on a local **Ollama** model — GitHub Models has been retired by
-GitHub) — see [`docs/ai.md`](docs/ai.md).
+with read-only tools ships too (your **GitHub Copilot** subscription or fully local **Ollama**) —
+see [`docs/ai.md`](docs/ai.md).
 Setup lives in [`docs/snaptrade.md`](docs/snaptrade.md), [`docs/simplefin.md`](docs/simplefin.md),
 [`docs/teller.md`](docs/teller.md), and [`docs/questrade.md`](docs/questrade.md).
 
@@ -31,7 +31,7 @@ Setup lives in [`docs/snaptrade.md`](docs/snaptrade.md), [`docs/simplefin.md`](d
   **manual/CSV** fallback.
 - **Multi-currency net worth** — any account currency converted into USD + CAD totals — with history chart + dashboard.
 - Transaction review (search/filter/categorize) + goals.
-- **Local AI advisor** (local **Ollama**; the free GitHub Models option was retired by GitHub) with a local-only privacy mode.
+- **AI advisor** using your **GitHub Copilot** subscription or local **Ollama**, with rounded-data privacy mode.
 
 **Deferred (separate, guarded module later):** automated trading / order execution.
 
@@ -188,7 +188,7 @@ the Apple/Windows signing secrets to sign automatically. See [`docs/releasing.md
 - [`docs/simplefin.md`](docs/simplefin.md) — connecting banks via SimpleFIN (read-only) and how sync feeds net worth.
 - [`docs/teller.md`](docs/teller.md) — connecting US banks via Teller for free (read-only) and how sync feeds net worth.
 - [`docs/questrade.md`](docs/questrade.md) — connecting Questrade directly (read-only cash + equity) and how it complements SimpleFIN.
-- [`docs/ai.md`](docs/ai.md) — the AI advisor: GitHub Models vs local Ollama, setup, the agentic tools it calls, saved chats, what data is sent, and privacy mode.
+- [`docs/ai.md`](docs/ai.md) — the AI advisor: GitHub Copilot vs local Ollama, setup, read-only tools, saved chats, tax-planning safeguards, and privacy mode.
 - [`docs/releasing.md`](docs/releasing.md) — release pipeline, build targets, and code-signing setup.
 
 ## Phased roadmap
@@ -197,7 +197,7 @@ the Apple/Windows signing secrets to sign automatically. See [`docs/releasing.md
 2. ✅ SnapTrade brokerage sync (read-only balances + holdings)
 3. 🔄 SimpleFIN bank sync (read-only balances + holdings) + direct institution APIs (Questrade: cash + equity)
 4. 🔄 Transactions & goals (incl. a generic, customizable **FIRE planner** — FIRE/CoastFIRE targets + projected ages)
-5. 🔄 Model-agnostic AI "second brain" — GitHub Models + local Ollama shipped (Azure later)
+5. 🔄 Model-agnostic AI "second brain" — GitHub Copilot SDK + local Ollama shipped (Azure later)
 6. Hardening & polish
 
 ## Privacy
@@ -211,10 +211,9 @@ next to the database, at-rest encryption no longer protects against someone who 
 files. Existing keychain-held secrets are migrated into the file once on first launch (the single
 remaining prompt); afterwards the keychain is never touched.
 
-**AI advisor.** Ask questions about your own data via a fully-local **Ollama** model, from a
-collapsible side panel with **saved chats**. (The previous free **GitHub Models** option has been
-retired by GitHub; the app detects this and tells you to switch to Ollama.) With
-real-data mode on, the advisor is **agentic** — it calls read-only tools that query your local
-database on demand and answers in markdown, showing which tools it used. A **privacy mode** disables
-the tools and sends only rounded aggregates instead of exact balances and transactions. With Ollama,
-nothing leaves your device. See [`docs/ai.md`](docs/ai.md).
+**AI advisor.** Ask questions about subscriptions, spending, goals, investments, and tax planning
+through your **GitHub Copilot** subscription or a fully local **Ollama** model, from a collapsible
+side panel with **saved chats**. With real-data mode on, the advisor calls only read-only finance
+tools and shows which ones it used. A **privacy mode** disables those exact-data tools and sends only
+rounded aggregates. Copilot runs through the official SDK in isolated mode; with Ollama, nothing
+leaves your device. See [`docs/ai.md`](docs/ai.md).

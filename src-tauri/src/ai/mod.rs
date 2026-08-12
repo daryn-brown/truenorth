@@ -1,14 +1,11 @@
 //! Model-agnostic AI layer — the "second brain" advisor.
 //!
-//! A single OpenAI-compatible client talks to whichever provider the user picked:
-//! * **GitHub Models** (`https://models.github.ai/inference`) — free frontier models via a GitHub
-//!   PAT with the `models:read` scope, used as the bearer token. Model ids are `publisher/model`
-//!   (e.g. `openai/gpt-4o-mini`).
-//! * **Ollama** (`http://localhost:11434/v1`) — a local, fully-private fallback; no token.
+//! Ollama uses the OpenAI-compatible transport in this module. GitHub Copilot uses its official
+//! SDK in [`copilot`], which authenticates against the user's Copilot subscription and runs in an
+//! isolated mode with only TrueNorth's read-only finance tools.
 //!
-//! The same `/chat/completions` request shape works for both. The financial context that grounds
-//! each answer is assembled by [`crate::commands::ai`] from the user's own local database and sent
-//! as a system message; this module only owns the transport and the provider quirks.
+//! The financial context that grounds each answer is assembled by [`crate::commands::ai`] from the
+//! user's own local database and sent as a system message; this module owns provider transports.
 
 use std::time::Duration;
 
@@ -16,14 +13,10 @@ use reqwest::{Client, StatusCode};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-/// GitHub Models OpenAI-compatible inference base URL.
-pub const GITHUB_MODELS_BASE: &str = "https://models.github.ai/inference";
-/// GitHub Models catalog endpoint (lists available `publisher/model` ids).
-pub const GITHUB_MODELS_CATALOG: &str = "https://models.github.ai/catalog/models";
+pub mod copilot;
+
 /// Default local Ollama OpenAI-compatible base URL.
 pub const OLLAMA_DEFAULT_BASE: &str = "http://localhost:11434/v1";
-/// Sensible default model for each provider.
-pub const DEFAULT_GITHUB_MODEL: &str = "openai/gpt-4o-mini";
 pub const DEFAULT_OLLAMA_MODEL: &str = "llama3.1";
 
 #[derive(Debug, Error)]
@@ -59,8 +52,7 @@ pub struct ModelInfo {
 // Tool-calling (function-calling) wire types
 //
 // The agentic advisor lets the model pull specific financial data on demand instead of working
-// from one fixed snapshot. These mirror the OpenAI `/chat/completions` tool-calling schema, which
-// both GitHub Models and Ollama's OpenAI-compatible endpoint speak.
+// from one fixed snapshot. These mirror Ollama's OpenAI-compatible tool-calling schema.
 // ---------------------------------------------------------------------------
 
 /// A tool the model may call, advertised in the request. `parameters` is a JSON-Schema object.
@@ -204,6 +196,9 @@ struct ChoiceMessage {
 
 fn http_client() -> Result<Client, AiError> {
     Client::builder()
+        // Ollama is restricted to loopback; never proxy or redirect financial prompts off-device.
+        .no_proxy()
+        .redirect(reqwest::redirect::Policy::none())
         // LLM responses can take a while; give them room but don't hang forever.
         .timeout(Duration::from_secs(120))
         .build()
@@ -212,84 +207,25 @@ fn http_client() -> Result<Client, AiError> {
 
 /// Turn a non-2xx provider response into an actionable message.
 fn friendly_http_error(status: StatusCode, body: &str) -> String {
-    // GitHub Models retirement (HTTP 410) means the whole free provider is going away — no token
-    // change can fix it, so point the user straight at switching providers.
-    if let Some(msg) = github_models_retirement_message(body) {
-        return msg;
-    }
-    // GitHub Models "no_access" (usually 403) means the token in use can't reach the model, so it
-    // gets a token-focused message regardless of the status code.
-    if let Some(msg) = no_access_message(body) {
-        return msg;
-    }
     // Ollama "model 'x' not found" (404) just means the model isn't pulled locally.
     if let Some(msg) = ollama_missing_model_message(body) {
         return msg;
     }
     let snippet: String = body.chars().take(300).collect();
     match status.as_u16() {
-        401 | 403 => format!(
-            "The AI provider rejected the request (HTTP {status}). For GitHub Models, check that \
-             your token is valid and has the `models:read` scope. {snippet}"
-        ),
+        401 | 403 => format!("The AI provider rejected the request (HTTP {status}). {snippet}"),
         404 => format!(
             "Model or endpoint not found (HTTP {status}). Check the selected model id. {snippet}"
         ),
         410 => format!(
-            "The AI provider reported this service has been retired (HTTP {status}). If you were \
-             using GitHub Models, switch to Ollama (local) in AI settings. {snippet}"
+            "The AI provider reported this endpoint has been retired (HTTP {status}). {snippet}"
         ),
         429 => format!(
-            "Rate limited by the AI provider (HTTP {status}). The GitHub Models free tier has \
-             per-minute and per-day limits — wait a moment and try again, or switch models."
+            "Rate limited by the AI provider (HTTP {status}). Wait a moment and try again."
         ),
         500..=599 => format!("The AI provider had a server error (HTTP {status}). {snippet}"),
         _ => format!("AI provider error (HTTP {status}). {snippet}"),
     }
-}
-
-/// Detect GitHub Models' retirement responses (HTTP 410, error code `github_models_retirement*`,
-/// e.g. `github_models_retirement_brownout`). GitHub is shutting the free GitHub Models provider
-/// down, so no token change will bring it back — the user has to switch providers. Returns `None`
-/// for unrelated errors.
-fn github_models_retirement_message(body: &str) -> Option<String> {
-    if !body.contains("github_models_retirement") {
-        return None;
-    }
-    Some(
-        "GitHub Models has been retired by GitHub, so it can no longer answer questions — this is \
-         not a problem with your token. In AI settings, switch the provider to \"Ollama (local)\" \
-         to keep using the advisor for free and fully offline: install it from https://ollama.com, \
-         run `ollama pull llama3.1` (or any model), then pick Ollama in Settings. You can also \
-         point the app at another OpenAI-compatible API."
-            .to_string(),
-    )
-}
-
-/// Detect GitHub Models "no access" responses (usually HTTP 403, `code: no_access`). In practice
-/// this means the *token* in use can't reach GitHub Models, not that the account lacks a tier, so
-/// the message points at fixing the token. Returns `None` for any other error.
-fn no_access_message(body: &str) -> Option<String> {
-    if !body.contains("no_access") && !body.contains("No access to model") {
-        return None;
-    }
-    // Best-effort: pull the model id out of "No access to model: <id>".
-    let model = body
-        .split("No access to model:")
-        .nth(1)
-        .and_then(|rest| rest.split(['"', '}']).next())
-        .map(str::trim)
-        .filter(|s| !s.is_empty());
-    let target = match model {
-        Some(m) => format!("the model `{m}`"),
-        None => "that model".to_string(),
-    };
-    Some(format!(
-        "GitHub Models rejected {target} with `no_access`. This almost always means the GitHub \
-         token in use doesn't have GitHub Models access (not a tier limit on your account). In \
-         Settings, click \"Use my GitHub CLI login\" for a token that works automatically, or paste \
-         a token from an account that can use this model."
-    ))
 }
 
 /// Detect Ollama's "model 'x' not found" (HTTP 404) and tell the user to pull it. Returns `None`
@@ -401,38 +337,6 @@ struct ToolChoice {
     message: WireMessage,
 }
 
-/// List available GitHub Models from the catalog (best-effort; used to populate the picker).
-pub async fn list_github_models(api_key: &str) -> Result<Vec<ModelInfo>, AiError> {
-    let resp = http_client()?
-        .get(GITHUB_MODELS_CATALOG)
-        .bearer_auth(api_key)
-        .header("Accept", "application/json")
-        .send()
-        .await
-        .map_err(map_connect_error)?;
-    let status = resp.status();
-    let body = resp.text().await?;
-    if !status.is_success() {
-        return Err(AiError::Message(friendly_http_error(status, &body)));
-    }
-    let raw: serde_json::Value =
-        serde_json::from_str(&body).map_err(|e| AiError::Message(e.to_string()))?;
-    // The catalog is an array of model objects; be tolerant about the exact field names.
-    let items = raw.as_array().cloned().unwrap_or_default();
-    let mut models = Vec::new();
-    for item in items {
-        if let Some(id) = item.get("id").and_then(|v| v.as_str()) {
-            let name = item
-                .get("name")
-                .and_then(|v| v.as_str())
-                .or_else(|| item.get("friendly_name").and_then(|v| v.as_str()))
-                .unwrap_or(id);
-            models.push(ModelInfo { id: id.to_string(), name: name.to_string() });
-        }
-    }
-    Ok(models)
-}
-
 /// List locally-installed Ollama models via its OpenAI-compatible `/models` endpoint.
 pub async fn list_ollama_models(base_url: &str) -> Result<Vec<ModelInfo>, AiError> {
     let url = format!("{}/models", base_url.trim_end_matches('/'));
@@ -462,8 +366,7 @@ pub async fn list_ollama_models(base_url: &str) -> Result<Vec<ModelInfo>, AiErro
 fn map_connect_error(e: reqwest::Error) -> AiError {
     if e.is_connect() {
         AiError::Message(
-            "Couldn't reach the AI provider. If you're using Ollama, make sure it's running \
-             (`ollama serve`). For GitHub Models, check your internet connection."
+            "Couldn't reach Ollama. Make sure it is running (`ollama serve`)."
                 .into(),
         )
     } else if e.is_timeout() {
@@ -480,24 +383,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn no_access_message_extracts_model_id() {
-        let body = r#"{"error":{"code":"no_access","message":"No access to model: openai/gpt-5","details":"No access to model: openai/gpt-5"}}"#;
-        let msg = no_access_message(body).expect("should detect no_access");
-        assert!(msg.contains("openai/gpt-5"), "names the gated model: {msg}");
-        assert!(
-            msg.contains("GitHub CLI login"),
-            "points at the token fix: {msg}"
-        );
-    }
-
-    #[test]
-    fn no_access_message_handles_unknown_model_shape() {
-        let body = r#"{"error":{"code":"no_access"}}"#;
-        let msg = no_access_message(body).expect("should detect no_access by code");
-        assert!(msg.contains("that model"), "falls back gracefully: {msg}");
-    }
-
-    #[test]
     fn ollama_missing_model_message_extracts_and_suggests_pull() {
         let body = r#"{"error":{"message":"model 'llama3.1' not found","type":"not_found_error"}}"#;
         let msg = ollama_missing_model_message(body).expect("should detect missing model");
@@ -511,31 +396,4 @@ mod tests {
         assert!(ollama_missing_model_message("").is_none());
     }
 
-    #[test]
-    fn no_access_message_ignores_other_errors() {
-        assert!(no_access_message(r#"{"error":{"code":"rate_limited"}}"#).is_none());
-        assert!(no_access_message("").is_none());
-    }
-
-    #[test]
-    fn retirement_message_detects_brownout_and_points_to_ollama() {
-        let body = r#"{"error":{"code":"github_models_retirement_brownout","message":"GitHub Models is temporarily unavailable as part of a scheduled retirement brownout."}}"#;
-        let msg = github_models_retirement_message(body).expect("should detect retirement");
-        assert!(msg.contains("retired"), "explains it's retired: {msg}");
-        assert!(msg.contains("Ollama"), "points at Ollama: {msg}");
-    }
-
-    #[test]
-    fn retirement_message_ignores_other_errors() {
-        assert!(github_models_retirement_message(r#"{"error":{"code":"no_access"}}"#).is_none());
-        assert!(github_models_retirement_message("").is_none());
-    }
-
-    #[test]
-    fn friendly_http_error_routes_retirement_410() {
-        let body = r#"{"error":{"code":"github_models_retirement_brownout","message":"..."}}"#;
-        let msg = friendly_http_error(StatusCode::GONE, body);
-        assert!(msg.contains("retired"), "410 brownout gets the retirement copy: {msg}");
-        assert!(msg.contains("Ollama"));
-    }
 }

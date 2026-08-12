@@ -38,6 +38,10 @@ pub fn setup_database<R: Runtime>(app: &App<R>) -> Result<(), Box<dyn std::error
     // "Open mode": secrets (the SQLCipher key + connector tokens) live in a local file in the app
     // data directory rather than the OS keychain, so the app never prompts for the laptop password.
     secret_store::init(&data_dir);
+    // GitHub Models was retired and the Copilot SDK reads the current `gh` login on demand. Remove
+    // the obsolete stored Models token rather than retaining an unused GitHub credential.
+    secret_store::delete("github-models-token")
+        .map_err(|e| format!("Legacy AI credential cleanup failed: {e}"))?;
     // One-time only: pull any secrets still held in the OS keychain (from before open mode) into the
     // file store. This preserves an existing encrypted database — its key is migrated rather than
     // lost — and any connector logins. It is the single remaining keychain prompt; afterwards the

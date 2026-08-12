@@ -4,20 +4,20 @@ import type {
   AiSettings,
   ChatMessage,
   ChatThread,
+  CopilotStatus,
   ModelInfo,
 } from "../types/ai";
 import {
   aiAppendMessage,
   aiChat,
+  aiCopilotStatus,
   aiCreateThread,
   aiDeleteThread,
   aiGetSettings,
   aiGetThreadMessages,
-  aiGithubCliLogin,
   aiListModels,
   aiListThreads,
   aiSaveSettings,
-  aiSetGithubToken,
 } from "../hooks/useFinanceApi";
 import MarkdownMessage from "./MarkdownMessage";
 import ToolTrace from "./ToolTrace";
@@ -32,27 +32,15 @@ interface Props {
 const inputClass =
   "w-full rounded-lg border border-slate-600 bg-slate-800 px-3 py-2 text-sm text-slate-200 placeholder-slate-600 focus:outline-none focus:ring-2 focus:ring-indigo-500";
 
-const GITHUB_TOKEN_SETTINGS = "https://github.com/settings/tokens";
-
 const SUGGESTIONS = [
+  "Find my recurring subscriptions and tell me which ones to review.",
+  "Analyze my spending habits and show the biggest opportunities to improve.",
   "How am I tracking toward my $100k goal?",
-  "What's my savings rate, and where is most of my money going?",
-  "Summarize my net worth across USD and CAD.",
-  "Which spending should I watch this month?",
+  "What tax-planning questions should I ask about my US and Canadian finances?",
 ];
 
-// Free, broadly-available default model, offered as a one-click reset in Settings.
-const RECOMMENDED_GITHUB_MODEL = "openai/gpt-4o-mini";
-
-/**
- * True when a GitHub error looks like the token can't reach GitHub Models (no_access, a rejected
- * request, or a missing scope). The fix is a working token, which the one-click GitHub CLI login
- * provides without creating or pasting a PAT.
- */
-const isGithubAccessError = (msg: string) =>
-  /no_access|access to (the )?model|models:read|rejected the request|doesn't have access/i.test(
-    msg,
-  );
+const isCopilotAccessError = (msg: string) =>
+  /copilot|authenticat|entitlement|gh auth|github cli|github account/i.test(msg);
 
 export default function AdvisorPanel({ open, onOpen, onClose }: Props) {
   const [settings, setSettings] = useState<AiSettings | null>(null);
@@ -68,15 +56,14 @@ export default function AdvisorPanel({ open, onOpen, onClose }: Props) {
   const [threadsOpen, setThreadsOpen] = useState(false);
 
   // Editable settings draft (mirrors `settings` until saved).
-  const [provider, setProvider] = useState<AiProvider>("github");
-  const [githubModel, setGithubModel] = useState("");
+  const [provider, setProvider] = useState<AiProvider>("copilot");
+  const [copilotModel, setCopilotModel] = useState("");
   const [ollamaModel, setOllamaModel] = useState("");
   const [ollamaUrl, setOllamaUrl] = useState("");
   const [includeRealData, setIncludeRealData] = useState(true);
-  const [tokenInput, setTokenInput] = useState("");
   const [savingSettings, setSavingSettings] = useState(false);
-  const [savingToken, setSavingToken] = useState(false);
-  const [cliBusy, setCliBusy] = useState(false);
+  const [copilotStatus, setCopilotStatus] = useState<CopilotStatus | null>(null);
+  const [checkingCopilot, setCheckingCopilot] = useState(false);
   const [models, setModels] = useState<ModelInfo[]>([]);
   const [loadingModels, setLoadingModels] = useState(false);
 
@@ -86,7 +73,7 @@ export default function AdvisorPanel({ open, onOpen, onClose }: Props) {
   const applySettings = useCallback((s: AiSettings) => {
     setSettings(s);
     setProvider(s.provider);
-    setGithubModel(s.github_model);
+    setCopilotModel(s.copilot_model);
     setOllamaModel(s.ollama_model);
     setOllamaUrl(s.ollama_url);
     setIncludeRealData(s.include_real_data);
@@ -132,7 +119,6 @@ export default function AdvisorPanel({ open, onOpen, onClose }: Props) {
     aiGetSettings()
       .then((s) => {
         applySettings(s);
-        if (s.provider === "github" && !s.has_github_token) setShowSettings(true);
       })
       .catch((e) => setError(String(e)));
 
@@ -151,6 +137,10 @@ export default function AdvisorPanel({ open, onOpen, onClose }: Props) {
   useEffect(() => {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "smooth" });
   }, [messages, busy]);
+
+  useEffect(() => {
+    setModels([]);
+  }, [provider]);
 
   // Ensure a thread exists to attach messages to, creating one on demand.
   const ensureThread = useCallback(async (): Promise<number> => {
@@ -222,28 +212,25 @@ export default function AdvisorPanel({ open, onOpen, onClose }: Props) {
     [activeThreadId, newChat],
   );
 
-  // Reuse the local GitHub CLI session (`gh auth token`) as the token — nothing to create or
-  // paste. Returns whether a working token was stored.
-  const useGithubCliLogin = useCallback(async () => {
-    if (cliBusy) return false;
-    setCliBusy(true);
+  const checkCopilotAccess = useCallback(async () => {
+    if (checkingCopilot) return false;
+    setCheckingCopilot(true);
     setError(null);
     try {
-      const s = await aiGithubCliLogin();
-      applySettings(s);
+      setCopilotStatus(await aiCopilotStatus());
       return true;
     } catch (e) {
+      setCopilotStatus(null);
       setError(String(e));
       return false;
     } finally {
-      setCliBusy(false);
+      setCheckingCopilot(false);
     }
-  }, [cliBusy, applySettings]);
+  }, [checkingCopilot]);
 
-  // One-click recovery from a token/no-access error: grab a CLI token, then retry the last message.
-  const cliLoginAndRetry = useCallback(async () => {
-    if (await useGithubCliLogin()) await retry();
-  }, [useGithubCliLogin, retry]);
+  const checkCopilotAndRetry = useCallback(async () => {
+    if (await checkCopilotAccess()) await retry();
+  }, [checkCopilotAccess, retry]);
 
   const handleSaveSettings = async () => {
     setSavingSettings(true);
@@ -251,14 +238,13 @@ export default function AdvisorPanel({ open, onOpen, onClose }: Props) {
     try {
       const saved = await aiSaveSettings({
         provider,
-        github_model: githubModel,
+        copilot_model: copilotModel,
         ollama_model: ollamaModel,
         ollama_url: ollamaUrl,
         include_real_data: includeRealData,
       });
       applySettings(saved);
-      const needsToken = saved.provider === "github" && !saved.has_github_token;
-      if (!needsToken) setShowSettings(false);
+      setShowSettings(false);
     } catch (e) {
       setError(String(e));
     } finally {
@@ -266,25 +252,11 @@ export default function AdvisorPanel({ open, onOpen, onClose }: Props) {
     }
   };
 
-  const handleSaveToken = async () => {
-    setSavingToken(true);
-    setError(null);
-    try {
-      const has = await aiSetGithubToken(tokenInput);
-      setTokenInput("");
-      setSettings((s) => (s ? { ...s, has_github_token: has } : s));
-    } catch (e) {
-      setError(String(e));
-    } finally {
-      setSavingToken(false);
-    }
-  };
-
   const handleLoadModels = async () => {
     setLoadingModels(true);
     setError(null);
     try {
-      setModels(await aiListModels());
+      setModels(await aiListModels(provider, ollamaUrl));
     } catch (e) {
       setError(String(e));
     } finally {
@@ -310,8 +282,9 @@ export default function AdvisorPanel({ open, onOpen, onClose }: Props) {
     );
   }
 
-  const githubReady = settings?.has_github_token ?? false;
-  const canChat = provider === "ollama" || githubReady;
+  const canChat = settings != null;
+  const activeProvider = settings?.provider ?? provider;
+  const activeIncludeRealData = settings?.include_real_data ?? includeRealData;
   const activeThread = threads.find((t) => t.id === activeThreadId);
   const headerTitle = activeThread?.title ?? "Finance brain";
 
@@ -358,20 +331,20 @@ export default function AdvisorPanel({ open, onOpen, onClose }: Props) {
 
       <div className="border-b border-slate-800 px-3 py-1.5">
         <span className="rounded-full border border-slate-700 bg-slate-800 px-2 py-0.5 text-[10px] uppercase tracking-wider text-slate-400">
-          {provider === "github" ? "GitHub Models" : "Ollama · local"}
+          {activeProvider === "copilot" ? "GitHub Copilot" : "Ollama · local"}
         </span>
       </div>
 
       {error && (
         <div className="mx-3 mt-3 rounded-lg border border-red-700/50 bg-red-900/20 px-3 py-2 text-xs text-red-300">
           <p>{error}</p>
-          {provider === "github" && isGithubAccessError(error) && messages.length > 0 && (
+          {activeProvider === "copilot" && isCopilotAccessError(error) && messages.length > 0 && (
             <button
-              onClick={() => void cliLoginAndRetry()}
-              disabled={busy || cliBusy}
+              onClick={() => void checkCopilotAndRetry()}
+              disabled={busy || checkingCopilot}
               className="mt-2 rounded-md border border-red-600/60 bg-red-800/40 px-2.5 py-1 font-medium text-red-100 hover:bg-red-800/70 disabled:opacity-50"
             >
-              {cliBusy ? "Signing in…" : "Use my GitHub CLI login and retry"}
+              {checkingCopilot ? "Checking…" : "Check Copilot access and retry"}
             </button>
           )}
         </div>
@@ -381,21 +354,17 @@ export default function AdvisorPanel({ open, onOpen, onClose }: Props) {
         <SettingsPanel
           provider={provider}
           setProvider={setProvider}
-          githubModel={githubModel}
-          setGithubModel={setGithubModel}
+          copilotModel={copilotModel}
+          setCopilotModel={setCopilotModel}
           ollamaModel={ollamaModel}
           setOllamaModel={setOllamaModel}
           ollamaUrl={ollamaUrl}
           setOllamaUrl={setOllamaUrl}
           includeRealData={includeRealData}
           setIncludeRealData={setIncludeRealData}
-          tokenInput={tokenInput}
-          setTokenInput={setTokenInput}
-          hasToken={githubReady}
-          onSaveToken={handleSaveToken}
-          savingToken={savingToken}
-          onUseCliLogin={useGithubCliLogin}
-          cliBusy={cliBusy}
+          copilotStatus={copilotStatus}
+          onCheckCopilot={checkCopilotAccess}
+          checkingCopilot={checkingCopilot}
           models={models}
           loadingModels={loadingModels}
           onLoadModels={handleLoadModels}
@@ -426,7 +395,7 @@ export default function AdvisorPanel({ open, onOpen, onClose }: Props) {
                 </div>
                 {!canChat && (
                   <p className="text-xs text-amber-400">
-                    Add a GitHub token in Settings to start (or switch to Ollama).
+                    Loading AI settings…
                   </p>
                 )}
               </div>
@@ -467,16 +436,16 @@ export default function AdvisorPanel({ open, onOpen, onClose }: Props) {
               </button>
             </div>
             <p className="mt-2 text-[11px] text-slate-500">
-              {provider === "github" ? (
+              {activeProvider === "copilot" ? (
                 <>
-                  {includeRealData
-                    ? "Your real balances & transactions are sent to GitHub Models to answer."
-                    : "Privacy mode: only rounded aggregates are sent to GitHub Models."}
+                  {activeIncludeRealData
+                    ? "Your real balances & transactions are sent through GitHub Copilot to answer."
+                    : "Privacy mode: only this question and rounded aggregates are sent through GitHub Copilot."}
                 </>
               ) : (
                 "Running locally via Ollama — nothing leaves your device."
               )}{" "}
-              Educational only, not licensed financial advice.
+              Educational planning only; verify tax guidance before filing.
             </p>
           </div>
         </>
@@ -557,21 +526,17 @@ function Bubble({ message }: { message: ChatMessage }) {
 interface SettingsProps {
   provider: AiProvider;
   setProvider: (p: AiProvider) => void;
-  githubModel: string;
-  setGithubModel: (v: string) => void;
+  copilotModel: string;
+  setCopilotModel: (v: string) => void;
   ollamaModel: string;
   setOllamaModel: (v: string) => void;
   ollamaUrl: string;
   setOllamaUrl: (v: string) => void;
   includeRealData: boolean;
   setIncludeRealData: (v: boolean) => void;
-  tokenInput: string;
-  setTokenInput: (v: string) => void;
-  hasToken: boolean;
-  onSaveToken: () => void;
-  savingToken: boolean;
-  onUseCliLogin: () => void;
-  cliBusy: boolean;
+  copilotStatus: CopilotStatus | null;
+  onCheckCopilot: () => void;
+  checkingCopilot: boolean;
   models: ModelInfo[];
   loadingModels: boolean;
   onLoadModels: () => void;
@@ -580,7 +545,7 @@ interface SettingsProps {
 }
 
 function SettingsPanel(p: SettingsProps) {
-  const isGithub = p.provider === "github";
+  const isCopilot = p.provider === "copilot";
   return (
     <div className="flex-1 space-y-5 overflow-y-auto px-4 py-4">
       {/* Provider */}
@@ -588,17 +553,17 @@ function SettingsPanel(p: SettingsProps) {
         <label className="mb-1.5 block text-xs font-medium text-slate-400">Provider</label>
         <div className="grid grid-cols-2 gap-1 rounded-lg border border-slate-700 bg-slate-800/60 p-1">
           <button
-            onClick={() => p.setProvider("github")}
+            onClick={() => p.setProvider("copilot")}
             className={`rounded-md px-3 py-1.5 text-xs ${
-              isGithub ? "bg-indigo-600 text-white" : "text-slate-400 hover:bg-slate-800"
+              isCopilot ? "bg-indigo-600 text-white" : "text-slate-400 hover:bg-slate-800"
             }`}
           >
-            GitHub Models (retired)
+            GitHub Copilot
           </button>
           <button
             onClick={() => p.setProvider("ollama")}
             className={`rounded-md px-3 py-1.5 text-xs ${
-              !isGithub ? "bg-indigo-600 text-white" : "text-slate-400 hover:bg-slate-800"
+              !isCopilot ? "bg-indigo-600 text-white" : "text-slate-400 hover:bg-slate-800"
             }`}
           >
             Ollama (local, free)
@@ -606,64 +571,31 @@ function SettingsPanel(p: SettingsProps) {
         </div>
       </div>
 
-      {isGithub ? (
-        <>
-          {/* GitHub Models has been retired by GitHub — warn and steer to Ollama. */}
-          <div className="rounded-lg border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-[11px] leading-relaxed text-amber-200">
-            ⚠️ GitHub has <span className="font-semibold">retired GitHub Models</span>, so this
-            provider no longer returns answers (requests fail with HTTP 410). Switch to{" "}
-            <span className="font-semibold">Ollama (local, free)</span> above to keep using the
-            advisor — it runs on your own machine and nothing leaves your device.
+      {isCopilot ? (
+        <div className="space-y-2">
+          <div className="rounded-lg border border-indigo-500/40 bg-indigo-500/10 px-3 py-2 text-[11px] leading-relaxed text-indigo-100">
+            Uses the official GitHub Copilot SDK and your existing Copilot subscription. The bundled
+            runtime runs in isolated mode with only TrueNorth&apos;s read-only finance tools — no
+            shell, files, coding tools, or cloud session history.
           </div>
-          {/* Token */}
-          <div>
-            <label className="mb-1.5 block text-xs font-medium text-slate-400">
-              GitHub token{" "}
-              <span className={p.hasToken ? "text-emerald-400" : "text-amber-400"}>
-                {p.hasToken ? "· saved" : "· not set"}
-              </span>
-            </label>
-            <button
-              onClick={p.onUseCliLogin}
-              disabled={p.cliBusy}
-              className="w-full rounded-lg bg-indigo-600 px-3 py-2 text-xs font-medium text-white hover:bg-indigo-500 disabled:opacity-40"
-            >
-              {p.cliBusy ? "Signing in…" : "Use my GitHub CLI login (no token needed)"}
-            </button>
-            <p className="mt-1 text-[11px] text-slate-500">
-              Reuses your <span className="font-mono text-slate-400">gh auth login</span> session —
-              the easiest option if you have the GitHub CLI installed. Nothing to paste.
+          <button
+            onClick={p.onCheckCopilot}
+            disabled={p.checkingCopilot}
+            className="w-full rounded-lg bg-indigo-600 px-3 py-2 text-xs font-medium text-white hover:bg-indigo-500 disabled:opacity-40"
+          >
+            {p.checkingCopilot ? "Checking…" : "Check my Copilot access"}
+          </button>
+          <p className="text-[11px] text-slate-500">
+            Uses your local GitHub CLI session. If needed, run{" "}
+            <span className="font-mono text-slate-400">gh auth login</span> with the GitHub account
+            that has Copilot.
+          </p>
+          {p.copilotStatus && (
+            <p className="rounded-lg border border-emerald-700/50 bg-emerald-900/20 px-3 py-2 text-[11px] text-emerald-300">
+              {p.copilotStatus.message}
             </p>
-
-            <div className="my-3 flex items-center gap-2 text-[10px] uppercase tracking-wide text-slate-600">
-              <span className="h-px flex-1 bg-slate-700" />
-              or paste a token
-              <span className="h-px flex-1 bg-slate-700" />
-            </div>
-
-            <div className="flex gap-2">
-              <input
-                type="password"
-                value={p.tokenInput}
-                onChange={(e) => p.setTokenInput(e.target.value)}
-                placeholder={p.hasToken ? "Replace token…" : "ghp_… or github_pat_…"}
-                className={inputClass}
-              />
-              <button
-                onClick={p.onSaveToken}
-                disabled={p.savingToken || !p.tokenInput.trim()}
-                className="shrink-0 rounded-lg bg-indigo-600 px-3 py-2 text-xs font-medium text-white hover:bg-indigo-500 disabled:opacity-40"
-              >
-                {p.savingToken ? "Saving…" : "Save"}
-              </button>
-            </div>
-            <p className="mt-1 text-[11px] text-slate-500">
-              Needs a token with GitHub Models access — for a fine-grained token, add the{" "}
-              <span className="font-mono text-slate-400">Models</span> permission (read-only) at{" "}
-              <span className="font-mono text-slate-400">{GITHUB_TOKEN_SETTINGS}</span>.
-            </p>
-          </div>
-        </>
+          )}
+        </div>
       ) : (
         <div>
           <label className="mb-1.5 block text-xs font-medium text-slate-400">Ollama URL</label>
@@ -676,7 +608,7 @@ function SettingsPanel(p: SettingsProps) {
           <p className="mt-1 text-[11px] text-slate-500">
             Runs models locally. Install from ollama.com, then{" "}
             <span className="font-mono text-slate-400">ollama pull llama3.1</span>. TrueNorth
-            automatically uses a model you've already pulled.
+            automatically uses a model you've already pulled and only accepts loopback URLs.
           </p>
         </div>
       )}
@@ -686,14 +618,6 @@ function SettingsPanel(p: SettingsProps) {
         <div className="mb-1.5 flex items-center justify-between">
           <label className="text-xs font-medium text-slate-400">Model</label>
           <div className="flex items-center gap-3">
-            {isGithub && p.githubModel !== RECOMMENDED_GITHUB_MODEL && (
-              <button
-                onClick={() => p.setGithubModel(RECOMMENDED_GITHUB_MODEL)}
-                className="text-[11px] text-indigo-400 hover:text-indigo-300"
-              >
-                Use recommended
-              </button>
-            )}
             <button
               onClick={p.onLoadModels}
               disabled={p.loadingModels}
@@ -704,16 +628,24 @@ function SettingsPanel(p: SettingsProps) {
           </div>
         </div>
         <input
-          value={isGithub ? p.githubModel : p.ollamaModel}
-          onChange={(e) => (isGithub ? p.setGithubModel(e.target.value) : p.setOllamaModel(e.target.value))}
-          placeholder={isGithub ? "openai/gpt-4o-mini" : "llama3.1"}
+          value={isCopilot ? p.copilotModel : p.ollamaModel}
+          onChange={(e) =>
+            isCopilot ? p.setCopilotModel(e.target.value) : p.setOllamaModel(e.target.value)
+          }
+          placeholder={isCopilot ? "auto" : "llama3.1"}
           className={inputClass}
         />
+        {isCopilot && (
+          <p className="mt-1 text-[11px] text-slate-500">
+            Leave as <span className="font-mono text-slate-400">auto</span> to use Copilot&apos;s
+            current default, or load the models available to your plan.
+          </p>
+        )}
         {p.models.length > 0 && (
           <select
             onChange={(e) => {
               if (!e.target.value) return;
-              isGithub ? p.setGithubModel(e.target.value) : p.setOllamaModel(e.target.value);
+              isCopilot ? p.setCopilotModel(e.target.value) : p.setOllamaModel(e.target.value);
             }}
             value=""
             className={`${inputClass} mt-2`}
@@ -741,9 +673,10 @@ function SettingsPanel(p: SettingsProps) {
           <span className="text-xs text-slate-300">
             Send my real balances & transactions for the best answers.
             <span className="mt-0.5 block text-[11px] text-slate-500">
-              Off = privacy mode: only rounded aggregates (net worth to the nearest $1,000, savings
-              rate, goal progress) are shared. With Ollama everything stays on your device either
-              way.
+              With GitHub Copilot, off means only the current question and rounded aggregates (net
+              worth to the nearest $1,000, savings rate, goal progress) are shared; prior chat turns
+              are not. Exact tool results leave your device only when this is on. With Ollama
+              everything stays local either way.
             </span>
           </span>
         </label>

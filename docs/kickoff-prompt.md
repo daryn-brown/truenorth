@@ -1,5 +1,8 @@
 # Kickoff prompt — first build session
 
+> **Historical prompt:** its GitHub Models instructions are superseded by the shipped GitHub Copilot
+> SDK provider documented in [`ai.md`](ai.md).
+
 Open this folder as a Copilot **project**, start a **new session**, and paste the prompt
 below to begin **Phase 0 → Phase 1**. (Source: `docs/blueprint.md` §11.)
 

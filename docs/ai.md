@@ -16,19 +16,45 @@ runs:
 
 | Provider | Cost | Where it runs | What's sent off-device |
 | --- | --- | --- | --- |
+| **GitHub Copilot** | Uses your Copilot plan | GitHub-hosted models through the official Copilot SDK | Conversation + minimal account context + requested tool results (or only the current question and rounded aggregates in privacy mode) |
 | **Ollama** | Free | Fully local on your machine | Nothing — never leaves your device |
-| **GitHub Models** | ⚠️ **Retired by GitHub** | GitHub's API | Your question + a snapshot of your finances (or only rounded aggregates in privacy mode) |
 
-> **⚠️ GitHub Models has been retired.** GitHub has shut down the free GitHub Models inference
-> service, so it now returns an error (HTTP 410) instead of answers — no token change can bring it
-> back. **Use Ollama (below) to keep the advisor working for free and fully offline.** If GitHub
-> Models is your selected provider, TrueNorth will tell you it's retired and to switch. You can also
-> point the app at any other OpenAI-compatible API.
+The old **GitHub Models** provider was retired. TrueNorth now uses the official **GitHub Copilot
+SDK**, which can consume the Copilot access attached to your GitHub account instead of requiring a
+separate model API key.
 
-## Option A — Ollama (fully local, free, recommended)
+## Option A — GitHub Copilot (your existing subscription)
+
+1. Install the [GitHub CLI](https://cli.github.com/) and sign in with the account that has Copilot:
+   ```sh
+   gh auth login
+   ```
+2. In **🧠 Ask AI → ⚙️ Settings**, select **GitHub Copilot** and click **Check my Copilot access**.
+   TrueNorth reads the local `gh` login for each app session; it never displays or stores that token.
+3. Leave the model set to `auto`, or click **Load available models** to choose one included in your
+   plan.
+
+TrueNorth bundles the version-matched Copilot runtime, so a separate `copilot` executable is not
+required. The runtime is started in the SDK's isolated **empty mode**:
+
+- only TrueNorth's eight read-only finance tools are available;
+- shell, filesystem, coding, MCP, skills, and host-Git capabilities are disabled;
+- each transient SDK session is disconnected and permanently deleted after the answer (and any
+  leftover sessions from an interrupted prior run are deleted on startup);
+- memory, telemetry, and remote export are disabled;
+- durable chats remain only in TrueNorth's encrypted local database.
+
+The model request and any finance-tool results still travel through GitHub. Individual Copilot
+accounts should review GitHub's **model training and improvements** setting before sharing exact
+financial records.
+
+## Option B — Ollama (fully local, free)
 
 [Ollama](https://ollama.com) runs open models entirely on your machine — nothing is ever sent off
-your device, regardless of the privacy setting. It's now the recommended provider.
+your device, regardless of the privacy setting. Use it when keeping exact financial data local is
+more important than using Copilot-hosted models. TrueNorth enforces this boundary by accepting only
+loopback Ollama URLs (`localhost`, `127.0.0.1`, or `::1`) while disabling HTTP proxies and redirects,
+not remote OpenAI-compatible endpoints.
 
 1. Install Ollama and pull a model:
    ```sh
@@ -41,27 +67,6 @@ your device, regardless of the privacy setting. It's now the recommended provide
    is — so you can also just click **Load available models** to pick a specific one.
 3. Ask away. If Ollama isn't running you'll get a "couldn't reach the AI provider" hint — start it
    with `ollama serve` (or just launch the app).
-
-## Option B — GitHub Models (retired)
-
-> **This provider no longer works** — GitHub retired the GitHub Models inference API, so requests
-> fail with HTTP 410. The steps below are kept for reference only; use **Ollama** instead.
-
-[GitHub Models](https://github.com/marketplace/models) previously gave free access to frontier models
-(OpenAI GPT-4o, etc.) using a **GitHub personal access token** as the API key.
-
-1. Create a token at [**github.com/settings/tokens**](https://github.com/settings/tokens).
-   - A **fine-grained** token works; the only permission it needs is the **`models:read`** scope
-     (under *Account permissions → Models*). A classic token with no extra scopes also works.
-   - You don't need to grant it any repository access.
-2. In TrueNorth, open **🧠 Ask AI → ⚙️ Settings**, make sure **GitHub Models** is selected, paste the
-   token into **GitHub token**, and click **Save**. The token is stored locally (never shown again,
-   never sent anywhere except GitHub's API as the bearer token).
-3. Optionally click **Load available models** and pick one. The default is `openai/gpt-4o-mini`.
-4. Ask away.
-
-Model ids are `publisher/model` (for example `openai/gpt-4o-mini`, `openai/gpt-4o`,
-`meta/llama-3.1-8b-instruct`).
 
 ## How answers are produced
 
@@ -93,18 +98,29 @@ The data-sharing toggle in **🧠 Ask AI → ⚙️ Settings → Data sharing** 
 
 - **Send my real balances & transactions (default).** Enables the agentic tools above, so the model
   can pull exact figures and line-item detail — the most accurate answers. Recommended for Ollama
-  always, and fine for GitHub Models if you're comfortable sending the data to GitHub's API.
+  always, and available for GitHub Copilot only when you're comfortable sending the tool results
+  through GitHub.
 - **Privacy mode (toggle off).** Tools are disabled. Instead, only a **rounded-aggregate snapshot**
-  is sent: net worth to the nearest $1,000, account count, savings rate, and goal progress — no
-  exact balances, holdings, or individual transactions. Useful if you want GitHub Models' quality
-  without sharing line-item detail.
+  is available: net worth to the nearest $1,000, account count, savings rate, and goal progress — no
+  exact balances, holdings, or individual transactions. With Copilot, only that snapshot and the
+  current question are sent; prior saved turns are omitted because they might contain exact figures
+  from an earlier mode. Useful when you want Copilot's model quality without sharing line-item
+  detail.
+
+The separate **Refine categories with AI** action needs merchant-level transaction details. When
+Copilot is selected, TrueNorth blocks that action in privacy mode; enable real-data sharing
+explicitly or use local Ollama.
 
 With **Ollama**, the data never leaves your machine either way, so privacy mode mainly just shortens
 the prompt.
 
 The advisor is grounded: it's instructed to answer **only** from your data and to say so when the
-information it needs isn't there, rather than inventing numbers. It's an **educational tool, not
-licensed financial or tax advice**.
+information it needs isn't there, rather than inventing numbers. For tax questions it must establish
+the tax year, country, state/province, residency, and filing status; keep US and Canadian rules
+separate; and avoid inventing rates, thresholds, deadlines, or treaty results. It is an
+**educational tax-planning tool, not a licensed tax professional or a source of current tax law** —
+verify material guidance against IRS/CRA sources or a qualified cross-border professional before
+filing.
 
 ## Saved chats (threads)
 
@@ -117,15 +133,12 @@ restarts and keep their full context:
 - Assistant turns store their tool-call trace alongside the text, so a reopened chat still shows
   what the model looked at.
 
-## Where settings and the token live
+## Where settings and authentication live
 
 - Provider, model, URL, and the data-sharing toggle are stored in the app's local `app_settings`
   table.
 - Saved chats live in the encrypted database too: `chat_threads` (one row per conversation) and
   `chat_messages` (its turns, including the tool-call trace). Deleting a thread cascade-deletes its
   messages.
-- The GitHub token is stored in the local secret store (`secrets.json` in the app data folder, the
-  same place the database key lives in [open mode](../README.md#privacy)). It is never written to
-  the repo and never returned to the UI after you save it.
-
-To remove the token, clear the **GitHub token** field and save, or just switch to Ollama.
+- TrueNorth does **not** store a Copilot token. It asks the local GitHub CLI for the currently
+  authenticated account when starting the bundled Copilot runtime.
