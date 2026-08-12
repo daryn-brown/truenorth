@@ -1,5 +1,8 @@
 # Plan — Cross-border finance "second brain": Transparency & Decision-Making MVP
 
+> **Historical plan:** references to GitHub Models describe the original design. The shipped cloud
+> provider is now the GitHub Copilot SDK; see [`ai.md`](ai.md) for current setup and privacy behavior.
+
 > Companion to the research report:
 > `files/research/i-am-in-a-unique-situation-where-i-inter.md` (deep detail, citations, connector matrix).
 > This plan is the **actionable build plan** for a **new app, separate from TrendWave**.

@@ -21,8 +21,6 @@ pub const SIMPLEFIN_ACCESS_URL: &str = "simplefin-access-url";
 /// it's the single durable secret for the direct Questrade connection (the short-lived access
 /// token is never persisted).
 pub const QUESTRADE_REFRESH_TOKEN: &str = "questrade-refresh-token";
-/// Secret-store entry name for the GitHub Models personal access token (the AI advisor's key).
-pub const GITHUB_MODELS_TOKEN: &str = "github-models-token";
 /// Secret-store entry name for the user's Teller enrollments — a JSON array of `{ access_token,
 /// institution, enrollment_id }`. Each Teller Connect enrollment yields one access token, and an
 /// access token is useless without the matching client certificate, so it's treated as a secret.

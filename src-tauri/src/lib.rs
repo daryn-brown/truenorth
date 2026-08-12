@@ -1,5 +1,5 @@
 mod commands;
-// Model-agnostic AI advisor layer (GitHub Models / Ollama transport). The grounded-context
+// Model-agnostic AI advisor layer (GitHub Copilot SDK / Ollama transport). The grounded-context
 // builder and Tauri commands live in `commands::ai`.
 mod ai;
 // Connector groundwork shared by Phase 2+ providers. The SnapTrade connector under
@@ -25,8 +25,14 @@ pub fn run() {
                     .plugin(tauri_plugin_updater::Builder::new().build())?;
                 app.handle().plugin(tauri_plugin_process::init())?;
             }
+            let copilot_state_dir = app
+                .path()
+                .app_cache_dir()?
+                .join(ai::copilot::RUNTIME_STATE_DIR_NAME);
+            ai::copilot::clear_runtime_state(&copilot_state_dir)?;
             db::setup_database(app).map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
             app.manage(connector::ConnectorRegistry::new());
+            app.manage(ai::copilot::CopilotRuntime::default());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -78,8 +84,7 @@ pub fn run() {
             commands::teller::teller_disconnect,
             commands::ai::ai_get_settings,
             commands::ai::ai_save_settings,
-            commands::ai::ai_set_github_token,
-            commands::ai::ai_github_cli_login,
+            commands::ai::ai_copilot_status,
             commands::ai::ai_list_models,
             commands::ai::ai_chat,
             commands::ai::ai_categorize_transactions,

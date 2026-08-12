@@ -1,5 +1,8 @@
 # Blueprint: A Cross-Border "Second Brain" for Your Financial Life
 
+> **Historical blueprint:** GitHub Models references below capture the original research. The shipped
+> cloud provider is now the GitHub Copilot SDK; see [`ai.md`](ai.md) for current behavior.
+
 **Prepared:** 2026-06-19
 **Context:** You interned in the US in 2024 (opened US bank + brokerage accounts), now live in Canada on a temporary visa (Canadian bank + brokerage accounts). You currently track net worth by pasting screenshots into a Gemini chat. You want something more granular — connect all accounts, review transactions, track net worth, set goals — as a separate app from TrendWave. Your existing TrendWave app is a **local-first Tauri v2 (Rust + React/TS + SQLite)** desktop app, so you already have the exact skill set this project needs.
 

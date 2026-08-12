@@ -1,6 +1,6 @@
 [package]
 name = "truenorth"
-version = "1.7.4"
+version = "1.8.0"
 description = "Local-first, privacy-first desktop app for cross-border (US + Canada) personal finances."
 authors = ["Daryn Brown"]
 edition = "2021"
@@ -54,6 +54,10 @@ keyring = { version = "3" }
 # DB encryption key generation + hex encoding
 rand = "0.8"
 hex = "0.4"
+
+# Official GitHub Copilot SDK. The pinned preview includes its version-matched CLI runtime so the
+# desktop app can use the local GitHub login without requiring a separate `copilot` installation.
+github-copilot-sdk = "=1.0.10-preview.0"
 
 # Real OS keychain backends for `keyring`, enabled per-target so the DB encryption key actually
 # persists (macOS Keychain / Windows Credential Manager). Without these the key is lost on exit and

@@ -1,10 +1,12 @@
 import { invoke } from "@tauri-apps/api/core";
 import type {
   AiChatResponse,
+  AiProvider,
   AiSettings,
   AiSettingsInput,
   ChatMessage,
   ChatThread,
+  CopilotStatus,
   ModelInfo,
   StoredMessage,
   ToolStep,
@@ -250,17 +252,16 @@ export const aiGetSettings = (): Promise<AiSettings> =>
 export const aiSaveSettings = (settings: AiSettingsInput): Promise<AiSettings> =>
   invoke("ai_save_settings", { settings });
 
-/** Store (or clear, with an empty string) the GitHub Models token. Returns whether one is set. */
-export const aiSetGithubToken = (token: string): Promise<boolean> =>
-  invoke("ai_set_github_token", { token });
+/** Verify the local GitHub CLI account has an active Copilot entitlement. */
+export const aiCopilotStatus = (): Promise<CopilotStatus> =>
+  invoke("ai_copilot_status");
 
-/** Reuse the local GitHub CLI session (`gh auth token`) as the GitHub Models token. */
-export const aiGithubCliLogin = (): Promise<AiSettings> =>
-  invoke("ai_github_cli_login");
-
-/** List models for the active provider (GitHub catalog or local Ollama). */
-export const aiListModels = (): Promise<ModelInfo[]> =>
-  invoke("ai_list_models");
+/** List models for the active provider (GitHub Copilot subscription or local Ollama). */
+export const aiListModels = (
+  provider?: AiProvider,
+  ollamaUrl?: string,
+): Promise<ModelInfo[]> =>
+  invoke("ai_list_models", { provider, ollamaUrl });
 
 /** Send the conversation; the advisor calls finance tools on demand and returns a tool trace. */
 export const aiChat = (messages: ChatMessage[]): Promise<AiChatResponse> =>
