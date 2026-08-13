@@ -78,10 +78,10 @@ export default function ImportModal({ isOpen, onClose, onImported }: Props) {
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm"
+      className="tn-modal-overlay fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm"
       onClick={(e) => e.target === e.currentTarget && onClose()}
     >
-      <div className="w-full max-w-lg rounded-2xl border border-slate-700 bg-slate-900 p-6 shadow-2xl">
+      <div className="tn-modal w-full max-w-lg rounded-2xl border border-slate-700 bg-slate-900 p-6 shadow-2xl">
         <h2 className="text-lg font-semibold text-white mb-1">Import data</h2>
         <p className="text-xs text-slate-400 mb-5">
           Seed accounts and historical balances from JSON or CSV. Re-importing the
@@ -95,7 +95,7 @@ export default function ImportModal({ isOpen, onClose, onImported }: Props) {
             {csv ? (
               <div className="flex items-center justify-between rounded-lg border border-slate-700 bg-slate-800 px-3 py-2 text-sm text-slate-300">
                 <span>
-                  📄 {csv.name}{" "}
+                  {csv.name}{" "}
                   <span className="text-slate-500">(CSV will be imported)</span>
                 </span>
                 <button

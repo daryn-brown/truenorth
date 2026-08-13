@@ -89,7 +89,7 @@ export default function SeattleSimulatorCard({ projection, loading, onUpdate }: 
 
   if (loading && !projection) {
     return (
-      <div className="rounded-2xl border border-slate-700 bg-slate-900/40 p-6">
+      <div className="tn-card tn-card--simulator rounded-2xl border border-slate-700 bg-slate-900/40 p-6">
         <div className="h-56 animate-pulse rounded-lg bg-slate-800" />
       </div>
     );
@@ -139,7 +139,7 @@ export default function SeattleSimulatorCard({ projection, loading, onUpdate }: 
   };
 
   return (
-    <div className="flex h-full flex-col rounded-2xl border border-slate-700 bg-gradient-to-br from-slate-800 to-slate-900 p-6 shadow-xl">
+    <div className="tn-card tn-card--simulator simulator-card flex h-full flex-col rounded-2xl border border-slate-700 bg-gradient-to-br from-slate-800 to-slate-900 p-6 shadow-xl">
       {/* Header */}
       <div className="flex items-start justify-between gap-3">
         <div>
@@ -210,17 +210,17 @@ export default function SeattleSimulatorCard({ projection, loading, onUpdate }: 
       <div className="mt-4">
         <ResponsiveContainer width="100%" height={200}>
           <LineChart data={chartData} margin={{ top: 6, right: 8, bottom: 0, left: 0 }}>
-            <CartesianGrid stroke="#1e293b" vertical={false} />
+            <CartesianGrid stroke="rgba(255,255,255,0.06)" vertical={false} />
             <XAxis
               dataKey="date"
-              tick={{ fill: "#64748b", fontSize: 11 }}
+              tick={{ fill: "#746d80", fontSize: 11 }}
               tickLine={false}
               axisLine={false}
               interval={tickInterval}
               tickFormatter={monthLabel}
             />
             <YAxis
-              tick={{ fill: "#64748b", fontSize: 11 }}
+              tick={{ fill: "#746d80", fontSize: 11 }}
               tickLine={false}
               axisLine={false}
               width={52}
@@ -228,9 +228,9 @@ export default function SeattleSimulatorCard({ projection, loading, onUpdate }: 
             />
             <Tooltip
               contentStyle={{
-                background: "#1e293b",
-                border: "1px solid #334155",
-                borderRadius: 8,
+                background: "#0d0b1a",
+                border: "1px solid rgba(198,168,255,.18)",
+                borderRadius: 12,
                 fontSize: 12,
               }}
               labelFormatter={(v: string) => monthLabel(v)}
@@ -241,15 +241,15 @@ export default function SeattleSimulatorCard({ projection, loading, onUpdate }: 
             />
             <ReferenceLine
               x={projection.transition_date}
-              stroke="#f59e0b"
+              stroke="#e378d3"
               strokeDasharray="4 4"
-              label={{ value: "Move", fill: "#f59e0b", fontSize: 11, position: "top" }}
+              label={{ value: "Move", fill: "#e9a4de", fontSize: 11, position: "top" }}
             />
             {showCurrent && (
               <Line
                 type="monotone"
                 dataKey="current"
-                stroke="#6366f1"
+                stroke="#9d7cff"
                 strokeWidth={2}
                 dot={false}
               />
@@ -258,7 +258,7 @@ export default function SeattleSimulatorCard({ projection, loading, onUpdate }: 
               <Line
                 type="monotone"
                 dataKey="seattle"
-                stroke="#f59e0b"
+                stroke="#e378d3"
                 strokeWidth={2}
                 dot={false}
               />
@@ -279,7 +279,7 @@ export default function SeattleSimulatorCard({ projection, loading, onUpdate }: 
         </span>{" "}
         and still climb to{" "}
         <span className="font-semibold text-white">{usd(projection.seattle_end_usd)}</span> by{" "}
-        {monthLabel(endDate)}. 🧭
+        {monthLabel(endDate)}.
       </p>
 
       {/* Assumptions editor */}
@@ -288,7 +288,7 @@ export default function SeattleSimulatorCard({ projection, loading, onUpdate }: 
           onClick={() => (editing ? cancel() : setEditing(true))}
           className="text-xs font-medium text-slate-400 hover:text-slate-200"
         >
-          {editing ? "× Close assumptions" : "⚙ Adjust assumptions"}
+          {editing ? "Close assumptions" : "Adjust assumptions"}
         </button>
 
         {editing && form && (

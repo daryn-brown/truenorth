@@ -8,9 +8,31 @@
   box-sizing: border-box;
 }
 
+html {
+  min-width: 320px;
+  scroll-behavior: smooth;
+}
+
 body {
   margin: 0;
+  min-width: 320px;
+  min-height: 100vh;
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
   background: #020617;
   -webkit-font-smoothing: antialiased;
+}
+
+button,
+a {
+  font: inherit;
+}
+
+.app-loading {
+  display: grid;
+  min-height: 100vh;
+  color: #a78bfa;
+  background: #05050b;
+  font-size: 0.8rem;
+  letter-spacing: 0.08em;
+  place-items: center;
 }

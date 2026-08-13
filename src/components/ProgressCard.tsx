@@ -55,7 +55,7 @@ export default function ProgressCard({ metrics, loading, onUpdate }: Props) {
 
   if (loading && !metrics) {
     return (
-      <div className="flex h-full flex-col rounded-2xl border border-slate-700 bg-slate-900/40 p-6">
+      <div className="tn-card tn-card--health flex h-full flex-col rounded-2xl border border-slate-700 bg-slate-900/40 p-6">
         <div className="h-40 flex-1 animate-pulse rounded-lg bg-slate-800" />
       </div>
     );
@@ -94,10 +94,10 @@ export default function ProgressCard({ metrics, loading, onUpdate }: Props) {
   };
 
   return (
-    <div className="flex h-full flex-col rounded-2xl border border-slate-700 bg-gradient-to-br from-slate-800 to-slate-900 p-6 shadow-xl">
+    <div className="tn-card tn-card--health progress-card flex h-full flex-col rounded-2xl border border-slate-700 bg-gradient-to-br from-slate-800 to-slate-900 p-6 shadow-xl">
       <div className="flex items-start justify-between gap-3">
         <div>
-          <p className="text-sm font-medium uppercase tracking-widest text-slate-400">Progress</p>
+          <p className="text-sm font-medium uppercase tracking-widest text-slate-400">Financial health</p>
           <p className="mt-0.5 text-xs text-slate-500">Freedom runway & salary milestones</p>
         </div>
         <span className="rounded-full border border-emerald-700/50 bg-emerald-900/30 px-2 py-0.5 text-[11px] font-semibold uppercase tracking-wider text-emerald-300">
@@ -120,7 +120,7 @@ export default function ProgressCard({ metrics, loading, onUpdate }: Props) {
         <div className="rounded-xl border border-slate-700/60 bg-slate-900/40 px-4 py-3">
           <p className="text-[11px] font-medium uppercase tracking-wider text-slate-400">Next milestone</p>
           <p className="mt-1 text-2xl font-bold tracking-tight text-white">
-            {next ? `${fmtMultiple(next.multiple)} = ${usd(next.target_usd)}` : "5× cleared 🎉"}
+            {next ? `${fmtMultiple(next.multiple)} = ${usd(next.target_usd)}` : "5× cleared"}
           </p>
           <p className="mt-0.5 text-xs text-slate-500">{next ? `${Math.round(next.progress * 100)}% there` : "all milestones reached"}</p>
         </div>
@@ -141,12 +141,12 @@ export default function ProgressCard({ metrics, loading, onUpdate }: Props) {
 
       <p className="mt-3 text-sm text-slate-300">
         At {usd(metrics.current_usd)} you're {metrics.salary_multiple.toFixed(1)}× your base salary
-        {metrics.freedom_months !== null && <> — about {runway(metrics.freedom_months, metrics.freedom_years)} of freedom banked</>}. 🧭
+        {metrics.freedom_months !== null && <> — about {runway(metrics.freedom_months, metrics.freedom_years)} of freedom banked</>}.
       </p>
 
       <div className="mt-auto border-t border-slate-700/60 pt-3">
         <button onClick={() => (editing ? cancel() : setEditing(true))} className="text-xs font-medium text-slate-400 hover:text-slate-200">
-          {editing ? "× Close" : "⚙ My numbers"}
+          {editing ? "Close numbers" : "Adjust my numbers"}
         </button>
         {editing && form && (
           <div className="mt-3 space-y-3">

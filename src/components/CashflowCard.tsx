@@ -127,7 +127,7 @@ export default function CashflowCard({
 
   if (loading && !summary) {
     return (
-      <div className="rounded-2xl border border-slate-700 bg-slate-900/40 p-6">
+      <div className="tn-card tn-card--cashflow rounded-2xl border border-slate-700 bg-slate-900/40 p-6">
         <div className="h-28 animate-pulse rounded-lg bg-slate-800" />
       </div>
     );
@@ -176,7 +176,7 @@ export default function CashflowCard({
   );
 
   return (
-    <div className="rounded-2xl border border-slate-700 bg-gradient-to-br from-slate-800 to-slate-900 p-6 shadow-xl">
+    <div className="tn-card tn-card--cashflow cashflow-card rounded-2xl border border-slate-700 bg-gradient-to-br from-slate-800 to-slate-900 p-6 shadow-xl">
       <div className="flex items-center justify-between">
         <p className="text-sm font-medium uppercase tracking-widest text-slate-400">
           Cashflow

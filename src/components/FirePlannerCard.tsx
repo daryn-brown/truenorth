@@ -62,7 +62,7 @@ export default function FirePlannerCard({ plan, loading, onUpdate }: Props) {
 
   if (loading && !plan) {
     return (
-      <div className="rounded-2xl border border-slate-700 bg-slate-900/40 p-6">
+      <div className="tn-card tn-card--fire rounded-2xl border border-slate-700 bg-slate-900/40 p-6">
         <div className="h-40 animate-pulse rounded-lg bg-slate-800" />
       </div>
     );
@@ -98,7 +98,7 @@ export default function FirePlannerCard({ plan, loading, onUpdate }: Props) {
   };
 
   return (
-    <div className="flex h-full flex-col rounded-2xl border border-slate-700 bg-gradient-to-br from-slate-800 to-slate-900 p-6 shadow-xl">
+    <div className="tn-card tn-card--fire fire-card flex h-full flex-col rounded-2xl border border-slate-700 bg-gradient-to-br from-slate-800 to-slate-900 p-6 shadow-xl">
       <div className="flex items-start justify-between gap-3">
         <div>
           <p className="text-sm font-medium uppercase tracking-widest text-slate-400">
@@ -143,7 +143,7 @@ export default function FirePlannerCard({ plan, loading, onUpdate }: Props) {
         {plan.contribution_is_derived ? " (your current pace)" : ""}, you reach{" "}
         <span className="font-semibold text-white">{usd(plan.fire_number)}</span>
         {plan.fire_age !== null ? ` around age ${plan.fire_age}` : " — set a positive pace to see when"}
-        . 🧭
+        .
       </p>
 
       <div className="mt-4 border-t border-slate-700/60 pt-3">
@@ -151,7 +151,7 @@ export default function FirePlannerCard({ plan, loading, onUpdate }: Props) {
           onClick={() => (editing ? cancel() : setEditing(true))}
           className="text-xs font-medium text-slate-400 hover:text-slate-200"
         >
-          {editing ? "× Close goals" : "⚙ Set my goals"}
+          {editing ? "Close goals" : "Set my goals"}
         </button>
 
         {editing && form && (
@@ -241,7 +241,7 @@ function Milestone({ label, target, progress, met, age, date, accent }: Mileston
         <div className={`h-full rounded-full ${bar} transition-all`} style={{ width: `${Math.max(2, Math.min(100, pct))}%` }} />
       </div>
       <p className="mt-1 text-xs text-slate-500">
-        {met ? "🎉 reached" : age !== null ? `~age ${age} · ${date ? longDate(date) : ""}` : `${pct}%`}
+        {met ? "Reached" : age !== null ? `~age ${age} · ${date ? longDate(date) : ""}` : `${pct}%`}
       </p>
     </div>
   );
