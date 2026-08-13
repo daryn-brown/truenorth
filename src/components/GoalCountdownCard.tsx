@@ -35,7 +35,7 @@ const humanizeDays = (days: number): string => {
 export default function GoalCountdownCard({ goal, loading }: Props) {
   if (loading && !goal) {
     return (
-      <div className="rounded-2xl border border-slate-700 bg-slate-900/40 p-6">
+      <div className="tn-card tn-card--goal rounded-2xl border border-slate-700 bg-slate-900/40 p-6">
         <div className="h-28 animate-pulse rounded-lg bg-slate-800" />
       </div>
     );
@@ -48,47 +48,54 @@ export default function GoalCountdownCard({ goal, loading }: Props) {
   const paceNegative = goal.daily_rate_usd !== null && goal.daily_rate_usd <= 0;
 
   return (
-    <div className="flex h-full flex-col rounded-2xl border border-slate-700 bg-gradient-to-br from-slate-800 to-slate-900 p-6 shadow-xl">
+    <div className="tn-card tn-card--goal goal-card flex h-full flex-col rounded-2xl border border-slate-700 bg-gradient-to-br from-slate-800 to-slate-900 p-6 shadow-xl">
       <div className="flex items-center justify-between">
-        <p className="text-sm font-medium uppercase tracking-widest text-slate-400">
-          Road to {target}
-        </p>
-        <span className="rounded-full border border-indigo-700/50 bg-indigo-900/40 px-2 py-0.5 text-[11px] font-semibold uppercase tracking-wider text-indigo-300">
-          CoastFIRE
-        </span>
+        <div>
+          <p className="text-sm font-medium uppercase tracking-widest text-slate-400">Next milestone</p>
+          <span className="goal-card__subtitle">Road to {target}</span>
+        </div>
+        <span className="goal-card__badge">CoastFIRE</span>
       </div>
 
       {goal.already_met ? (
-        <p className="mt-3 text-2xl font-bold text-emerald-400">
-          🎉 Milestone reached — {usd(goal.current_usd)}
-        </p>
+        <div className="goal-card__celebration">
+          <div className="goal-progress-ring" style={{ background: "conic-gradient(#65e9c5 100%, rgba(255,255,255,.06) 0)" }}>
+            <div>
+              <strong>100%</strong>
+              <small>complete</small>
+            </div>
+          </div>
+          <div>
+            <strong>Milestone reached</strong>
+            <span>{usd(goal.current_usd)} and climbing</span>
+          </div>
+        </div>
       ) : (
         <>
-          <div className="mt-3 flex items-baseline justify-between">
-            <span className="text-3xl font-bold tracking-tight text-white">
-              {usd(goal.current_usd)}
-            </span>
-            <span className="text-sm font-medium text-slate-400">
-              {usd(goal.gap_usd)} to go
-            </span>
-          </div>
-
-          <div className="mt-3 h-3 w-full overflow-hidden rounded-full bg-slate-800">
+          <div className="goal-card__progress">
             <div
-              className="h-full rounded-full bg-gradient-to-r from-indigo-500 to-emerald-400 transition-all duration-700"
-              style={{ width: `${Math.max(2, Math.min(100, pct))}%` }}
-            />
-          </div>
-          <div className="mt-1 flex justify-between text-xs text-slate-500">
-            <span>{pct}%</span>
-            <span>{target}</span>
+              className="goal-progress-ring"
+              style={{
+                background: `conic-gradient(#65e9c5 ${Math.max(0, Math.min(100, pct))}%, rgba(255,255,255,.055) 0)`,
+              }}
+            >
+              <div>
+                <strong>{pct}%</strong>
+                <small>complete</small>
+              </div>
+            </div>
+            <div className="goal-card__numbers">
+              <span>Current wealth</span>
+              <strong>{usd(goal.current_usd)}</strong>
+              <small>{usd(goal.gap_usd)} remaining</small>
+            </div>
           </div>
 
-          <div className="mt-4 rounded-xl border border-slate-700/70 bg-slate-900/40 px-4 py-3">
+          <div className="goal-card__eta mt-4 rounded-xl border border-slate-700/70 bg-slate-900/40 px-4 py-3">
             {hasEta ? (
               <>
                 <p className="text-sm text-slate-300">
-                  On pace to hit {target} by{" "}
+                  On pace for{" "}
                   <span className="font-semibold text-emerald-400">
                     {longDate(goal.projected_date as string)}
                   </span>
@@ -104,7 +111,7 @@ export default function GoalCountdownCard({ goal, loading }: Props) {
             ) : (
               <p className="text-sm text-slate-400">
                 {paceNegative
-                  ? "Net worth is flat or down over the last month, so there's no ETA yet — a positive month will project your hit-date. Zoom out: the milestone hasn't moved. 🧭"
+                  ? "Net worth is flat or down over the last month, so there's no ETA yet — a positive month will project your hit-date. Zoom out: the milestone hasn't moved."
                   : "Add a little more balance history and I'll project your hit-date from your 30-day pace."}
               </p>
             )}

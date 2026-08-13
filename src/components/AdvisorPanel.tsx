@@ -21,6 +21,7 @@ import {
 } from "../hooks/useFinanceApi";
 import MarkdownMessage from "./MarkdownMessage";
 import ToolTrace from "./ToolTrace";
+import DesktopIcon from "../apps/desktop/DesktopIcon";
 
 interface Props {
   /** Whether the panel is expanded (vs. collapsed to a slim rail). */
@@ -267,13 +268,13 @@ export default function AdvisorPanel({ open, onOpen, onClose }: Props) {
   // Collapsed: a slim, always-present rail so the chat is one click away.
   if (!open) {
     return (
-      <div className="flex h-full w-12 shrink-0 flex-col items-center border-l border-slate-800 bg-slate-900 py-3">
+      <div className="tn-advisor-rail flex h-full w-12 shrink-0 flex-col items-center border-l border-slate-800 bg-slate-900 py-3">
         <button
           onClick={onOpen}
           title="Open finance brain"
           className="flex flex-col items-center gap-2 rounded-lg px-2 py-2 text-slate-400 hover:bg-slate-800 hover:text-white"
         >
-          <span className="text-lg">🧠</span>
+          <DesktopIcon name="sparkles" className="h-5 w-5" />
           <span className="text-[10px] font-semibold uppercase tracking-wider [writing-mode:vertical-rl]">
             Ask AI
           </span>
@@ -289,7 +290,7 @@ export default function AdvisorPanel({ open, onOpen, onClose }: Props) {
   const headerTitle = activeThread?.title ?? "Finance brain";
 
   return (
-    <div className="relative flex h-full w-[380px] shrink-0 flex-col border-l border-slate-800 bg-slate-900 lg:w-[440px]">
+    <div className="tn-advisor-panel relative flex h-full w-[380px] shrink-0 flex-col border-l border-slate-800 bg-slate-900 lg:w-[440px]">
       {/* Header */}
       <div className="flex items-center justify-between gap-2 border-b border-slate-800 px-3 py-2.5">
         <div className="flex min-w-0 items-center gap-1.5">
@@ -317,7 +318,7 @@ export default function AdvisorPanel({ open, onOpen, onClose }: Props) {
             title="AI provider settings"
             className="rounded-lg border border-slate-700 px-2 py-1 text-xs text-slate-400 hover:bg-slate-800"
           >
-            ⚙️
+            <DesktopIcon name="settings" className="h-3.5 w-3.5" />
           </button>
           <button
             onClick={onClose}
@@ -487,7 +488,7 @@ export default function AdvisorPanel({ open, onOpen, onClose }: Props) {
                       title="Delete chat"
                       className="text-xs text-slate-600 opacity-0 transition-opacity hover:text-red-400 group-hover:opacity-100"
                     >
-                      🗑
+                      <DesktopIcon name="trash" className="h-3 w-3" />
                     </button>
                   </div>
                 ))

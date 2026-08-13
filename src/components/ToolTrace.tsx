@@ -1,4 +1,5 @@
 import type { ToolStep } from "../types/ai";
+import DesktopIcon from "../apps/desktop/DesktopIcon";
 
 // Pretty-print a JSON string when possible; otherwise show it as-is. Tool args/results are JSON
 // strings from the backend, but a result may be plain text (e.g. an error), so we fall back safely.
@@ -19,9 +20,12 @@ export default function ToolTrace({ steps }: { steps: ToolStep[] }) {
   if (steps.length === 0) return null;
   const label = `Used ${steps.length} ${steps.length === 1 ? "tool" : "tools"}`;
   return (
-    <details className="mt-2 rounded-lg border border-slate-700/70 bg-slate-900/40 text-xs">
+    <details className="tn-tool-trace mt-2 rounded-lg border border-slate-700/70 bg-slate-900/40 text-xs">
       <summary className="cursor-pointer select-none px-3 py-1.5 text-slate-400 hover:text-slate-200">
-        🔧 {label}
+        <span className="inline-flex items-center gap-1.5">
+          <DesktopIcon name="settings" className="h-3 w-3" />
+          {label}
+        </span>
       </summary>
       <ol className="space-y-2 px-3 pb-3 pt-1">
         {steps.map((s, i) => (

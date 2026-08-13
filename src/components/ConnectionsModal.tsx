@@ -124,10 +124,10 @@ export default function ConnectionsModal({ isOpen, onClose, onChanged }: Props) 
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm"
+      className="tn-modal-overlay fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm"
       onClick={(e) => e.target === e.currentTarget && onClose()}
     >
-      <div className="w-full max-w-lg rounded-2xl border border-slate-700 bg-slate-900 p-6 shadow-2xl">
+      <div className="tn-modal tn-connections-modal w-full max-w-lg rounded-2xl border border-slate-700 bg-slate-900 p-6 shadow-2xl">
         <h2 className="mb-1 text-lg font-semibold text-white">Connect accounts</h2>
         <p className="mb-4 text-xs text-slate-400">
           Sync real balances automatically instead of entering them by hand. TrueNorth requests{" "}

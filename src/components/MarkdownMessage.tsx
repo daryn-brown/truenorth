@@ -68,7 +68,7 @@ const components: Components = {
 /** Render assistant markdown (GitHub-flavored) with the app's dark theme. */
 function MarkdownMessage({ content }: { content: string }) {
   return (
-    <div className="text-sm text-slate-200">
+    <div className="tn-markdown text-sm text-slate-200">
       <ReactMarkdown remarkPlugins={[remarkGfm]} components={components}>
         {content}
       </ReactMarkdown>

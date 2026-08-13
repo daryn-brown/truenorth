@@ -47,6 +47,8 @@ import AccountModal from "../components/AccountModal";
 import ImportModal from "../components/ImportModal";
 import ConnectionsModal from "../components/ConnectionsModal";
 import NetWorthChart from "../components/NetWorthChart";
+import DesktopIcon from "../apps/desktop/DesktopIcon";
+import BrandMark from "../shared/BrandMark";
 
 type ModalState =
   | { open: false }
@@ -199,118 +201,221 @@ export default function Dashboard({
     date: point.date,
     value: homeCurrency === "CAD" ? point.total_cad : point.total_usd,
   }));
+  const connectedAccountCount = accounts.filter(
+    (account) => account.connector_kind !== "manual",
+  ).length;
+  const todayLabel = new Intl.DateTimeFormat("en-CA", {
+    weekday: "long",
+    month: "long",
+    day: "numeric",
+  }).format(new Date());
 
   return (
-    <div className="min-h-screen bg-slate-950 text-white">
-      {/* Header */}
-      <header className="border-b border-slate-800 px-6 py-4 flex items-center justify-between">
-        <div className="flex items-center gap-3">
-          <span className="text-xl font-bold text-white tracking-tight">
-            🧭 TrueNorth
-          </span>
-          <span className="rounded-full bg-indigo-900/50 border border-indigo-700/50 px-2 py-0.5 text-[11px] font-semibold text-indigo-300 uppercase tracking-wider">
-            Phase 3
-          </span>
-        </div>
-        <div className="flex items-center gap-2">
-          <button
-            onClick={onToggleAdvisor}
-            title="Ask the AI advisor about your finances"
-            className="flex items-center gap-1.5 rounded-lg border border-emerald-700/60 bg-emerald-900/30 px-3 py-1.5 text-xs text-emerald-200 hover:bg-emerald-900/60 transition-colors"
-          >
-            🧠 Ask AI
+    <div className="tn-dashboard">
+      <aside className="desktop-sidebar" aria-label="TrueNorth navigation">
+        <a className="desktop-sidebar__brand" href="#overview" aria-label="TrueNorth overview">
+          <BrandMark className="desktop-sidebar__logo" />
+        </a>
+
+        <nav className="desktop-sidebar__nav">
+          <a className="is-active" href="#overview" title="Overview">
+            <DesktopIcon name="overview" />
+            <span>Overview</span>
+          </a>
+          <a href="#activity" title="Activity and cashflow">
+            <DesktopIcon name="chart" />
+            <span>Activity</span>
+          </a>
+          <a href="#planning" title="Planning">
+            <DesktopIcon name="target" />
+            <span>Planning</span>
+          </a>
+          <a href="#accounts" title="Accounts">
+            <DesktopIcon name="accounts" />
+            <span>Accounts</span>
+          </a>
+          <button type="button" onClick={() => setConnectOpen(true)} title="Connections">
+            <DesktopIcon name="connect" />
+            <span>Connect</span>
           </button>
-          <button
-            onClick={() => setConnectOpen(true)}
-            title="Connect brokerages (SnapTrade) and banks (SimpleFIN) to sync real balances"
-            className="flex items-center gap-1.5 rounded-lg border border-indigo-700/60 bg-indigo-900/30 px-3 py-1.5 text-xs text-indigo-200 hover:bg-indigo-900/60 transition-colors"
-          >
-            🔗 Connect
-          </button>
-          <button
-            onClick={() => setImportOpen(true)}
-            title="Import accounts and balance history from JSON or CSV"
-            className="flex items-center gap-1.5 rounded-lg border border-slate-700 px-3 py-1.5 text-xs text-slate-400 hover:bg-slate-800 transition-colors"
-          >
-            ⬆️ Import
-          </button>
-          <button
-            onClick={handleRefreshFx}
-            disabled={refreshingFx}
-            title="Refresh USD/CAD exchange rate from Yahoo Finance"
-            className="flex items-center gap-1.5 rounded-lg border border-slate-700 px-3 py-1.5 text-xs text-slate-400 hover:bg-slate-800 disabled:opacity-50 transition-colors"
-          >
-            {refreshingFx ? "Refreshing…" : "🔄 Refresh FX"}
-          </button>
+        </nav>
+
+        <div className="desktop-sidebar__footer">
           {onCheckForUpdates && (
             <button
+              type="button"
               onClick={onCheckForUpdates}
               disabled={checkingUpdate}
               title="Check for a new version of TrueNorth"
-              className="flex items-center gap-1.5 rounded-lg border border-slate-700 px-3 py-1.5 text-xs text-slate-400 hover:bg-slate-800 disabled:opacity-50 transition-colors"
             >
-              {checkingUpdate ? "Checking…" : "⬇️ Updates"}
+              <DesktopIcon name="download" />
+              <span>{checkingUpdate ? "Checking" : "Updates"}</span>
             </button>
           )}
+          <div className="desktop-sidebar__privacy" title="Local-first and encrypted">
+            <DesktopIcon name="shield" />
+          </div>
         </div>
-      </header>
+      </aside>
 
-      <main className="mx-auto max-w-5xl px-6 py-8 grid grid-cols-1 md:grid-cols-2 gap-6 items-stretch">
+      <div className="desktop-main">
+        <header className="desktop-topbar">
+          <div className="desktop-topbar__title">
+            <span>Portfolio / Overview</span>
+            <strong>TrueNorth</strong>
+          </div>
+
+          <div className="desktop-topbar__status">
+            <i />
+            {connectedAccountCount > 0
+              ? `${connectedAccountCount} account${connectedAccountCount === 1 ? "" : "s"} synced`
+              : "Local-first mode"}
+          </div>
+
+          <div className="desktop-topbar__actions">
+            <button
+              type="button"
+              className="desktop-action"
+              onClick={() => setImportOpen(true)}
+              title="Import accounts and balance history"
+            >
+              <DesktopIcon name="upload" />
+              <span>Import</span>
+            </button>
+            <button
+              type="button"
+              className="desktop-action"
+              onClick={handleRefreshFx}
+              disabled={refreshingFx}
+              title="Refresh exchange rates"
+            >
+              <DesktopIcon name="refresh" />
+              <span>{refreshingFx ? "Refreshing" : "Refresh FX"}</span>
+            </button>
+            <button
+              type="button"
+              className="desktop-action desktop-action--advisor"
+              onClick={onToggleAdvisor}
+              title="Ask the AI advisor"
+            >
+              <DesktopIcon name="sparkles" />
+              <span>Ask advisor</span>
+            </button>
+            <button
+              type="button"
+              className="desktop-action desktop-action--primary"
+              onClick={() => setConnectOpen(true)}
+              title="Connect a financial institution"
+            >
+              <DesktopIcon name="connect" />
+              <span>Connect account</span>
+            </button>
+          </div>
+        </header>
+
+        <main className="desktop-page">
+          <section className="dashboard-intro" id="overview">
+            <div>
+              <span className="dashboard-intro__eyebrow">Cross-border command center</span>
+              <h1>Financial overview</h1>
+              <p>{todayLabel} · Every account, currency, and long-term decision in one view.</p>
+            </div>
+            <div className="dashboard-intro__currency">
+              <span>Home currency</span>
+              <strong>{homeCurrency}</strong>
+            </div>
+          </section>
+
         {fxError && (
-          <div className="md:col-span-2 rounded-lg bg-red-900/20 border border-red-700/50 px-4 py-3 text-sm text-red-400">
+          <div className="desktop-alert desktop-alert--error">
             FX refresh failed: {fxError}
           </div>
         )}
 
-        {/* Net worth summary */}
-        <div className="md:col-span-2">
-          <NetWorthCard
-            netWorth={netWorth}
-            delta={delta}
-            homeCurrency={homeCurrency}
-            onToggleCurrency={() =>
-              setHomeCurrency((c) => (c === "CAD" ? "USD" : "CAD"))
-            }
-            loading={loading}
-          />
-        </div>
+          <div className="desktop-layout-grid desktop-layout-grid--overview">
+            <div className="desktop-span-8">
+              <NetWorthCard
+                netWorth={netWorth}
+                delta={delta}
+                homeCurrency={homeCurrency}
+                onToggleCurrency={() =>
+                  setHomeCurrency((currency) => (currency === "CAD" ? "USD" : "CAD"))
+                }
+                loading={loading}
+              />
+            </div>
+            <div className="desktop-span-4">
+              <GoalCountdownCard goal={goal} loading={loading} />
+            </div>
+            <div className="desktop-span-5">
+              <ProgressCard
+                metrics={progress}
+                loading={loading}
+                onUpdate={handleUpdateProgressInputs}
+              />
+            </div>
+            <div className="desktop-span-7">
+              <CashflowCard
+                summary={cashflow}
+                homeCurrency={homeCurrency}
+                loading={loading}
+                onChanged={refreshCashflow}
+              />
+            </div>
+          </div>
 
-        {/* $100k countdown / CoastFIRE */}
-        <GoalCountdownCard goal={goal} loading={loading} />
+          <section className="dashboard-section" id="activity">
+            <div className="dashboard-section__heading">
+              <div>
+                <span>Movement over time</span>
+                <h2>Activity & trajectory</h2>
+              </div>
+              <p>Separate genuine progress from currency movement and day-to-day noise.</p>
+            </div>
+            <NetWorthChart data={chartData} currency={homeCurrency} />
+          </section>
 
-        {/* Generic FIRE planner — neutral defaults, customizable per user */}
-        <FirePlannerCard plan={firePlan} loading={loading} onUpdate={handleUpdateFireInputs} />
+          <section className="dashboard-section" id="planning">
+            <div className="dashboard-section__heading">
+              <div>
+                <span>Future scenarios</span>
+                <h2>Planning studio</h2>
+              </div>
+              <p>Turn today&apos;s complete picture into confident long-term decisions.</p>
+            </div>
+            <div className="desktop-layout-grid">
+              <div className="desktop-span-5">
+                <FirePlannerCard
+                  plan={firePlan}
+                  loading={loading}
+                  onUpdate={handleUpdateFireInputs}
+                />
+              </div>
+              <div className="desktop-span-7">
+                <SeattleSimulatorCard
+                  projection={projection}
+                  loading={loading}
+                  onUpdate={handleUpdateAssumptions}
+                />
+              </div>
+            </div>
+          </section>
 
-        {/* Forward-looking progress: freedom runway + salary milestones */}
-        <ProgressCard metrics={progress} loading={loading} onUpdate={handleUpdateProgressInputs} />
-
-        {/* Seattle transition simulator */}
-        <SeattleSimulatorCard
-          projection={projection}
-          loading={loading}
-          onUpdate={handleUpdateAssumptions}
-        />
-
-        {/* Monthly cashflow + fixed/variable tagging */}
-        <div className="md:col-span-2">
-          <CashflowCard
-            summary={cashflow}
-            homeCurrency={homeCurrency}
-            loading={loading}
-            onChanged={refreshCashflow}
-          />
-        </div>
-
-        {/* Net worth chart */}
-        <div className="md:col-span-2">
-          <NetWorthChart
-            data={chartData}
-            currency={homeCurrency}
-          />
-        </div>
-
-        {/* Account list */}
-        <div className="md:col-span-2">
+          <section className="dashboard-section" id="accounts">
+            <div className="dashboard-section__heading">
+              <div>
+                <span>Financial world</span>
+                <h2>Accounts across borders</h2>
+              </div>
+              <button
+                type="button"
+                className="desktop-section-action"
+                onClick={() => setModal({ open: true, mode: "add_account" })}
+              >
+                <DesktopIcon name="plus" />
+                Add account
+              </button>
+            </div>
           <AccountList
             accounts={accounts}
             netWorthBreakdown={netWorth?.accounts ?? []}
@@ -324,16 +429,17 @@ export default function Dashboard({
               setModal({ open: true, mode: "edit_currency", account })
             }
           />
-        </div>
+          </section>
 
         {accounts.length === 0 && !loading && (
-          <p className="md:col-span-2 text-center text-xs text-slate-600 pt-2">
-            All data is stored locally and encrypted. Nothing leaves your device.
+          <p className="desktop-privacy-note">
+            <DesktopIcon name="shield" />
+            Your finance database stays local and encrypted on this device.
           </p>
         )}
-      </main>
+        </main>
+      </div>
 
-      {/* Modals */}
       {modal.open && modal.mode === "add_account" && (
         <AccountModal
           isOpen

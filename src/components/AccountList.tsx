@@ -1,4 +1,5 @@
 import type { Account, AccountNetWorth, Currency } from "../types/finance";
+import DesktopIcon from "../apps/desktop/DesktopIcon";
 
 const ACCOUNT_TYPE_LABELS: Record<string, string> = {
   chequing: "Chequing",
@@ -21,9 +22,9 @@ const JURISDICTION_COLORS: Record<string, string> = {
 };
 
 /** Jurisdictional portfolios; an account can still be denominated in another currency. */
-const PORTFOLIO_GROUPS: { key: string; label: string; flag: string }[] = [
-  { key: "US", label: "US Portfolio", flag: "🇺🇸" },
-  { key: "CA", label: "Canada / International", flag: "🇨🇦" },
+const PORTFOLIO_GROUPS: { key: string; label: string }[] = [
+  { key: "US", label: "US Portfolio" },
+  { key: "CA", label: "Canada / International" },
 ];
 
 const fmt = (value: number, currency: string) =>
@@ -68,7 +69,7 @@ export default function AccountList({
   );
   const groups = [
     ...PORTFOLIO_GROUPS,
-    ...extras.map((key) => ({ key, label: key, flag: "🏦" })),
+    ...extras.map((key) => ({ key, label: key })),
   ]
     .map((g) => ({ ...g, items: accounts.filter((a) => a.jurisdiction === g.key) }))
     .filter((g) => g.items.length > 0);
@@ -78,9 +79,14 @@ export default function AccountList({
     return (
       <li
         key={account.id}
-        className="flex items-center justify-between gap-4 px-5 py-4 hover:bg-slate-700/30 transition-colors group"
+        className="account-row flex items-center justify-between gap-4 px-5 py-4 hover:bg-slate-700/30 transition-colors group"
       >
-        <div className="flex items-center gap-3 min-w-0">
+        <div className="account-row__identity flex items-center gap-3 min-w-0">
+          <div className="account-row__icon">
+            <DesktopIcon
+              name={account.account_type === "brokerage" ? "chart" : "wallet"}
+            />
+          </div>
           <div className="shrink-0">
             <span
               className={`inline-flex items-center rounded border px-1.5 py-0.5 text-[10px] font-bold tracking-wider ${
@@ -127,27 +133,27 @@ export default function AccountList({
             )}
           </div>
 
-          <div className="flex gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+          <div className="account-actions flex gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
             <button
               onClick={() => onEditCurrency(account)}
               title={`Change currency (now ${account.currency})`}
               className="rounded p-1.5 text-slate-400 hover:bg-slate-600 hover:text-white transition-colors"
             >
-              💱
+              <DesktopIcon name="exchange" />
             </button>
             <button
               onClick={() => onUpdateBalance(account)}
               title="Update balance"
               className="rounded p-1.5 text-slate-400 hover:bg-slate-600 hover:text-white transition-colors"
             >
-              ✏️
+              <DesktopIcon name="edit" />
             </button>
             <button
               onClick={() => onDeleteAccount(account.id)}
               title="Delete account"
               className="rounded p-1.5 text-slate-400 hover:bg-red-900/50 hover:text-red-400 transition-colors"
             >
-              🗑️
+              <DesktopIcon name="trash" />
             </button>
           </div>
         </div>
@@ -156,16 +162,16 @@ export default function AccountList({
   };
 
   return (
-    <div className="rounded-2xl border border-slate-700 bg-slate-800/60 backdrop-blur-sm">
-      <div className="flex items-center justify-between border-b border-slate-700 px-5 py-4">
+    <div className="tn-card tn-card--accounts account-list rounded-2xl border border-slate-700 bg-slate-800/60 backdrop-blur-sm">
+      <div className="account-list__header flex items-center justify-between border-b border-slate-700 px-5 py-4">
         <h2 className="text-sm font-semibold text-slate-200 uppercase tracking-widest">
           Accounts
         </h2>
         <button
           onClick={onAddAccount}
-          className="flex items-center gap-1.5 rounded-lg bg-indigo-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-indigo-500 transition-colors"
+          className="account-list__add flex items-center gap-1.5 rounded-lg bg-indigo-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-indigo-500 transition-colors"
         >
-          <span className="text-base leading-none">+</span> Add Account
+          <DesktopIcon name="plus" /> Add account
         </button>
       </div>
 
@@ -186,9 +192,9 @@ export default function AccountList({
             const subtotal = group.items.reduce((sum, a) => sum + homeValue(a), 0);
             return (
               <section key={group.key}>
-                <div className="flex items-center justify-between bg-slate-900/40 px-5 py-2.5">
+                <div className="account-group__header flex items-center justify-between bg-slate-900/40 px-5 py-2.5">
                   <span className="flex items-center gap-2 text-xs font-semibold uppercase tracking-wider text-slate-400">
-                    <span className="text-sm">{group.flag}</span>
+                    <span className="account-group__jurisdiction">{group.key}</span>
                     {group.label}
                     <span className="rounded-full bg-slate-700/60 px-1.5 py-0.5 text-[10px] font-medium text-slate-400">
                       {group.items.length}

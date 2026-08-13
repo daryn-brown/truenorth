@@ -19,7 +19,7 @@ export default function UpdatePrompt({
   if (update && phase && !dismissed) {
     const busy = phase === "downloading" || phase === "installing";
     return (
-      <div className="fixed bottom-4 right-4 z-50 w-80 rounded-xl border border-indigo-700/60 bg-slate-900 p-4 shadow-2xl">
+      <div className="tn-update-prompt fixed bottom-4 right-4 z-50 w-80 rounded-xl border border-indigo-700/60 bg-slate-900 p-4 shadow-2xl">
         <div className="flex items-start justify-between gap-3">
           <div>
             <h3 className="text-sm font-semibold text-white">Update available</h3>
@@ -102,7 +102,7 @@ export default function UpdatePrompt({
   // Feedback from a manual "Check for updates" when there's nothing to install.
   if (outcome && !dismissed) {
     return (
-      <div className="fixed bottom-4 right-4 z-50 w-72 rounded-xl border border-slate-700 bg-slate-900 p-3 shadow-2xl">
+      <div className="tn-update-prompt fixed bottom-4 right-4 z-50 w-72 rounded-xl border border-slate-700 bg-slate-900 p-3 shadow-2xl">
         <div className="flex items-start justify-between gap-3">
           <p className="text-sm text-slate-200">
             {outcome === "uptodate"

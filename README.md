@@ -1,13 +1,24 @@
 # TrueNorth
 
-A **local-first, privacy-first** desktop app for managing **cross-border (US + Canada)**
-personal finances: connect bank + brokerage accounts, review transactions, track
+A cross-border finance product with a public web experience and a **local-first,
+privacy-first** desktop app for managing **US + Canada** personal finances: connect bank +
+brokerage accounts, review transactions, track
 **multi-currency net worth** over time, set goals, and ask a **model-agnostic AI advisor**
 questions about your own data.
 
 > Replaces the "paste screenshots into a chatbot" workflow with a real, queryable system.
 
 ## Status
+✨ **Desktop UI 2.0 shipped.** The native app now uses the same immersive violet design language
+as the web experience: a compact navigation rail, stronger information hierarchy, spatial
+multi-account net-worth view, dense planning studio, and consistent glass surfaces across account
+connections, imports, updates, and the finance advisor.
+
+🌐 **Web foundation shipped.** The public browser surface now introduces TrueNorth as the
+financial home for people whose wealth spans countries. It shares the React/Vite codebase,
+brand components, and release with the desktop product while keeping browser visitors isolated
+from Tauri-only finance services.
+
 ✅ **Phase 1 shipped — manual multi-currency MVP.** A Tauri + React/SQLite desktop app with an
 **encrypted-at-rest** database (SQLCipher), **multi-currency net worth**
 (any currency converted into USD + CAD totals), a **net-worth-over-time** chart, and **JSON/CSV import** to seed accounts and balance
@@ -40,21 +51,31 @@ Tauri v2 (Rust core) · React + TypeScript + Tailwind · SQLite (rusqlite, SQLCi
 secrets in the OS keychain (`keyring`). Mirrors the TrendWave stack.
 
 ## Architecture
-Finance Second Brain — **TrueNorth** — is a single **Tauri v2** desktop app: a React/TypeScript **WebView**
-frontend talks to a **Rust core** over Tauri's IPC bridge. All data stays on the device in an
-**encrypted-at-rest SQLite** database (SQLCipher), with the 256-bit key held in the OS keychain.
-Network calls are limited to on-demand **exchange-rate lookups** (USD pivot) and **read-only**
-brokerage sync via the **SnapTrade** API.
+Finance Second Brain — **TrueNorth** — uses one React/TypeScript codebase for two surfaces:
+`src/apps/web` is the browser experience and `src/apps/desktop` is the existing **Tauri v2**
+application. `src/main.tsx` selects the browser or desktop entry at runtime, and reusable product
+UI belongs in `src/shared`. The desktop surface talks to a **Rust core** over Tauri's IPC bridge.
+All finance data stays on the device in an **encrypted-at-rest SQLite** database (SQLCipher), with
+the 256-bit key held in the OS keychain. Network calls are limited to on-demand exchange-rate
+lookups and explicitly configured read-only account connections.
 
 ```mermaid
 flowchart TB
     user(["👤 User"])
 
-    subgraph FE["🪟 Frontend · WebView — React + TypeScript + Tailwind (Vite)"]
+    subgraph FE["🖥️ Shared frontend · React + TypeScript + Tailwind (Vite)"]
         direction TB
+        entry["main.tsx<br/>runtime surface selection"]
+        web["Browser surface<br/>apps/web · public landing"]
+        desktop["Desktop surface<br/>apps/desktop · Tauri shell"]
+        shared["Shared UI<br/>brand + future product components"]
         pages["Dashboard page"]
         comps["Components<br/>NetWorthCard · NetWorthChart · AccountList<br/>AccountModal · ImportModal · ConnectionsModal"]
         api["useFinanceApi.ts<br/>typed invoke bindings · finance.ts"]
+        entry --> web
+        entry --> desktop --> pages
+        web --> shared
+        desktop --> shared
         pages --> comps --> api
     end
 
@@ -97,7 +118,7 @@ flowchart TB
     questrade(["🌐 Questrade API<br/>read-only cash + equity sync"])
     teller(["🌐 Teller API<br/>read-only US bank sync · free"])
 
-    user --> pages
+    user --> entry
     api ==>|"Tauri IPC · invoke() · serde JSON"| builder
     state ==>|"rusqlite · encrypted I/O"| db
     d_db -->|"unlock / store key · secrets"| kc
@@ -114,7 +135,7 @@ flowchart TB
     classDef os fill:#f3e8ff,stroke:#9333ea,color:#581c87;
     classDef ext fill:#fee2e2,stroke:#dc2626,color:#7f1d1d;
 
-    class pages,comps,api feNode;
+    class entry,web,desktop,shared,pages,comps,api feNode;
     class builder,c_acc,c_nw,c_imp,c_fx,c_snap,c_sf,c_qt,c_te,d_db,d_fx,d_conn coreNode;
     class state stateNode;
     class db store;
@@ -123,9 +144,14 @@ flowchart TB
 ```
 
 **Layers**
-- **Frontend (WebView)** — React + TypeScript + Tailwind (Vite). The `Dashboard` page and its
-  components (`NetWorthCard`, `NetWorthChart`, `AccountList`, `AccountModal`, `ImportModal`,
-  `ConnectionsModal`) call typed `invoke()` bindings in `useFinanceApi.ts`; no business logic lives here.
+- **Frontend surfaces** — React + TypeScript + Tailwind (Vite). Browser navigation loads the
+  public experience from `src/apps/web`; the Tauri runtime loads `src/apps/desktop`. The desktop
+  `Dashboard` and its components call typed `invoke()` bindings in `useFinanceApi.ts`; no business
+  logic lives in either presentation layer. Desktop-specific layout and visual tokens live in
+  `src/apps/desktop/desktop.css`.
+- **Shared UI** — cross-platform components live in `src/shared`. Move product screens here as the
+  authenticated web app grows; inject a browser or Tauri data adapter rather than importing Tauri
+  APIs into shared components.
 - **Rust core (`src-tauri`)** — `lib.rs` builds the Tauri app, registers managed state, and routes
   IPC to `#[tauri::command]` handlers (`accounts`, `net_worth`, `import`, `fx`, `snaptrade`,
   `simplefin`, `questrade`, `teller`). Domain logic sits in services: `db` (schema + `crypto` key
@@ -168,10 +194,28 @@ sequenceDiagram
     API-->>UI: update state, re-render chart and card
 ```
 
-## How to start building
-1. Open this folder as a **project** in Copilot.
-2. Create a **new session**.
-3. Paste the prompt in [`docs/kickoff-prompt.md`](docs/kickoff-prompt.md) to drive **Phase 0 → Phase 1**.
+## Developing web and desktop together
+
+Use the same repository and dependency installation for both surfaces:
+
+```bash
+npm ci
+npm run dev:web       # Browser experience at http://localhost:1420
+npm run dev:desktop   # Tauri desktop app using the same Vite bundle
+```
+
+Production commands follow the same split:
+
+```bash
+npm run build:web
+npm run build:desktop
+```
+
+Keeping both surfaces here is preferable while they share the product model, design system, and
+release cadence. If the browser product later gains an independently deployed API, authentication,
+billing, or a separate team, evolve this repository into an `apps/web`, `apps/desktop`, and
+`packages/*` workspace first. A separate repository is useful only when ownership or release
+boundaries genuinely diverge; splitting now would slow shared development without adding safety.
 
 ## Building & releasing
 Installers for **macOS (universal)** and **Windows (x64)** are built by GitHub Actions and
