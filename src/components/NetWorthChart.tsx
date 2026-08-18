@@ -65,6 +65,7 @@ export default function NetWorthChart({ data, currency }: Props) {
             tickFormatter={(v: string) => v.slice(5)}
           />
           <YAxis
+            domain={["dataMin", "dataMax"]}
             tick={{ fill: "#746d80", fontSize: 11 }}
             tickLine={false}
             axisLine={false}
