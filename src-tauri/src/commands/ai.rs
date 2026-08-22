@@ -1330,16 +1330,28 @@ fn build_context(db: &State<AppDb>, include_real: bool) -> Result<String, String
         }
 
         s.push_str(&format!(
-            "\nCashflow (last {} days, since {}): income USD ${:.2}, fixed USD ${:.2}, \
-             variable USD ${:.2}, net savings USD ${:.2}, savings rate {:.0}%\n",
+            "\nCashflow reconciliation ({} days, {} through {}): income USD ${:.2}, \
+             fixed USD ${:.2}, variable USD ${:.2}, transaction cashflow USD ${:.2}",
             cashflow.window_days,
             cashflow.since,
+            cashflow.through,
             cashflow.income.usd,
             cashflow.fixed.usd,
             cashflow.variable.usd,
             cashflow.net_savings.usd,
-            cashflow.savings_rate * 100.0
         ));
+        if let (Some(change), Some(growth)) =
+            (cashflow.net_worth_change, cashflow.investment_growth)
+        {
+            s.push_str(&format!(
+                ", net-worth change USD ${:.2}, investment/balance change USD ${:.2}",
+                change.usd, growth.usd
+            ));
+        }
+        match cashflow.savings_rate {
+            Some(rate) => s.push_str(&format!(", net-worth savings rate {:.0}%\n", rate * 100.0)),
+            None => s.push_str(", net-worth savings rate unavailable\n"),
+        }
 
         if !cashflow.variable_by_category.is_empty() {
             s.push_str("Variable spending by category (largest first):\n");
@@ -1396,11 +1408,14 @@ fn build_context(db: &State<AppDb>, include_real: bool) -> Result<String, String
             round_thousands(net_worth.total_usd)
         ));
         s.push_str(&format!("Active accounts: {}\n", net_worth.accounts.len()));
-        s.push_str(&format!(
-            "Savings rate (last {} days): {:.0}%\n",
-            cashflow.window_days,
-            cashflow.savings_rate * 100.0
-        ));
+        match cashflow.savings_rate {
+            Some(rate) => s.push_str(&format!(
+                "Net-worth savings rate ({} observed days): {:.0}%\n",
+                cashflow.window_days,
+                rate * 100.0
+            )),
+            None => s.push_str("Net-worth savings rate: unavailable\n"),
+        }
         s.push_str(&format!(
             "Goal progress: {:.0}% toward the USD ${:.0} milestone\n",
             goal.progress * 100.0,

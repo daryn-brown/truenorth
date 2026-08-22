@@ -1,9 +1,10 @@
 //! Cashflow + fixed/variable tagging.
 //!
-//! Synced transactions are classified into one of four flows and summed over a rolling window to
-//! produce a savings-rate view that separates *fixed* commitments (the $800/mo support to mom)
-//! from *variable* lifestyle spending, and excludes internal *transfers* (credit-card payments,
-//! account-to-account moves) so nothing double-counts.
+//! Synced transactions are classified into one of four flows and summed over the same period as the
+//! balance-snapshot comparison. The headline savings rate comes from the observed net-worth change,
+//! while transactions explain how much came from cashflow versus investment growth or other balance
+//! changes. Fixed commitments remain separate from variable lifestyle spending, and internal
+//! transfers are excluded so nothing double-counts.
 //!
 //! Classification precedence, highest first:
 //! 1. a per-transaction manual override (`transactions.flow_override`);
@@ -22,7 +23,9 @@ use serde::Serialize;
 use std::collections::HashMap;
 use tauri::State;
 
-use super::net_worth::{convert_balance, MoneyPair};
+use super::net_worth::{
+    compute_net_worth_period, convert_balance, is_investment_account_type, MoneyPair,
+};
 use crate::db::AppDb;
 use crate::fx::load_usd_rates;
 
@@ -94,19 +97,27 @@ pub struct ClassifiedTransaction {
 /// Rolling-window cashflow totals, with each figure in both reporting currencies.
 #[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct CashflowSummary {
-    /// Length of the window in days.
+    /// Observed balance-snapshot span, or the requested fallback window without enough history.
     pub window_days: i64,
-    /// Inclusive start date of the window (YYYY-MM-DD).
+    /// Balance baseline date (YYYY-MM-DD); transactions begin after this date.
     pub since: String,
+    /// Inclusive end date of the window (YYYY-MM-DD).
+    pub through: String,
     pub income: MoneyPair,
     /// Fixed expenses as a positive magnitude.
     pub fixed: MoneyPair,
     /// Variable ("lifestyle") expenses as a positive magnitude.
     pub variable: MoneyPair,
-    /// income − fixed − variable. Negative means spending outran income over the window.
+    /// income − fixed − variable from classified transactions.
     pub net_savings: MoneyPair,
-    /// net_savings / income (USD basis), 0 when there was no income.
-    pub savings_rate: f64,
+    /// Like-for-like change in observed net worth over the same period. `None` until two balance
+    /// dates exist.
+    pub net_worth_change: Option<MoneyPair>,
+    /// Exact reconciliation residual: net_worth_change − net_savings. This primarily represents
+    /// investment performance, plus balance-only activity that was not present in transaction data.
+    pub investment_growth: Option<MoneyPair>,
+    /// net_worth_change / income (USD basis). `None` without a balance baseline or positive income.
+    pub savings_rate: Option<f64>,
     /// Count of transfer rows excluded from the totals.
     pub transfer_count: i64,
     /// Total transactions considered in the window.
@@ -168,23 +179,8 @@ fn classify(
 /// funding deposits, security purchases or reinvested dividends). Cash accounts (chequing,
 /// savings) are deliberately absent — their inflows can be real income such as salary or interest.
 fn is_non_cash_account(account_type: &str) -> bool {
-    matches!(
-        account_type.trim().to_ascii_lowercase().as_str(),
-        "credit"
-            | "brokerage"
-            | "investment"
-            | "crypto"
-            | "ira"
-            | "roth_ira"
-            | "rrsp"
-            | "tfsa"
-            | "resp"
-            | "lira"
-            | "rrif"
-            | "rlif"
-            | "401k"
-            | "pension"
-    )
+    account_type.trim().eq_ignore_ascii_case("credit")
+        || is_investment_account_type(account_type)
 }
 
 // ---------------------------------------------------------------------------
@@ -642,7 +638,7 @@ fn load_rules(conn: &Connection) -> rusqlite::Result<Vec<(String, FlowType)>> {
     Ok(rules)
 }
 
-/// ISO date `window_days` ago (inclusive lower bound of the rolling window).
+/// ISO date `window_days` ago (exclusive lower bound of the fallback rolling window).
 fn window_since(window_days: i64) -> String {
     let days = window_days.clamp(1, 3650);
     (chrono::Utc::now() - chrono::Duration::days(days))
@@ -650,10 +646,23 @@ fn window_since(window_days: i64) -> String {
         .to_string()
 }
 
-/// Compute the cashflow summary over the trailing `window_days` across active accounts.
+/// Compute cashflow and net-worth reconciliation near the requested trailing window.
 pub(crate) fn compute_cashflow(conn: &Connection, window_days: i64) -> rusqlite::Result<CashflowSummary> {
-    let window_days = window_days.clamp(1, 3650);
-    let since = window_since(window_days);
+    let requested_window_days = window_days.clamp(1, 3650);
+    let net_worth_period = compute_net_worth_period(conn, requested_window_days)?;
+    let fallback_through = chrono::Utc::now().format("%Y-%m-%d").to_string();
+    let (window_days, since, through) = match net_worth_period.as_ref() {
+        Some(period) => (
+            period.window_days,
+            period.since.clone(),
+            period.through.clone(),
+        ),
+        None => (
+            requested_window_days,
+            window_since(requested_window_days),
+            fallback_through,
+        ),
+    };
     let usd_rates = load_usd_rates(conn)?;
     let rules = load_rules(conn)?;
 
@@ -661,10 +670,10 @@ pub(crate) fn compute_cashflow(conn: &Connection, window_days: i64) -> rusqlite:
         "SELECT t.account_id, t.txn_date, t.amount, t.currency, t.description, t.flow_override, \
                 a.account_type, t.category \
          FROM transactions t JOIN accounts a ON a.id = t.account_id \
-         WHERE a.is_active = 1 AND t.txn_date >= ?1",
+         WHERE a.is_active = 1 AND t.txn_date > ?1 AND t.txn_date <= ?2",
     )?;
-    let txns: Vec<FlowInput> = stmt
-        .query_map(params![since], |r| {
+    let mut txns: Vec<FlowInput> = stmt
+        .query_map(params![since, through], |r| {
             Ok(FlowInput {
                 account_id: r.get(0)?,
                 date: r.get(1)?,
@@ -677,6 +686,9 @@ pub(crate) fn compute_cashflow(conn: &Connection, window_days: i64) -> rusqlite:
             })
         })?
         .collect::<Result<Vec<_>, _>>()?;
+    if let Some(period) = net_worth_period.as_ref() {
+        txns.retain(|txn| period.account_ids.contains(&txn.account_id));
+    }
 
     let flows = resolve_flow_types(&txns, &rules, &usd_rates);
 
@@ -731,19 +743,29 @@ pub(crate) fn compute_cashflow(conn: &Connection, window_days: i64) -> rusqlite:
         usd: income.usd - fixed.usd - variable.usd,
         cad: income.cad - fixed.cad - variable.cad,
     };
-    let savings_rate = if income.usd > 0.0 {
-        net_savings.usd / income.usd
-    } else {
-        0.0
+    let (net_worth_change, investment_growth, savings_rate) = match net_worth_period {
+        Some(period) => {
+            let change = period.change;
+            let growth = MoneyPair {
+                usd: change.usd - net_savings.usd,
+                cad: change.cad - net_savings.cad,
+            };
+            let rate = (income.usd > 0.0).then_some(change.usd / income.usd);
+            (Some(change), Some(growth), rate)
+        }
+        None => (None, None, None),
     };
 
     Ok(CashflowSummary {
         window_days,
         since,
+        through,
         income,
         fixed,
         variable,
         net_savings,
+        net_worth_change,
+        investment_growth,
         savings_rate,
         transfer_count,
         txn_count,
@@ -812,7 +834,7 @@ fn fetch_classified(conn: &Connection, limit: i64) -> rusqlite::Result<Vec<Class
 // Commands
 // ---------------------------------------------------------------------------
 
-/// Income vs. fixed vs. variable spending (and the resulting savings rate) over the trailing
+/// Balance-aligned income, spending, net-worth movement, and savings rate for a target
 /// `window_days` (default 30).
 #[tauri::command]
 pub fn get_cashflow_summary(
@@ -1089,6 +1111,21 @@ mod tests {
         .unwrap();
     }
 
+    fn insert_snapshot(
+        conn: &Connection,
+        account_id: i64,
+        date: &str,
+        balance: f64,
+        currency: &str,
+    ) {
+        conn.execute(
+            "INSERT OR REPLACE INTO balance_snapshots \
+             (account_id, snapshot_date, balance, currency) VALUES (?1, ?2, ?3, ?4)",
+            params![account_id, date, balance, currency],
+        )
+        .unwrap();
+    }
+
     #[test]
     fn compute_cashflow_excludes_investment_account_inflows() {
         let conn = Connection::open_in_memory().unwrap();
@@ -1139,6 +1176,11 @@ mod tests {
 
         let acct = seed_account(&conn, "CAD");
         let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
+        let earlier = (chrono::Utc::now() - chrono::Duration::days(30))
+            .format("%Y-%m-%d")
+            .to_string();
+        insert_snapshot(&conn, acct, &earlier, 1000.0, "CAD");
+        insert_snapshot(&conn, acct, &today, 5000.0, "CAD");
         insert_txn(&conn, acct, &today, "MICROSOFT PAYROLL", 5000.0, "CAD");
         insert_txn(
             &conn,
@@ -1165,8 +1207,65 @@ mod tests {
         assert_eq!(s.variable_by_category[0].amount.cad, 200.0);
         // USD figures use the 1.25 pivot.
         assert_eq!(s.income.usd, 4000.0);
-        assert!((s.savings_rate - 0.8).abs() < 1e-9);
+        assert_eq!(s.net_worth_change.unwrap().cad, 4000.0);
+        assert_eq!(s.investment_growth.unwrap().cad, 0.0);
+        assert!((s.savings_rate.unwrap() - 0.8).abs() < 1e-9);
         assert!(!s.currency_warning);
+    }
+
+    #[test]
+    fn savings_rate_uses_net_worth_change_and_reconciles_investment_growth() {
+        let conn = Connection::open_in_memory().unwrap();
+        crate::db::apply_schema(&conn).unwrap();
+        crate::db::seed_defaults(&conn).unwrap();
+        conn.execute(
+            "INSERT INTO fx_rates (from_currency, to_currency, rate, rate_date) \
+             VALUES ('USD', 'CAD', 1.25, '2025-01-01')",
+            [],
+        )
+        .unwrap();
+
+        let chequing = seed_account(&conn, "USD");
+        let brokerage = seed_account_typed(&conn, "USD", "brokerage");
+        let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
+        let earlier = (chrono::Utc::now() - chrono::Duration::days(30))
+            .format("%Y-%m-%d")
+            .to_string();
+
+        // Transactions explain $1,500 of savings: $5,000 income less $3,500 spending.
+        insert_txn(&conn, chequing, &today, "ACME PAYROLL", 5000.0, "USD");
+        insert_txn(&conn, chequing, &today, "HOME REPAIR", -3500.0, "USD");
+        // Balances rose by $2,000 in total; the remaining $500 is investment/balance growth.
+        insert_snapshot(&conn, chequing, &earlier, 1000.0, "USD");
+        insert_snapshot(&conn, brokerage, &earlier, 1000.0, "USD");
+        insert_snapshot(&conn, chequing, &today, 2500.0, "USD");
+        insert_snapshot(&conn, brokerage, &today, 1500.0, "USD");
+
+        let s = compute_cashflow(&conn, 30).unwrap();
+        assert_eq!(s.since, earlier);
+        assert_eq!(s.through, today);
+        assert_eq!(s.window_days, 30);
+        assert_eq!(s.net_savings.usd, 1500.0);
+        assert_eq!(s.net_worth_change.unwrap().usd, 2000.0);
+        assert_eq!(s.investment_growth.unwrap().usd, 500.0);
+        assert!((s.savings_rate.unwrap() - 0.4).abs() < 1e-9);
+    }
+
+    #[test]
+    fn savings_rate_is_unavailable_until_two_balance_dates_exist() {
+        let conn = Connection::open_in_memory().unwrap();
+        crate::db::apply_schema(&conn).unwrap();
+        crate::db::seed_defaults(&conn).unwrap();
+        let acct = seed_account(&conn, "USD");
+        let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
+        insert_txn(&conn, acct, &today, "ACME PAYROLL", 5000.0, "USD");
+        insert_snapshot(&conn, acct, &today, 5000.0, "USD");
+
+        let s = compute_cashflow(&conn, 30).unwrap();
+        assert_eq!(s.net_savings.usd, 5000.0);
+        assert_eq!(s.net_worth_change, None);
+        assert_eq!(s.investment_growth, None);
+        assert_eq!(s.savings_rate, None);
     }
 
     #[test]

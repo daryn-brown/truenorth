@@ -52,9 +52,9 @@ const FLOW_STYLES: Record<FlowType, string> = {
 const FLOW_OPTIONS: FlowType[] = ["income", "fixed", "variable", "transfer"];
 
 /**
- * "Monthly Cashflow" — savings rate plus an income / fixed / variable breakdown over the trailing
- * window. Fixed commitments (the mom support transfer) are kept out of the variable "lifestyle"
- * number, and internal transfers are excluded entirely. Rows can be retagged inline.
+ * Balance-aligned cashflow: the savings rate comes from observed net-worth change, while classified
+ * transactions explain cashflow and the residual captures investment growth or other balance-only
+ * activity. Rows can still be retagged inline without redefining the saved-dollar numerator.
  */
 export default function CashflowCard({
   summary,
@@ -134,8 +134,26 @@ export default function CashflowCard({
   }
   if (!summary) return null;
 
-  const ratePct = Math.round(summary.savings_rate * 100);
-  const netNegative = summary.net_savings.usd < 0;
+  const ratePct =
+    summary.savings_rate === null ? null : Math.round(summary.savings_rate * 100);
+  const netWorthChange = summary.net_worth_change;
+  const investmentGrowth = summary.investment_growth;
+  const headlinePair = netWorthChange ?? summary.net_savings;
+  const hasReconciliation =
+    netWorthChange !== null && investmentGrowth !== null;
+  const netNegative = headlinePair.usd < 0;
+  const rateColor =
+    ratePct === null
+      ? "text-slate-300"
+      : netNegative
+        ? "text-amber-400"
+        : "text-emerald-400";
+  const headlineLabel =
+    netWorthChange === null
+      ? "transaction cashflow"
+      : netNegative
+        ? "net worth decrease"
+        : "net worth increase";
   const expenseTotal =
     (homeCurrency === "CAD" ? summary.fixed.cad : summary.fixed.usd) +
     (homeCurrency === "CAD" ? summary.variable.cad : summary.variable.usd);
@@ -181,37 +199,37 @@ export default function CashflowCard({
         <p className="text-sm font-medium uppercase tracking-widest text-slate-400">
           Cashflow
         </p>
-        <span className="rounded-full border border-slate-600/60 bg-slate-800/60 px-2 py-0.5 text-[11px] font-semibold uppercase tracking-wider text-slate-400">
-          Last {summary.window_days}d
+        <span
+          title={`${summary.since} through ${summary.through}`}
+          className="rounded-full border border-slate-600/60 bg-slate-800/60 px-2 py-0.5 text-[11px] font-semibold uppercase tracking-wider text-slate-400"
+        >
+          {netWorthChange === null
+            ? `Last ${summary.window_days}d`
+            : `${summary.window_days}d observed`}
         </span>
       </div>
 
       {summary.txn_count === 0 ? (
         <p className="mt-3 text-sm text-slate-400">
-          No transactions yet. Connect a bank via SimpleFIN and sync to pull recent
-          transactions — then I'll split your spending into fixed vs. variable and track your
-          savings rate.
+          No transactions fall between these balance dates. Sync an account to add the income and
+          spending breakdown.
         </p>
       ) : (
         <>
           <div className="mt-3 flex items-baseline justify-between">
             <div>
               <span
-                className={`text-3xl font-bold tracking-tight ${
-                  netNegative ? "text-amber-400" : "text-emerald-400"
-                }`}
+                className={`text-3xl font-bold tracking-tight ${rateColor}`}
               >
-                {ratePct}%
+                {ratePct === null ? "—" : `${ratePct}%`}
               </span>
-              <span className="ml-2 text-sm text-slate-400">savings rate</span>
+              <span className="ml-2 text-sm text-slate-400">net-worth savings rate</span>
             </div>
             <div className="text-right">
               <p className="text-sm font-semibold text-white">
-                {money(summary.net_savings, homeCurrency)}
+                {money(headlinePair, homeCurrency)}
               </p>
-              <p className="text-xs text-slate-500">
-                {netNegative ? "net burn" : "net saved"}
-              </p>
+              <p className="text-xs text-slate-500">{headlineLabel}</p>
             </div>
           </div>
 
@@ -268,11 +286,45 @@ export default function CashflowCard({
             </div>
           )}
 
+          {netWorthChange !== null && investmentGrowth !== null && (
+            <div className="mt-4 rounded-xl border border-slate-700/70 bg-slate-900/40 px-4 py-3 text-xs">
+              <div className="flex items-center justify-between text-slate-400">
+                <span>Transaction cashflow</span>
+                <span className="font-medium text-slate-200">
+                  {money(summary.net_savings, homeCurrency)}
+                </span>
+              </div>
+              <div className="mt-1.5 flex items-center justify-between text-slate-400">
+                <span>Investment growth &amp; balance changes</span>
+                <span className="font-medium text-slate-200">
+                  {money(investmentGrowth, homeCurrency)}
+                </span>
+              </div>
+              <div className="mt-2 flex items-center justify-between border-t border-slate-700/70 pt-2 text-slate-300">
+                <span>Net worth change</span>
+                <span className="font-semibold text-white">
+                  {money(netWorthChange, homeCurrency)}
+                </span>
+              </div>
+            </div>
+          )}
+
           <p className="mt-4 rounded-xl border border-slate-700/70 bg-slate-900/40 px-4 py-3 text-xs text-slate-400">
-            Fixed commitments are kept out of the <span className="text-amber-300">variable</span>{" "}
-            "lifestyle creep" number, and {summary.transfer_count} internal transfer
-            {summary.transfer_count === 1 ? "" : "s"} (card payments, account moves)
-            {summary.transfer_count === 1 ? " was" : " were"} excluded so nothing double-counts.
+            {hasReconciliation ? (
+              <>
+                Savings rate is the net worth change divided by income from{" "}
+                {shortDate(summary.since)} through {shortDate(summary.through)}. The investment and
+                balance line reconciles what classified transactions do not explain.{" "}
+              </>
+            ) : (
+              <>
+                Savings rate needs two observed balance dates. Transaction cashflow is shown in the
+                meantime.{" "}
+              </>
+            )}
+            {summary.transfer_count} internal transfer
+            {summary.transfer_count === 1 ? "" : "s"} (card payments and account moves)
+            {summary.transfer_count === 1 ? " was" : " were"} excluded.
             {summary.currency_warning && (
               <span className="mt-1 block text-amber-400">
                 Some transactions are in a currency with no exchange rate yet — refresh FX to fold

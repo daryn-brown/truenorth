@@ -63,13 +63,35 @@ enum AccountClass {
     Other,
 }
 
+pub(crate) fn is_investment_account_type(account_type: &str) -> bool {
+    matches!(
+        account_type.trim().to_ascii_lowercase().as_str(),
+        "brokerage"
+            | "investment"
+            | "retirement"
+            | "crypto"
+            | "ira"
+            | "roth_ira"
+            | "rrsp"
+            | "tfsa"
+            | "resp"
+            | "fhsa"
+            | "lira"
+            | "rrif"
+            | "rlif"
+            | "401k"
+            | "pension"
+    )
+}
+
 fn account_class(account_type: &str) -> AccountClass {
-    match account_type {
-        "chequing" | "savings" => AccountClass::Liquid,
-        "brokerage" | "tfsa" | "rrsp" | "fhsa" | "401k" | "ira" | "roth_ira" | "crypto" => {
-            AccountClass::Invested
-        }
-        _ => AccountClass::Other,
+    let normalized = account_type.trim().to_ascii_lowercase();
+    if matches!(normalized.as_str(), "chequing" | "savings") {
+        AccountClass::Liquid
+    } else if is_investment_account_type(&normalized) {
+        AccountClass::Invested
+    } else {
+        AccountClass::Other
     }
 }
 
@@ -468,6 +490,83 @@ fn compute_carried_account_series(
     Ok(points)
 }
 
+/// Like-for-like net-worth movement over the snapshot period nearest the requested window.
+///
+/// The baseline is the latest observed snapshot date on or before `window_days` before the current
+/// snapshot. If the database has less history, its earliest prior date is used and `window_days`
+/// reports the shorter observed period. Accounts first seen after the baseline are excluded from
+/// both the change and the transaction reconciliation so linking an existing account cannot look
+/// like new savings.
+#[derive(Debug, PartialEq)]
+pub(crate) struct NetWorthPeriod {
+    pub since: String,
+    pub through: String,
+    pub window_days: i64,
+    pub account_ids: HashSet<i64>,
+    pub change: MoneyPair,
+}
+
+pub(crate) fn compute_net_worth_period(
+    conn: &Connection,
+    window_days: i64,
+) -> rusqlite::Result<Option<NetWorthPeriod>> {
+    let series = compute_carried_account_series(conn)?;
+    if series.len() < 2 {
+        return Ok(None);
+    }
+
+    let (through_text, current_balances) = &series[series.len() - 1];
+    let Ok(through) = chrono::NaiveDate::parse_from_str(through_text, "%Y-%m-%d") else {
+        return Ok(None);
+    };
+    let target = through - chrono::Duration::days(window_days.clamp(1, 3650));
+    let prior = &series[..series.len() - 1];
+
+    let baseline_index = prior
+        .iter()
+        .enumerate()
+        .rev()
+        .find_map(|(index, (date, _))| {
+            chrono::NaiveDate::parse_from_str(date, "%Y-%m-%d")
+                .ok()
+                .filter(|parsed| *parsed <= target)
+                .map(|_| index)
+        })
+        .or_else(|| {
+            prior.iter().enumerate().find_map(|(index, (date, _))| {
+                chrono::NaiveDate::parse_from_str(date, "%Y-%m-%d")
+                    .ok()
+                    .map(|_| index)
+            })
+        });
+    let Some(baseline_index) = baseline_index else {
+        return Ok(None);
+    };
+
+    let (since_text, baseline_balances) = &prior[baseline_index];
+    let Ok(since) = chrono::NaiveDate::parse_from_str(since_text, "%Y-%m-%d") else {
+        return Ok(None);
+    };
+    let observed_days = (through - since).num_days();
+    if observed_days <= 0 {
+        return Ok(None);
+    }
+
+    let account_ids: HashSet<i64> = baseline_balances.keys().copied().collect();
+    let meta = load_account_class_meta(conn)?;
+    let usd_rates = load_usd_rates(conn)?;
+    let baseline = breakdown(baseline_balances, &meta, &usd_rates, Some(&account_ids));
+    let current = breakdown(current_balances, &meta, &usd_rates, Some(&account_ids));
+
+    Ok(Some(NetWorthPeriod {
+        since: since_text.clone(),
+        through: through_text.clone(),
+        window_days: observed_days,
+        account_ids,
+        change: current.total.minus(baseline.total),
+    }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -706,6 +805,14 @@ mod tests {
         assert_eq!(d.liquid_delta.usd, 100.0);
         assert_eq!(d.invested_delta.usd, 0.0);
         assert_eq!(d.total_delta.cad, 200.0);
+
+        let period = compute_net_worth_period(&conn, 30).unwrap().unwrap();
+        assert_eq!(period.since, "2025-01-01");
+        assert_eq!(period.through, "2025-02-01");
+        assert_eq!(period.window_days, 31);
+        assert_eq!(period.account_ids.len(), 1);
+        assert!(period.account_ids.contains(&chequing));
+        assert_eq!(period.change.usd, 100.0);
     }
 
     #[test]
