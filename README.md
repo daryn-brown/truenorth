@@ -9,6 +9,11 @@ questions about your own data.
 > Replaces the "paste screenshots into a chatbot" workflow with a real, queryable system.
 
 ## Status
+💸 **Yearly dividend income shipped.** The desktop dashboard now combines live share counts from
+connected investment accounts with daily cached Yahoo Finance distribution research to estimate
+annual and monthly dividend income. Dividend cash found in synced transaction history is displayed
+separately, with source, coverage, stale-data, and unresolved-ticker indicators.
+
 ✨ **Desktop UI 2.0 shipped.** The native app now uses the same immersive violet design language
 as the web experience: a compact navigation rail, stronger information hierarchy, spatial
 multi-account net-worth view, dense planning studio, and consistent glass surfaces across account
@@ -41,6 +46,8 @@ Setup lives in [`docs/snaptrade.md`](docs/snaptrade.md), [`docs/simplefin.md`](d
   **Questrade** via its own free API (full cash + equity, under the **Direct** tab), plus
   **manual/CSV** fallback.
 - **Multi-currency net worth** — any account currency converted into USD + CAD totals — with history chart + dashboard.
+- **Yearly dividend income** from connected holdings plus trailing distribution research, alongside
+  actual dividend payments found in synced transaction history.
 - Transaction review (search/filter/categorize) + goals.
 - **AI advisor** using your **GitHub Copilot** subscription or local **Ollama**, with rounded-data privacy mode.
 
@@ -111,8 +118,8 @@ flowchart TB
     end
 
     kc{{"🔐 OS Keychain · keyring<br/>macOS Keychain · Windows Credential Manager<br/>256-bit SQLCipher key"}}
-    db[("🗄️ Encrypted SQLite · SQLCipher<br/>finance-second-brain.db<br/>accounts · balance_snapshots · fx_rates<br/>holdings · transactions · goals · app_settings")]
-    yahoo(["🌐 Yahoo Finance<br/>FX quotes · USD pivot"])
+    db[("🗄️ Encrypted SQLite · SQLCipher<br/>finance-second-brain.db<br/>accounts · balance_snapshots · fx_rates<br/>holdings · dividend_research · transactions · goals · app_settings")]
+    yahoo(["🌐 Yahoo Finance<br/>FX quotes · dividend history"])
     snaptrade(["🌐 SnapTrade API<br/>read-only brokerage sync"])
     simplefin(["🌐 SimpleFIN Bridge<br/>read-only bank sync"])
     questrade(["🌐 Questrade API<br/>read-only cash + equity sync"])
@@ -161,7 +168,7 @@ flowchart TB
 - **Persistence** — SQLite encrypted with SQLCipher (`finance-second-brain.db`); the key is generated
   once and stored in the macOS Keychain / Windows Credential Manager via `keyring`. SnapTrade,
   SimpleFIN, Questrade, and Teller secrets live in the same secret store — never on disk in the clear.
-- **External** — read-only HTTPS calls to Yahoo Finance (USD↔CAD rate), the SnapTrade and SimpleFIN
+- **External** — read-only HTTPS calls to Yahoo Finance (FX rates + dividend history), the SnapTrade and SimpleFIN
   aggregators, Teller (free US bank balances over mTLS), and Questrade's own API (full cash + equity);
   everything else is local.
 

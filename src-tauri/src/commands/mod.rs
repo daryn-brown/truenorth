@@ -1,6 +1,7 @@
 pub mod accounts;
 pub mod ai;
 pub mod cashflow;
+pub mod dividends;
 pub mod fire;
 pub mod fx;
 pub mod goals;

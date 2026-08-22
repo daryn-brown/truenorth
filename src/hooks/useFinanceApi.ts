@@ -18,6 +18,7 @@ import type {
   CashflowSummary,
   CategorizeResult,
   ClassifiedTransaction,
+  DividendSummary,
   FlowType,
   FxRate,
   FireInputs,
@@ -71,6 +72,11 @@ export const getNetWorthHistory = (): Promise<NetWorthHistoryPoint[]> =>
 
 export const getNetWorthDelta = (): Promise<NetWorthDelta> =>
   invoke("get_net_worth_delta");
+
+export const getDividendSummary = (
+  forceRefresh = false,
+): Promise<DividendSummary> =>
+  invoke("get_dividend_summary", { forceRefresh });
 
 export const getGoalProgress = (): Promise<GoalProgress> =>
   invoke("get_goal_progress");

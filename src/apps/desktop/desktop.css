@@ -935,6 +935,301 @@
   padding: 1.55rem !important;
 }
 
+.dividend-card {
+  min-height: 390px;
+  padding: 1.55rem !important;
+  border-color: rgba(101, 233, 197, 0.16) !important;
+  background:
+    radial-gradient(circle at 8% 0%, rgba(101, 233, 197, 0.1), transparent 34%),
+    radial-gradient(circle at 96% 100%, rgba(85, 120, 255, 0.12), transparent 42%),
+    linear-gradient(145deg, rgba(12, 20, 27, 0.94), rgba(8, 8, 18, 0.96)) !important;
+}
+
+.dividend-card__header,
+.dividend-card__actions,
+.dividend-card__coverage,
+.dividend-card__holding {
+  display: flex;
+  align-items: center;
+}
+
+.dividend-card__header {
+  position: relative;
+  z-index: 2;
+  justify-content: space-between;
+  gap: 1.5rem;
+}
+
+.dividend-card__eyebrow,
+.dividend-card__positions-heading > span {
+  margin: 0;
+  color: var(--tn-mint);
+  font-size: 0.58rem;
+  font-weight: 650;
+  letter-spacing: 0.13em;
+  text-transform: uppercase;
+}
+
+.dividend-card__header h2 {
+  margin: 0.38rem 0 0.2rem;
+  color: var(--tn-text);
+  font-size: 1.45rem;
+  font-weight: 520;
+  letter-spacing: -0.035em;
+}
+
+.dividend-card__header > div:first-child > span {
+  color: var(--tn-muted);
+  font-size: 0.66rem;
+}
+
+.dividend-card__actions {
+  flex: 0 0 auto;
+  gap: 0.65rem;
+}
+
+.dividend-card__source {
+  padding: 0.38rem 0.62rem;
+  border: 1px solid rgba(101, 233, 197, 0.15);
+  border-radius: 999px;
+  color: rgba(185, 247, 230, 0.72);
+  background: rgba(101, 233, 197, 0.045);
+  font-size: 0.55rem;
+  font-weight: 620;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.dividend-card__actions button {
+  display: flex;
+  align-items: center;
+  gap: 0.38rem;
+  min-height: 2.2rem;
+  padding: 0 0.75rem;
+  border: 1px solid var(--tn-line);
+  border-radius: 10px;
+  color: var(--tn-text-soft);
+  background: rgba(255, 255, 255, 0.035);
+  cursor: pointer;
+}
+
+.dividend-card__actions button:disabled {
+  opacity: 0.55;
+  cursor: wait;
+}
+
+.dividend-card__actions button svg {
+  width: 0.82rem;
+}
+
+.dividend-card__content {
+  position: relative;
+  z-index: 2;
+  display: grid;
+  grid-template-columns: minmax(220px, 0.82fr) minmax(0, 1.75fr);
+  gap: 1.4rem;
+  margin-top: 1.35rem;
+}
+
+.dividend-card__metrics {
+  display: flex;
+  flex-direction: column;
+  gap: 0.7rem;
+}
+
+.dividend-card__metric {
+  display: flex;
+  flex-direction: column;
+  padding: 0.85rem 0.95rem;
+  border: 1px solid var(--tn-line);
+  border-radius: 15px;
+  background: rgba(255, 255, 255, 0.022);
+}
+
+.dividend-card__metric--primary {
+  border-color: rgba(101, 233, 197, 0.14);
+  background: rgba(101, 233, 197, 0.035);
+}
+
+.dividend-card__metric > span {
+  color: var(--tn-muted);
+  font-size: 0.58rem;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.dividend-card__metric > strong {
+  margin-top: 0.35rem;
+  color: var(--tn-text);
+  font-size: clamp(1.5rem, 2.6vw, 2.25rem);
+  font-weight: 520;
+  letter-spacing: -0.05em;
+}
+
+.dividend-card__metric--primary > strong {
+  color: var(--tn-mint);
+}
+
+.dividend-card__metric > small {
+  margin-top: 0.18rem;
+  color: var(--tn-subtle);
+  font-size: 0.56rem;
+}
+
+.dividend-card__coverage {
+  justify-content: space-between;
+  gap: 0.8rem;
+  padding: 0.2rem 0.15rem 0;
+  color: var(--tn-subtle);
+  font-size: 0.57rem;
+}
+
+.dividend-card__coverage strong {
+  color: var(--tn-text-soft);
+  font-weight: 600;
+}
+
+.dividend-card__positions {
+  min-width: 0;
+  padding: 0.85rem 1rem;
+  border: 1px solid var(--tn-line);
+  border-radius: 16px;
+  background: rgba(3, 5, 10, 0.27);
+}
+
+.dividend-card__positions-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  padding-bottom: 0.65rem;
+  border-bottom: 1px solid var(--tn-line);
+}
+
+.dividend-card__positions-heading > small {
+  color: var(--tn-subtle);
+  font-size: 0.55rem;
+}
+
+.dividend-card__holding-list {
+  display: flex;
+  flex-direction: column;
+}
+
+.dividend-card__holding {
+  justify-content: space-between;
+  gap: 1rem;
+  min-height: 48px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.045);
+}
+
+.dividend-card__holding:last-child {
+  border-bottom: 0;
+}
+
+.dividend-card__ticker {
+  display: flex;
+  min-width: 110px;
+  flex-direction: column;
+}
+
+.dividend-card__ticker strong,
+.dividend-card__holding > strong {
+  color: var(--tn-text);
+  font-size: 0.72rem;
+  font-weight: 620;
+}
+
+.dividend-card__ticker span,
+.dividend-card__holding > div:nth-child(2) > span,
+.dividend-card__holding > div:nth-child(2) > small {
+  display: block;
+  max-width: 210px;
+  overflow: hidden;
+  color: var(--tn-subtle);
+  font-size: 0.54rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dividend-card__holding > div:nth-child(2) {
+  min-width: 0;
+  flex: 1;
+}
+
+.dividend-card__holding > div:nth-child(2) > span {
+  color: var(--tn-muted);
+}
+
+.dividend-card__holding > strong {
+  flex: 0 0 auto;
+  color: var(--tn-mint);
+  text-align: right;
+}
+
+.dividend-card__empty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 160px;
+  flex-direction: column;
+  padding: 1.2rem;
+  text-align: center;
+}
+
+.dividend-card__empty svg {
+  width: 1.25rem;
+  color: rgba(101, 233, 197, 0.75);
+}
+
+.dividend-card__empty strong {
+  margin-top: 0.55rem;
+  color: var(--tn-text-soft);
+  font-size: 0.72rem;
+}
+
+.dividend-card__empty span {
+  max-width: 360px;
+  margin-top: 0.3rem;
+  color: var(--tn-subtle);
+  font-size: 0.58rem;
+  line-height: 1.55;
+}
+
+.dividend-card__warning {
+  position: relative;
+  z-index: 2;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem 0.8rem;
+  margin-top: 0.75rem;
+  padding: 0.55rem 0.7rem;
+  border: 1px solid rgba(241, 185, 103, 0.13);
+  border-radius: 10px;
+  color: rgba(241, 185, 103, 0.78);
+  background: rgba(241, 185, 103, 0.035);
+  font-size: 0.56rem;
+}
+
+.dividend-card__more,
+.dividend-card__footnote {
+  margin: 0;
+  color: var(--tn-subtle);
+  font-size: 0.53rem;
+}
+
+.dividend-card__more {
+  padding-top: 0.5rem;
+  border-top: 1px solid var(--tn-line);
+}
+
+.dividend-card__footnote {
+  position: relative;
+  z-index: 2;
+  margin-top: 0.75rem;
+  line-height: 1.5;
+}
+
 .cashflow-card > div:first-child,
 .fire-card > div:first-child,
 .simulator-card > div:first-child {
@@ -1291,6 +1586,10 @@
 
   .desktop-layout-grid > div {
     grid-column: span 12;
+  }
+
+  .dividend-card__content {
+    grid-template-columns: 1fr;
   }
 
   .dashboard-section__heading > p {

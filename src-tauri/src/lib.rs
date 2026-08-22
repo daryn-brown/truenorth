@@ -56,6 +56,7 @@ pub fn run() {
             commands::cashflow::list_txn_rules,
             commands::cashflow::add_txn_rule,
             commands::cashflow::delete_txn_rule,
+            commands::dividends::get_dividend_summary,
             commands::simulator::get_seattle_projection,
             commands::simulator::set_seattle_assumptions,
             commands::import::import_data,

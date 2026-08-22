@@ -1,10 +1,11 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import type {
   Account,
   AddAccountPayload,
   AddBalanceSnapshotPayload,
   CashflowSummary,
   Currency,
+  DividendSummary,
   FireInputs,
   FirePlan,
   GoalProgress,
@@ -21,6 +22,7 @@ import {
   addBalanceSnapshot,
   deleteAccount,
   getCashflowSummary,
+  getDividendSummary,
   getFirePlan,
   getGoalProgress,
   getNetWorth,
@@ -42,6 +44,7 @@ import FirePlannerCard from "../components/FirePlannerCard";
 import ProgressCard from "../components/ProgressCard";
 import SeattleSimulatorCard from "../components/SeattleSimulatorCard";
 import CashflowCard from "../components/CashflowCard";
+import DividendIncomeCard from "../components/DividendIncomeCard";
 import AccountList from "../components/AccountList";
 import AccountModal from "../components/AccountModal";
 import ImportModal from "../components/ImportModal";
@@ -73,6 +76,7 @@ export default function Dashboard({
   const [progress, setProgress] = useState<ProgressMetrics | null>(null);
   const [projection, setProjection] = useState<SeattleProjection | null>(null);
   const [cashflow, setCashflow] = useState<CashflowSummary | null>(null);
+  const [dividends, setDividends] = useState<DividendSummary | null>(null);
   const [history, setHistory] = useState<NetWorthHistoryPoint[]>([]);
   const [homeCurrency, setHomeCurrency] = useState<Currency>("CAD");
   const [loading, setLoading] = useState(true);
@@ -81,6 +85,34 @@ export default function Dashboard({
   const [connectOpen, setConnectOpen] = useState(false);
   const [refreshingFx, setRefreshingFx] = useState(false);
   const [fxError, setFxError] = useState<string | null>(null);
+  const [dividendLoading, setDividendLoading] = useState(true);
+  const [dividendError, setDividendError] = useState<string | null>(null);
+  const dividendRequest = useRef(0);
+
+  const loadDividends = useCallback(async (forceRefresh = false) => {
+    const requestId = ++dividendRequest.current;
+    setDividendLoading(true);
+    setDividendError(null);
+    try {
+      const summary = await getDividendSummary(forceRefresh);
+      if (requestId === dividendRequest.current) {
+        setDividends(summary);
+      }
+    } catch (err) {
+      console.error("Failed to load dividend income:", err);
+      if (requestId === dividendRequest.current) {
+        setDividendError(
+          typeof err === "string"
+            ? err
+            : "Dividend research is unavailable right now.",
+        );
+      }
+    } finally {
+      if (requestId === dividendRequest.current) {
+        setDividendLoading(false);
+      }
+    }
+  }, []);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -93,6 +125,7 @@ export default function Dashboard({
       } catch (err) {
         console.error("Auto FX refresh failed:", err);
       }
+      void loadDividends();
       const [accs, nw, nwDelta, goalProgress, fire, wb, proj, cf, hist] = await Promise.all([
         listAccounts(),
         getNetWorth(),
@@ -118,7 +151,7 @@ export default function Dashboard({
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [loadDividends]);
 
   useEffect(() => {
     void load();
@@ -360,6 +393,15 @@ export default function Dashboard({
                 homeCurrency={homeCurrency}
                 loading={loading}
                 onChanged={refreshCashflow}
+              />
+            </div>
+            <div className="desktop-span-12">
+              <DividendIncomeCard
+                summary={dividends}
+                homeCurrency={homeCurrency}
+                loading={dividendLoading}
+                error={dividendError}
+                onRefresh={() => loadDividends(true)}
               />
             </div>
           </div>

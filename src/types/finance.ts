@@ -77,6 +77,44 @@ export interface Holding {
   updated_at: string;
 }
 
+/** One connected position with a research-backed annual dividend estimate. */
+export interface DividendHoldingEstimate {
+  account_id: number;
+  account_name: string;
+  symbol: string;
+  /** The exchange-qualified ticker that matched the market-data source. */
+  lookup_symbol: string;
+  quantity: number;
+  annual_dividend_per_share: number;
+  annual_income: number;
+  currency: string;
+  estimated_annual: MoneyPair;
+  yield_percent: number | null;
+  researched_on: string;
+}
+
+/**
+ * Annual income from current share counts, kept separate from actual dividend cash found in
+ * connected transaction history. Mirrors the Rust `DividendSummary`.
+ */
+export interface DividendSummary {
+  estimated_annual: MoneyPair;
+  recorded_last_12_months: MoneyPair;
+  recorded_payment_count: number;
+  recorded_period_start: string;
+  holdings: DividendHoldingEstimate[];
+  position_count: number;
+  researched_positions: number;
+  dividend_positions: number;
+  unresolved_positions: number;
+  unresolved_symbols: string[];
+  stale_positions: number;
+  research_error_count: number;
+  research_source: string;
+  research_as_of: string | null;
+  currency_warning: boolean;
+}
+
 export interface Goal {
   id: number;
   name: string;
