@@ -457,18 +457,27 @@ export interface CategorizeResult {
 }
 
 /**
- * Rolling-window cashflow totals separating fixed commitments from variable "lifestyle"
- * spending, with transfers excluded. Mirrors the Rust `CashflowSummary`.
+ * Balance-aligned cashflow totals and their reconciliation to net-worth change.
+ * Mirrors the Rust `CashflowSummary`.
  */
 export interface CashflowSummary {
+  /** Actual snapshot span, or the requested fallback window without enough history. */
   window_days: number;
+  /** Balance baseline date; transactions begin after this date. */
   since: string;
+  /** Current balance snapshot date. */
+  through: string;
   income: MoneyPair;
   fixed: MoneyPair;
   variable: MoneyPair;
+  /** Classified transaction cashflow: income - fixed - variable. */
   net_savings: MoneyPair;
-  /** net_savings / income (USD basis), 0 when there was no income. */
-  savings_rate: number;
+  /** Like-for-like observed net-worth change, or null until two balance dates exist. */
+  net_worth_change: MoneyPair | null;
+  /** Reconciliation residual: net_worth_change - net_savings. */
+  investment_growth: MoneyPair | null;
+  /** net_worth_change / income (USD basis), null when it cannot be measured. */
+  savings_rate: number | null;
   transfer_count: number;
   txn_count: number;
   /** True when some transaction's currency had no FX rate (counted as 0). */

@@ -111,7 +111,7 @@ export const setSeattleAssumptions = (
 
 // --- Cashflow + fixed/variable tagging (Step 5) ----------------------------
 
-/** Income vs. fixed vs. variable spending + savings rate over the trailing window (default 30d). */
+/** Balance-aligned cashflow and net-worth savings-rate reconciliation (default target: 30d). */
 export const getCashflowSummary = (
   windowDays?: number,
 ): Promise<CashflowSummary> =>
