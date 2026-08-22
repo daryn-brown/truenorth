@@ -1,7 +1,7 @@
 {
   "name": "truenorth",
   "private": true,
-  "version": "1.10.1",
+  "version": "1.11.0",
   "description": "Cross-border personal finance product with a public web surface and local-first desktop app.",
   "type": "module",
   "scripts": {

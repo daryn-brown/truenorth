@@ -60,6 +60,21 @@ CREATE TABLE IF NOT EXISTS holdings (
     UNIQUE (account_id, symbol)
 );
 
+-- Daily market research that turns current share counts into an annual dividend estimate.
+-- `holding_currency` is part of the key because the same bare ticker can refer to a different
+-- listing in Canada and the US. Older cached data remains useful during an offline launch.
+CREATE TABLE IF NOT EXISTS dividend_research (
+    symbol                     TEXT NOT NULL,
+    holding_currency           TEXT NOT NULL,
+    lookup_symbol              TEXT NOT NULL,
+    quote_currency             TEXT NOT NULL,
+    annual_dividend_per_share  REAL NOT NULL,
+    current_price              REAL,
+    researched_on              TEXT NOT NULL,
+    source                     TEXT NOT NULL DEFAULT 'yahoo',
+    PRIMARY KEY (symbol, holding_currency)
+);
+
 CREATE TABLE IF NOT EXISTS transactions (
     id            INTEGER PRIMARY KEY AUTOINCREMENT,
     account_id    INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,

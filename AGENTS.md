@@ -42,3 +42,24 @@ CI-only tweak) **must** bump the version, or the user can't update to it.
 - Do the bump in the same PR as the change (before opening the PR), authored by the owner.
 - Publishing the GitHub Release/tag is still a manual step (see [`docs/releasing.md`](docs/releasing.md));
   bumping the version here is what makes that release installable.
+
+## Required publish and release order
+
+When the owner asks to publish or release a version, follow this sequence exactly:
+
+1. Implement the shippable change and bump the version in every required file above (including
+   `package-lock.json` when `package.json` changes).
+2. Run the existing tests and a local production desktop build.
+3. Commit with the owner's configured Git identity and no AI/bot co-author trailer.
+4. Push the feature branch and open a pull request into `main`.
+5. Wait for every required pull-request check to pass, then merge the pull request.
+6. Verify the merged commit and bumped version are present on `origin/main`.
+7. Create `v<version>` from the merged `origin/main` commit and push the tag. **Never tag the
+   unmerged feature branch and never start the Release workflow before the merge.**
+8. Wait for the Release workflow to finish successfully and verify the draft contains installers,
+   updater signatures, and `latest.json`.
+9. Publish the draft release, then verify it is the latest non-draft release and its updater
+   manifest is downloadable.
+
+A local validation build before the merge is expected; the downloadable release build must always
+come from the tag on merged `main`.
