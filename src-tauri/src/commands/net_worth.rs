@@ -102,7 +102,10 @@ fn account_class(account_type: &str) -> AccountClass {
 #[tauri::command]
 pub fn get_net_worth(db: State<AppDb>) -> Result<NetWorthResponse, String> {
     let conn = db.0.lock().map_err(|e| e.to_string())?;
+    compute_net_worth(&conn)
+}
 
+pub(crate) fn compute_net_worth(conn: &Connection) -> Result<NetWorthResponse, String> {
     let rates = load_latest_rates(&conn).map_err(|e| e.to_string())?;
     let (usd_cad, cad_usd, rate_date) = match rates {
         Some((u, c, d)) => (Some(u), Some(c), Some(d)),

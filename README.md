@@ -8,7 +8,50 @@ questions about your own data.
 
 > Replaces the "paste screenshots into a chatbot" workflow with a real, queryable system.
 
+<p>
+  <a href="https://github.com/daryn-brown/truenorth/releases/latest">
+    <img src="docs/assets/download.svg" alt="Download the latest TrueNorth release for macOS and Windows" width="330" height="54" />
+  </a>
+</p>
+
+Installers are available for **macOS (Apple Silicon + Intel)** and **Windows (x64)**.
+The button opens the latest published release. Native Mac widgets require a signed widget build;
+see [Mac widget setup](docs/mac-widget.md) for availability and local builds.
+
+## Screenshots
+
+The actual desktop UI, populated with **fictional demo data**. No personal financial data,
+real account details, or credentials are included.
+
+### Financial overview
+
+USD/CAD net worth, account allocation, progress toward goals, and balance-aligned cashflow.
+
+![TrueNorth financial overview with fictional USD and CAD accounts, net worth, goals, and cashflow](docs/screenshots/dashboard.png)
+
+<details>
+<summary><strong>Planning studio and Mac widget settings</strong></summary>
+
+### Planning studio
+
+Explore FIRE and CoastFIRE goals alongside a configurable relocation scenario.
+
+![TrueNorth planning studio with FIRE inputs and a comparison of two fictional savings scenarios](docs/screenshots/planning.png)
+
+### Mac widget setup
+
+Opt-in local sharing, privacy information, and instructions for adding the native widget.
+
+![TrueNorth Mac widget settings showing sharing disabled by default and setup instructions](docs/screenshots/mac-widget-settings.png)
+
+</details>
+
 ## Status
+**Mac net-worth widget.** Signed macOS builds can share USD and CAD totals with a native
+desktop / Notification Center widget in small and medium sizes. Sharing is off by default;
+the widget receives only a local summary, never the encrypted database or account credentials.
+See [Mac widget setup and builds](docs/mac-widget.md).
+
 💸 **Yearly dividend income shipped.** The desktop dashboard now combines live share counts from
 connected investment accounts with daily cached Yahoo Finance distribution research to estimate
 annual and monthly dividend income. Dividend cash found in synced transaction history is displayed
@@ -46,6 +89,7 @@ Setup lives in [`docs/snaptrade.md`](docs/snaptrade.md), [`docs/simplefin.md`](d
   **Questrade** via its own free API (full cash + equity, under the **Direct** tab), plus
   **manual/CSV** fallback.
 - **Multi-currency net worth** — any account currency converted into USD + CAD totals — with history chart + dashboard.
+- **Native Mac net-worth widget** in signed macOS 14+ builds, with opt-in local sharing.
 - **Yearly dividend income** from connected holdings plus trailing distribution research, alongside
   actual dividend payments found in synced transaction history.
 - Transaction review (search/filter/categorize) + goals.
@@ -240,6 +284,7 @@ the Apple/Windows signing secrets to sign automatically. See [`docs/releasing.md
 - [`docs/teller.md`](docs/teller.md) — connecting US banks via Teller for free (read-only) and how sync feeds net worth.
 - [`docs/questrade.md`](docs/questrade.md) — connecting Questrade directly (read-only cash + equity) and how it complements SimpleFIN.
 - [`docs/ai.md`](docs/ai.md) — the AI advisor: GitHub Copilot vs local Ollama, setup, read-only tools, saved chats, tax-planning safeguards, and privacy mode.
+- [`docs/mac-widget.md`](docs/mac-widget.md) — native Mac widget setup, local sharing, signed builds, and privacy.
 - [`docs/releasing.md`](docs/releasing.md) — release pipeline, build targets, and code-signing setup.
 
 ## Phased roadmap

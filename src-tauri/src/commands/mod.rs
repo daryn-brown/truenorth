@@ -13,3 +13,4 @@ pub mod simulator;
 pub mod snaptrade;
 pub mod teller;
 pub mod progress;
+pub mod widget;

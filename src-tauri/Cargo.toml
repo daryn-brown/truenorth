@@ -1,6 +1,6 @@
 [package]
 name = "truenorth"
-version = "1.11.1"
+version = "1.12.0"
 description = "Local-first, privacy-first desktop app for cross-border (US + Canada) personal finances."
 authors = ["Daryn Brown"]
 edition = "2021"
@@ -64,6 +64,7 @@ github-copilot-sdk = "=1.0.10-preview.0"
 # the encrypted database can never be reopened.
 [target.'cfg(target_os = "macos")'.dependencies]
 keyring = { version = "3", features = ["apple-native"] }
+libloading = "0.8"
 
 [target.'cfg(target_os = "windows")'.dependencies]
 keyring = { version = "3", features = ["windows-native"] }

@@ -29,6 +29,7 @@ import type {
   NetWorth,
   NetWorthDelta,
   NetWorthHistoryPoint,
+  MacWidgetSettings,
   QuestradeStatus,
   QuestradeSyncSummary,
   SeattleAssumptions,
@@ -66,6 +67,15 @@ export const addBalanceSnapshot = (
 
 export const getNetWorth = (): Promise<NetWorth> =>
   invoke("get_net_worth");
+
+export const getMacWidgetSettings = (): Promise<MacWidgetSettings> =>
+  invoke("get_mac_widget_settings");
+
+export const setMacWidgetEnabled = (enabled: boolean): Promise<MacWidgetSettings> =>
+  invoke("set_mac_widget_enabled", { enabled });
+
+export const refreshMacWidget = (): Promise<MacWidgetSettings> =>
+  invoke("refresh_mac_widget");
 
 export const getNetWorthHistory = (): Promise<NetWorthHistoryPoint[]> =>
   invoke("get_net_worth_history");

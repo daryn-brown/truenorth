@@ -19,9 +19,17 @@ export type DesktopIconName =
   | "target"
   | "trash"
   | "upload"
+  | "widget"
   | "wallet";
 
 const paths: Record<DesktopIconName, ReactNode> = {
+  widget: (
+    <>
+      <rect x="3" y="3" width="7" height="7" rx="2" />
+      <rect x="14" y="3" width="7" height="7" rx="2" />
+      <rect x="3" y="14" width="18" height="7" rx="2" />
+    </>
+  ),
   overview: (
     <>
       <path d="M4 13.5A8.5 8.5 0 1 0 12.5 5v8.5H4Z" />

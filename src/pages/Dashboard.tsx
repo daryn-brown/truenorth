@@ -16,6 +16,7 @@ import type {
   SeattleProjection,
   ProgressMetrics,
   ProgressInputs,
+  MacWidgetSettings,
 } from "../types/finance";
 import {
   addAccount,
@@ -28,6 +29,8 @@ import {
   getNetWorth,
   getNetWorthDelta,
   getNetWorthHistory,
+  getMacWidgetSettings,
+  refreshMacWidget,
   getSeattleProjection,
   getProgressMetrics,
   listAccounts,
@@ -52,6 +55,7 @@ import ConnectionsModal from "../components/ConnectionsModal";
 import NetWorthChart from "../components/NetWorthChart";
 import DesktopIcon from "../apps/desktop/DesktopIcon";
 import BrandMark from "../shared/BrandMark";
+import MacWidgetModal from "../components/MacWidgetModal";
 
 type ModalState =
   | { open: false }
@@ -87,7 +91,25 @@ export default function Dashboard({
   const [fxError, setFxError] = useState<string | null>(null);
   const [dividendLoading, setDividendLoading] = useState(true);
   const [dividendError, setDividendError] = useState<string | null>(null);
+  const [widgetSettings, setWidgetSettings] = useState<MacWidgetSettings | null>(null);
+  const [widgetOpen, setWidgetOpen] = useState(false);
+  const [widgetError, setWidgetError] = useState<string | null>(null);
   const dividendRequest = useRef(0);
+
+  const refreshWidget = useCallback(async () => {
+    try {
+      setWidgetSettings(await refreshMacWidget());
+      setWidgetError(null);
+    } catch (err) {
+      console.error("Failed to refresh Mac widget:", err);
+      setWidgetError(String(err));
+      try {
+        setWidgetSettings(await getMacWidgetSettings());
+      } catch (statusError) {
+        setWidgetError(`${String(err)} Could not load widget settings: ${String(statusError)}`);
+      }
+    }
+  }, []);
 
   const loadDividends = useCallback(async (forceRefresh = false) => {
     const requestId = ++dividendRequest.current;
@@ -150,8 +172,9 @@ export default function Dashboard({
       console.error("Failed to load dashboard data:", err);
     } finally {
       setLoading(false);
+      await refreshWidget();
     }
-  }, [loadDividends]);
+  }, [loadDividends, refreshWidget]);
 
   useEffect(() => {
     void load();
@@ -274,6 +297,17 @@ export default function Dashboard({
         </nav>
 
         <div className="desktop-sidebar__footer">
+          {widgetSettings?.platform_supported && (
+            <button
+              type="button"
+              onClick={() => setWidgetOpen(true)}
+              title="Mac desktop widget"
+              aria-haspopup="dialog"
+            >
+              <DesktopIcon name="widget" />
+              <span>Widgets</span>
+            </button>
+          )}
           {onCheckForUpdates && (
             <button
               type="button"
@@ -364,6 +398,15 @@ export default function Dashboard({
             FX refresh failed: {fxError}
           </div>
         )}
+
+          {widgetError && (
+            <div className="desktop-alert desktop-alert--error" role="alert">
+              Mac widget refresh failed: {widgetError}
+              <button type="button" className="desktop-action" onClick={() => void refreshWidget()}>
+                Retry widget refresh
+              </button>
+            </div>
+          )}
 
           <div className="desktop-layout-grid desktop-layout-grid--overview">
             <div className="desktop-span-8">
@@ -524,6 +567,16 @@ export default function Dashboard({
         onClose={() => setConnectOpen(false)}
         onChanged={handleConnectorChanged}
       />
+      {widgetOpen && widgetSettings && (
+        <MacWidgetModal
+          settings={widgetSettings}
+          onClose={() => setWidgetOpen(false)}
+          onSettingsChanged={(settings) => {
+            setWidgetSettings(settings);
+            setWidgetError(null);
+          }}
+        />
+      )}
     </div>
   );
 }

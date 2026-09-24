@@ -1,6 +1,13 @@
 /** All money-carrying values include their currency. */
 export type Currency = "USD" | "CAD";
 
+export interface MacWidgetSettings {
+  platform_supported: boolean;
+  available: boolean;
+  enabled: boolean;
+  unavailable_reason: string | null;
+}
+
 export type Jurisdiction = "US" | "CA";
 
 export type ConnectorKind = "manual" | "snaptrade" | "simplefin" | "questrade" | "teller";

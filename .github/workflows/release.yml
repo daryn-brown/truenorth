@@ -146,13 +146,29 @@ jobs:
         env:
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
         run: |
-          if [ -n "$APPLE_CERTIFICATE" ]; then
+          if [ "$RUNNER_OS" = "macOS" ] && [ -n "$APPLE_CERTIFICATE" ]; then
             echo "enabled=true" >> "$GITHUB_OUTPUT"
             echo "Apple certificate found — building signed + notarized."
           else
             echo "enabled=false" >> "$GITHUB_OUTPUT"
             echo "No Apple certificate — building unsigned (Gatekeeper-warned)."
           fi
+
+      # The extension must be signed before Tauri copies it into Contents/PlugIns.
+      # Tauri imports its own certificate later, when it signs the containing application.
+      - name: Import certificate for native widget signing
+        if: steps.signing.outputs.enabled == 'true'
+        uses: apple-actions/import-codesign-certs@v3
+        with:
+          p12-file-base64: ${{ secrets.APPLE_CERTIFICATE }}
+          p12-password: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+
+      - name: Configure signed macOS widget bundle
+        if: steps.signing.outputs.enabled == 'true'
+        env:
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: node scripts/macos-widget.mjs configure
 
       - name: Build app and upload bundles (unsigned)
         if: ${{ steps.signing.outputs.enabled == 'false' }}
@@ -184,4 +200,11 @@ jobs:
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         with:
           releaseId: ${{ needs.create-release.outputs.release_id }}
-          args: ${{ matrix.args }}
+          args: ${{ matrix.args }} --config src-tauri/target/macos-widget/tauri.widget.conf.json
+
+      - name: Verify signed widget bundle
+        if: steps.signing.outputs.enabled == 'true'
+        env:
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: node scripts/macos-widget.mjs verify "src-tauri/target/universal-apple-darwin/release/bundle/macos/TrueNorth.app"

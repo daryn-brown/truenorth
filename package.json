@@ -1,7 +1,7 @@
 {
   "name": "truenorth",
   "private": true,
-  "version": "1.11.1",
+  "version": "1.12.0",
   "description": "Cross-border personal finance product with a public web surface and local-first desktop app.",
   "type": "module",
   "scripts": {
@@ -11,6 +11,11 @@
     "build": "tsc && vite build",
     "build:web": "tsc && vite build",
     "build:desktop": "tauri build",
+    "build:desktop:widget": "node scripts/macos-widget.mjs build",
+    "test:widget": "node --test scripts/macos-widget.test.mjs",
+    "check:widget:native": "node scripts/macos-widget.mjs check",
+    "preview:readme": "vite --host 127.0.0.1 --port 1422",
+    "screenshots:readme": "node scripts/readme-preview/capture.mjs",
     "preview": "vite preview",
     "tauri": "tauri"
   },
@@ -31,6 +36,7 @@
     "@types/react": "^19.1.8",
     "@types/react-dom": "^19.1.6",
     "@vitejs/plugin-react": "^4.6.0",
+    "playwright": "^1.63.0",
     "tailwindcss": "^4.2.2",
     "typescript": "~5.8.3",
     "vite": "^7.0.4"

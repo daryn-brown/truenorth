@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>TrueNorth - fictional README preview</title>
+    <style>
+      body { margin: 0; background: #05050b; }
+      #readme-preview { width: 1440px; color: #d5d0dd; background: #05050b; }
+      .preview-caption {
+        display: flex; justify-content: space-between; align-items: center;
+        height: 38px; padding: 0 24px; border-bottom: 1px solid #252039;
+        color: #aea4c2; background: #0c0916;
+        font: 11px -apple-system, BlinkMacSystemFont, sans-serif; letter-spacing: 0.05em;
+      }
+      #readme-preview #root, #readme-preview .desktop-app { width: 1440px; height: 1020px; }
+      #readme-preview *, #readme-preview *::before, #readme-preview *::after {
+        animation-duration: 0s !important; transition-duration: 0s !important;
+        scroll-behavior: auto !important;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="readme-preview">
+      <div class="preview-caption">
+        <span>TRUENORTH / DESKTOP</span>
+        <span>FICTIONAL DEMO DATA</span>
+      </div>
+      <div id="root"></div>
+    </div>
+    <script type="module" src="./main.ts"></script>
+  </body>
+</html>

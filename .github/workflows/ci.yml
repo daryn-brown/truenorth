@@ -36,6 +36,15 @@ jobs:
       - name: Type-check and build
         run: npm run build
 
+      - name: Widget build configuration tests
+        run: npm run test:widget
+
+      - name: Install screenshot browser
+        run: npx playwright install --with-deps chromium
+
+      - name: Exercise demo UI and widget settings
+        run: npm run screenshots:readme
+
   rust:
     name: Rust (${{ matrix.platform }})
     strategy:
@@ -71,3 +80,10 @@ jobs:
 
       - name: Cargo check
         run: cargo check --manifest-path src-tauri/Cargo.toml
+
+      - name: Widget snapshot and net-worth tests
+        run: cargo test --manifest-path src-tauri/Cargo.toml --lib -- commands::widget::tests commands::net_worth::tests
+
+      - name: Compile native widget and test its snapshot reader
+        if: runner.os == 'macOS'
+        run: npm run check:widget:native

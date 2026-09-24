@@ -24,28 +24,36 @@ The Release workflow:
 
 ## Cut a release
 
-Versions live in three files and should stay in sync:
+Versions live in these files and must stay in sync:
 
 - `src-tauri/tauri.conf.json` → `version`
 - `package.json` → `version`
 - `src-tauri/Cargo.toml` → `package.version`
+- `src-tauri/Cargo.lock` → the `truenorth` package version
+- `package-lock.json` → the root package versions
+
+The native Mac widget derives its bundle version from `tauri.conf.json`.
 
 ### Option A — tag (recommended)
 
 ```bash
-# 1) Bump the version in the three files above, then commit (authored by you — no bot trailers).
-git commit -am "Release v0.2.0"
+# After bumping all versions, testing, and building locally:
+# commit as the owner, push the feature branch, and open a PR into main.
+# Wait for required checks, merge the PR, then verify the version on origin/main.
+git fetch origin main
+git show origin/main:src-tauri/tauri.conf.json
 
-# 2) Tag and push. The tag drives the release name.
-git tag v0.2.0
-git push origin main --tags
+# Create the tag from merged main, never the unmerged feature branch.
+git tag v1.12.0 origin/main
+git push origin v1.12.0
 ```
 
-The pushed tag (`v0.2.0`) triggers the Release workflow and the draft release uses that tag.
+The pushed tag (`v1.12.0` in this example) triggers the Release workflow and the draft release uses that tag.
 
 ### Option B — manual run
 
-In the **Actions** tab, open **Release → Run workflow**. The release tag is taken from
+Only after the release PR is merged and its version is verified on `origin/main`, open
+**Actions → Release → Run workflow** and select **main**. The release tag is taken from
 `src-tauri/tauri.conf.json` as `v<version>`. Optionally tick **prerelease**.
 
 When the runs finish, open the draft release, verify the attached installers, and **Publish**.
@@ -81,6 +89,14 @@ Add these repository secrets (**Settings → Secrets and variables → Actions**
 | `APPLE_TEAM_ID` | Your 10-character Apple Developer Team ID |
 
 Once present, `tauri-action` signs and notarizes the macOS build automatically.
+
+Signed macOS builds also include the [native net-worth widget](mac-widget.md).
+The workflow first imports the certificate for the separately signed WidgetKit extension,
+then generates a Tauri overlay containing the shared app-group entitlement and native bundle
+files. Both binaries use the real `APPLE_TEAM_ID`; no registered app group or provisioning
+profile is required for this macOS-only team-prefixed group. Unsigned builds omit the widget
+and continue to work normally. An Apple Development identity is suitable for local widget
+builds, but releases need the Developer ID identity and notarization credentials above.
 
 ### Windows — sign
 
@@ -125,6 +141,28 @@ version → let CI build the draft → review → **Publish release**. Installed
 their next launch.
 
 ## Notes
+
+### README screenshots
+
+The committed screenshots use the real React UI with typed fictional fixtures and Tauri's
+official IPC mock. The preview never starts the Rust app or opens a finance database.
+
+```bash
+npm ci
+npx playwright install chromium
+npm run screenshots:readme
+```
+
+This captures the overview, planning studio, and widget settings into `docs/screenshots/`.
+It also exercises the sharing switch and dialog close/reopen behavior. Browser requests are
+restricted to the local preview server. For interactive previewing, run `npm run preview:readme`
+and open `http://127.0.0.1:1422/scripts/readme-preview/`.
+
+Keep screenshots fictional; do not replace them with captures of a populated personal app.
+The README's download button points to `/releases/latest`, so it does not need a new URL for
+each version.
+
+### Other release notes
 
 - **Auto-publish instead of draft:** add a final job that flips the release with
   `github.rest.repos.updateRelease({ ..., draft: false })`, depending on `build-tauri`. (Until then,
