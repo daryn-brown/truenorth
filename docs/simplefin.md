@@ -3,7 +3,7 @@
 TrueNorth can pull **real, read-only balances** (and investment holdings, where the institution
 reports them) from banks and other institutions through [**SimpleFIN**](https://www.simplefin.org).
 Synced balances flow straight into the existing multi-currency net worth and history chart: each
-sync writes one balance snapshot per account, so no part of the net-worth pipeline changes.
+valid dated balances update their source-date snapshots, preserving the existing net-worth pipeline.
 
 Everything is **read-only**. SimpleFIN only ever exposes balances and transactions — there is no
 way to move money — and TrueNorth requests up to 90 calendar days of transaction history.
@@ -26,11 +26,11 @@ institutions.
 
 ## Connecting
 
-Open the app, click **🔗 Connect** in the header, and choose the **Banks** tab:
+Open **Connections** from the sidebar or **Connect account** in the header, and choose **Banks**:
 
 1. **SimpleFIN setup token** — paste your setup token and click **Connect**. TrueNorth claims the
-   token, exchanges it for an access URL, verifies the access URL works, and stores it in your
-   **local, owner-only secret store**, not the finance database or repository.
+   token and saves the access URL in the app's existing local credential store before fetching
+   any bank data. A temporary outage therefore cannot lose an already-claimed setup token.
 2. **Choose accounts to sync** — review institution, name, inferred type, currency, and a masked
    account number if supplied. Choose **Create new account**, **Link to existing account**, or
    **Ignore**, then **Save choices**. New accounts start **not selected**; existing active imported
@@ -64,10 +64,41 @@ restores the original imported row only after confirmation. Linking a different 
 the same provider, or a Teller/direct account, is not supported. Names, balances, and masked
 number endings are never used to auto-merge accounts.
 
+## Connection health and reauthentication
+
+The floating **Sync accounts** button at the dashboard's bottom-right synchronizes all configured
+providers (SimpleFIN, SnapTrade, Teller, and direct Questrade), independently of **Refresh FX**.
+One provider failing does not stop the others. The button stays visible when scrolling and shows
+progress; the page reserves space below its final account row.
+
+The **Banks** tab shows each institution's authentication status and each account's **balance as
+of** date. **Reconnect** opens SimpleFIN's portal and identifies the affected bank; select it there
+and complete its password, code, or banking-app approval. Return to TrueNorth for one automatic
+check, or use **I've finished - check balances**. Keep the existing bank connection and app token.
+SimpleFIN does not document a per-bank reconnection URL, so the portal is opened rather than an
+invented deep link.
+
+Bank MFA is separate from app access. A bank-level `con.auth` message affects only that connection;
+an app-level authentication failure prompts for a replacement setup token. Unknown and legacy
+unscoped errors remain visible without guessing which institution needs authentication.
+
+**Last SimpleFIN response** is not a bank refresh time. Balances at least **48 hours old**, missing
+accounts, and failed or unverified connections trigger account and total-wealth warnings.
+Last-known balances remain included in totals; accounts with no usable balance do not contribute.
+Old installations show unverified status until their first health-aware sync.
+
+SimpleFIN normally updates daily. Automatic SimpleFIN checks run at most every **six hours while
+the desktop app is open**. Manual and return-from-browser checks have a **one-minute cooldown**;
+a persisted rolling budget limits the app to **24 requests per 24 hours**, including failed attempts,
+account discovery, save-time validation, and selected-account data requests. Review/save requests
+share the budget but do not trigger the six-hour automatic-sync cooldown.
+Repeated requests cannot bypass a bank's MFA or force a bank refresh.
+
 ## What a sync does
 
 Discovery requests `balances-only=1`, without transaction history, and writes no financial or
-selection data. Sync then requests only selected IDs using the protocol's `account` filter.
+selection data. Only request-budget and connection-error metadata may be saved during discovery.
+Sync then requests only selected IDs using the protocol's `account` filter.
 Some servers bundle holdings with discovery or ignore filters; TrueNorth also filters responses
 locally, so excluded accounts still cannot write balances, holdings, or transactions.
 
@@ -79,12 +110,16 @@ For each selected account, TrueNorth (in a single transaction):
 - **Uses the saved local account ID** and preserves its metadata, including user-corrected
   currency. A newly created account gets its type from the account name/holdings and jurisdiction
   from currency (CAD → CA, otherwise US). Questrade is always CA, including USD accounts.
-- **Writes a balance snapshot dated by the reported balance-date** (`source = 'simplefin'`),
-  falling back to today only if that date is missing. Because net worth and the history
-  chart read the latest snapshot per account, your real balance appears immediately.
+- **Scopes new identities by connection and account ID** in protocol v2. Unambiguous legacy
+  unscoped selections keep their local ID/history/exclusions and are pinned to the first reported
+  connection. A legacy ID appearing in multiple connections is rejected rather than guessed.
+- **Writes the bank's dated balance snapshot** (`source = 'simplefin'`), never a made-up "today"
+  date. Missing, invalid, or future dates and authentication failures keep the previous balance
+  with a warning. Older source timestamps cannot overwrite a newer saved balance.
 - **Replaces the account's holdings** with any positions the institution reports (symbol, shares,
   per-share price + average cost derived from SimpleFIN's market-value and cost-basis totals), so
-  closed positions disappear. Most banks report no holdings — that's expected.
+  closed positions disappear. An omitted holdings field or failed bank connection preserves the
+  previous positions rather than erasing them. A successfully reported empty list clears positions.
 - **Imports transactions from up to 90 calendar days**, keyed by SimpleFIN transaction id so later
   syncs update existing records instead of duplicating them.
 
@@ -102,11 +137,9 @@ a sync with no eligible selections reports that nothing is selected, not success
 > SimpleFIN duplicate so net worth isn't double-counted. Future SimpleFIN syncs keep that duplicate
 > hidden while the direct Questrade account remains active.
 
-Sync is **manual** ("Sync now"). Automatic/background sync is deferred to a later phase.
-
 ## Disconnecting
 
-**Disconnect SimpleFIN** (in the Connect dialog) removes the stored access URL from the secret store
+**Disconnect SimpleFIN** (in Connections) removes the stored access URL from the secret store
 and hides/excludes its connected accounts. Historical records and exclusion choices are kept.
 After reconnecting, use **Choose accounts to sync** to intentionally resume accounts with the same
 provider IDs. New IDs require review. Accounts handed off to SnapTrade are left untouched.
@@ -114,9 +147,10 @@ To fully revoke access, also disable or delete the token in your SimpleFIN bridg
 
 ## Privacy & security
 
-- **Local-only storage.** In the current open mode, the access URL (which embeds HTTP Basic
-  credentials) lives in the owner-only secret file in the app data folder. Non-secret account
-  choices and financial records live in the encrypted local database.
+- **Existing secret-store policy is preserved.** The access URL embeds HTTP Basic credentials and
+  is stored through TrueNorth's local credential store. Open mode stores secrets in a local file
+  with restrictive permissions; see [Privacy](../README.md#privacy). The encrypted finance database
+  holds financial records, account selections, and non-secret connection-health metadata, not the access URL.
 - **Read-only by design.** TrueNorth requests account data and a transaction window of up to 90
   calendar days from the SimpleFIN protocol.
 - **Direct HTTPS.** Requests go only to your SimpleFIN server (e.g. `bridge.simplefin.org`) over
@@ -141,7 +175,8 @@ To fully revoke access, also disable or delete the token in your SimpleFIN bridg
   accounts keep a user-corrected currency on later syncs.
 - **Choices changed while saving or syncing.** Reload the review. No partial batch was committed.
 - **A balance is missing from net worth.** Check that the account is selected, a balance was
-  reported, and its currency has an exchange rate.
+  reported with a valid source date, and its currency has an exchange rate. Use **Refresh FX**
+  if the conversion rate is missing.
 
 ## Cross-references
 

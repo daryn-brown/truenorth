@@ -50,7 +50,42 @@ try {
     });
   });
   await waitForProjection();
+  const syncButton = page.getByRole("button", { name: "Sync accounts", exact: true });
+  const beforeSync = await syncButton.boundingBox();
+  assert.ok(beforeSync && beforeSync.y > 900, "Sync should float at the bottom of the dashboard.");
+  await syncButton.click();
+  await page.getByRole("button", { name: "Syncing...", exact: true }).waitFor();
+  assert.equal(await page.getByRole("button", { name: "Syncing...", exact: true }).isDisabled(), true);
+  await syncButton.waitFor();
+  await page.getByText(/Received updates for 5 account/).waitFor();
+  assert.equal(await page.getByTitle("Refresh exchange rates").count(), 1);
+  const syncCalls = await page.evaluate(async () => {
+    const { calls } = await import("/scripts/readme-preview/main.ts");
+    return calls.filter((command) => command.endsWith("_sync"));
+  });
+  assert.deepEqual([...syncCalls].sort(), ["questrade_sync", "simplefin_sync", "snaptrade_sync"]);
+  await page.getByText("Figures may be out of date or incomplete", { exact: true }).waitFor();
   await page.screenshot({ path: join(output, "dashboard.png"), animations: "disabled" });
+
+  await page.getByRole("button", { name: "Review connections", exact: true }).click();
+  await page.getByRole("heading", { name: "Harbor Bank", exact: true }).waitFor();
+  assert.equal(await page.getByRole("button", { name: "Reconnect Harbor Bank in SimpleFIN", exact: true }).count(), 1);
+  assert.equal(await page.getByRole("button", { name: "Manage Maple Bank in SimpleFIN", exact: true }).count(), 1);
+  await page.getByRole("button", { name: "Reconnect Harbor Bank in SimpleFIN", exact: true }).click();
+  await page.getByText("Reconnect Harbor Bank", { exact: true }).waitFor();
+  await page.evaluate(async () => {
+    const { emit } = await import("/node_modules/@tauri-apps/api/event.js");
+    window.dispatchEvent(new Event("focus"));
+    await emit("tauri://focus", true);
+    document.dispatchEvent(new Event("visibilitychange"));
+  });
+  await page.getByText(/Received data for 2 accounts/).waitFor();
+  const afterReconnect = await page.evaluate(async () => {
+    const { calls } = await import("/scripts/readme-preview/main.ts");
+    return calls.filter((command) => command === "simplefin_sync").length;
+  });
+  assert.equal(afterReconnect, 2, "Browser/native return events should produce one additional SimpleFIN check.");
+  await page.getByRole("button", { name: "Done", exact: true }).click();
 
   await page.locator('a[href="#planning"]').click();
   await page.getByText("Set my goals", { exact: true }).click();
@@ -63,6 +98,8 @@ try {
   });
   await waitForProjection();
   await page.mouse.move(1430, 10);
+  const afterScroll = await syncButton.boundingBox();
+  assert.ok(afterScroll && Math.abs(afterScroll.y - beforeSync.y) < 2, "Sync must remain visible while the dashboard scrolls.");
   await page.screenshot({ path: join(output, "planning.png"), animations: "disabled" });
 
   await page.getByRole("link", { name: "Overview", exact: true }).click();

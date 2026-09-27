@@ -30,6 +30,7 @@ impl Provider {
 #[derive(Clone, Debug, Serialize)]
 pub struct RemoteAccount {
     pub remote_id: String,
+    pub connection_id: Option<String>,
     pub name: String,
     pub institution: String,
     pub account_type: String,
@@ -110,6 +111,7 @@ struct Binding {
     account_id: Option<i64>,
     decision: String,
     institution: Option<String>,
+    connection_id: Option<String>,
 }
 
 #[derive(Debug)]
@@ -189,7 +191,7 @@ fn read_local_accounts(conn: &Connection) -> Result<Vec<LocalAccount>, String> {
 fn read_bindings(conn: &Connection) -> Result<Vec<Binding>, String> {
     let mut stmt = conn
         .prepare(
-            "SELECT provider, remote_id, account_id, decision, institution FROM account_sync_selections \
+            "SELECT provider, remote_id, account_id, decision, institution, connection_id FROM account_sync_selections \
              ORDER BY provider, remote_id",
         )
         .map_err(|e| e.to_string())?;
@@ -201,6 +203,7 @@ fn read_bindings(conn: &Connection) -> Result<Vec<Binding>, String> {
                 account_id: r.get(2)?,
                 decision: r.get(3)?,
                 institution: r.get(4)?,
+                connection_id: r.get(5)?,
             })
         })
         .map_err(|e| e.to_string())?
@@ -601,6 +604,16 @@ pub fn save_choices(
                 assign(&tx, provider, &row.remote, target)?;
             }
         }
+        tx.execute(
+            "UPDATE account_sync_selections SET connection_id = ?1 \
+             WHERE provider = ?2 AND remote_id = ?3 AND connection_id IS NULL",
+            params![
+                row.remote.connection_id,
+                provider.as_str(),
+                row.remote.remote_id
+            ],
+        )
+        .map_err(|e| e.to_string())?;
     }
     bump_revision(&tx)?;
     let result = discover(&tx, provider, remotes)?;
@@ -758,9 +771,15 @@ mod tests {
                     name: "Individual Brokerage".into(),
                     number: None,
                     institution: Some("Robinhood".into()),
+                    connection_id: None,
+                    holdings_reported: true,
                     currency: "USD".into(),
                     balance: Some(1000.0),
-                    balance_date: None,
+                    balance_date: Some(
+                        chrono::DateTime::parse_from_rfc3339(NOW)
+                            .unwrap()
+                            .timestamp(),
+                    ),
                     holdings: vec![SimpleFinHolding {
                         symbol: "SYNTH".into(),
                         shares: 10.0,
@@ -777,7 +796,7 @@ mod tests {
                     }],
                 })
                 .collect(),
-            errors: vec![],
+            ..Default::default()
         }
     }
 

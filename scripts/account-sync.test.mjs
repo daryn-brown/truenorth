@@ -162,8 +162,44 @@ try {
   await disconnect.getByRole("button", { name: "Disconnect", exact: true }).click();
   await page.getByText("Brokerage disconnected.", { exact: true }).waitFor();
   assert.equal((await calls("snaptrade_disconnect")).length, 1);
-  assert.equal(errors.length, 0, errors.join("\n"));
   console.log("PASS discovery/save/empty-selection errors and non-native disconnect confirmation");
+
+  await load();
+  await page.getByRole("button", { name: "Sync accounts", exact: true }).click();
+  await page.getByText(/Received updates for 3 account/).waitFor();
+  await page.getByRole("alert").filter({ hasText: "SnapTrade: 3 new account(s) need review" }).waitFor();
+  assert.equal((await calls("snaptrade_save_account_choices")).length, 0);
+  assert.equal((await calls("simplefin_save_account_choices")).length, 0);
+  assert.equal((await calls("snaptrade_sync")).length, 1);
+  assert.deepEqual((await calls("simplefin_sync"))[0].payload, { automatic: false });
+  await page.getByRole("button", { name: "Delete Roth duplicate", exact: true }).click();
+  assert.equal(await page.getByRole("button", { name: "Sync accounts", exact: true }).count(), 0);
+  await deleteDialog().getByRole("button", { name: "Delete account", exact: true }).click();
+  await deleteDialog().waitFor({ state: "detached" });
+  await page.getByRole("button", { name: "Sync accounts", exact: true }).click();
+  await page.getByRole("alert").filter({ hasText: "SnapTrade: Error: No accounts are selected" }).waitFor();
+  assert.equal(await page.getByRole("button", { name: "Delete Roth duplicate", exact: true }).count(), 0);
+  await page.getByText(/Received updates for 2 account/).waitFor();
+  console.log("PASS floating/global sync preserves exclusions, exposes review counts, and keeps other providers working");
+
+  await page.goto(`${url}?automatic=1`, { waitUntil: "networkidle" });
+  await page.getByText(/SimpleFIN: 1 new account\(s\) need review/).waitFor();
+  assert.deepEqual((await calls("simplefin_sync")).map((call) => call.payload), [{ automatic: true }]);
+  assert.equal((await calls("snaptrade_sync")).length, 0);
+  assert.equal((await calls("simplefin_save_account_choices")).length, 0);
+  await page.getByTitle("Connections", { exact: true }).click();
+  await page.getByRole("button", { name: "Banks via SimpleFIN", exact: true }).click();
+  await page.getByRole("button", { name: "Manage Robinhood in SimpleFIN", exact: true }).click();
+  await page.evaluate(() => {
+    window.dispatchEvent(new Event("focus"));
+    window.dispatchEvent(new Event("focus"));
+    document.dispatchEvent(new Event("visibilitychange"));
+  });
+  await page.getByText(/Received data for 2 accounts/).waitFor();
+  assert.equal((await calls("simplefin_sync")).length, 2);
+  assert.deepEqual((await calls("simplefin_sync"))[1].payload, { automatic: false });
+  console.log("PASS automatic sync and reauthentication-return sync use saved choices without duplicate focus requests");
+  assert.equal(errors.length, 0, errors.join("\n"));
 } finally {
   if (browser) await browser.close();
   await server.close();

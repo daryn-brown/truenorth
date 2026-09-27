@@ -1,6 +1,7 @@
-import type { Account, AccountNetWorth, Currency } from "../types/finance";
+import type { Account, AccountNetWorth, Currency, SimpleFinConnectionHealth } from "../types/finance";
 import DesktopIcon from "../apps/desktop/DesktopIcon";
 import { ACCOUNT_TYPE_LABELS, CONNECTOR_LABELS } from "../shared/accountLabels";
+import ConnectionStatus, { formatConnectionTime } from "./ConnectionStatus";
 
 const JURISDICTION_COLORS: Record<string, string> = {
   US: "bg-blue-900/40 text-blue-300 border-blue-700/50",
@@ -28,6 +29,8 @@ interface Props {
   onDeleteAccount: (account: Account) => void;
   onUpdateBalance: (account: Account) => void;
   onEditCurrency: (account: Account) => void;
+  simplefinHealth?: SimpleFinConnectionHealth[];
+  onManageConnections?: () => void;
 }
 
 export default function AccountList({
@@ -38,8 +41,12 @@ export default function AccountList({
   onDeleteAccount,
   onUpdateBalance,
   onEditCurrency,
+  simplefinHealth = [],
+  onManageConnections,
 }: Props) {
   const breakdownMap = new Map(netWorthBreakdown.map((a) => [a.account_id, a]));
+  const healthMap = new Map(simplefinHealth.flatMap((bank) =>
+    bank.accounts.map((account) => [account.account_id, account.health] as const)));
 
   const homeValue = (account: Account) => {
     const bk = breakdownMap.get(account.id);
@@ -62,6 +69,7 @@ export default function AccountList({
 
   const renderAccount = (account: Account) => {
     const bk = breakdownMap.get(account.id);
+    const health = healthMap.get(account.id);
     return (
       <li
         key={account.id}
@@ -86,6 +94,13 @@ export default function AccountList({
             <p className="truncate text-sm font-medium text-slate-200">
               {account.name}
             </p>
+            {health && (
+              <button type="button" onClick={onManageConnections} className="mt-1"
+                title={health.message ?? "View connection health"}
+                aria-label={`Review connection for ${account.name}`}>
+                <ConnectionStatus status={health.status} />
+              </button>
+            )}
             <p className="text-xs text-slate-500">
               {account.institution} ·{" "}
               {ACCOUNT_TYPE_LABELS[account.account_type] ?? account.account_type}
@@ -100,7 +115,7 @@ export default function AccountList({
 
         <div className="flex items-center gap-3 shrink-0">
           <div className="text-right">
-            {bk ? (
+            {bk && bk.snapshot_date !== null ? (
               <>
                 <p className="text-sm font-semibold text-slate-100">
                   {fmt(bk.balance, bk.currency)}
@@ -111,11 +126,13 @@ export default function AccountList({
                       ≈ {fmt(homeValue(account), homeCurrency)} ·
                     </span>
                   )}
-                  {bk.snapshot_date ?? "no snapshot"}
+                  {health?.balance_as_of
+                    ? `As of ${formatConnectionTime(health.balance_as_of)}`
+                    : bk.snapshot_date}
                 </p>
               </>
             ) : (
-              <p className="text-sm text-slate-500">no balance</p>
+              <p className="text-sm text-slate-500">No balance available</p>
             )}
           </div>
 

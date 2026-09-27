@@ -16,6 +16,7 @@
 use std::collections::HashMap;
 
 use base64::Engine;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use thiserror::Error;
 
@@ -26,6 +27,20 @@ fn transaction_date_range(now: chrono::DateTime<chrono::Utc>) -> (String, String
     // span 91 calendar dates, so request 89 elapsed days and pin the end to the same instant.
     let start = now - chrono::Duration::days(TRANSACTION_CALENDAR_DAYS - 1);
     (start.timestamp().to_string(), now.timestamp().to_string())
+}
+
+fn selected_account_query(
+    account_ids: &[&str],
+) -> Result<Vec<(&'static str, String)>, SimpleFinError> {
+    if account_ids.is_empty() {
+        return Err(SimpleFinError::Parse(
+            "No accounts were selected for sync.".into(),
+        ));
+    }
+    let (start_date, end_date) = transaction_date_range(chrono::Utc::now());
+    let mut query = vec![("start-date", start_date), ("end-date", end_date)];
+    query.extend(account_ids.iter().map(|id| ("account", (*id).to_string())));
+    Ok(query)
 }
 
 #[derive(Debug, Error)]
@@ -96,8 +111,19 @@ pub struct SimpleFinAccount {
     pub balance_date: Option<i64>,
     /// Institution / connection name, best-effort.
     pub institution: Option<String>,
+    pub connection_id: Option<String>,
+    pub holdings_reported: bool,
     pub holdings: Vec<SimpleFinHolding>,
     pub transactions: Vec<SimpleFinTransaction>,
+}
+
+impl SimpleFinAccount {
+    pub fn reference(&self) -> String {
+        match &self.connection_id {
+            Some(connection) => serde_json::json!([connection, self.id]).to_string(),
+            None => self.id.clone(),
+        }
+    }
 }
 
 /// The parsed `/accounts` response: the accounts plus any user-facing errors SimpleFIN returned.
@@ -105,6 +131,22 @@ pub struct SimpleFinAccount {
 pub struct SimpleFinAccountSet {
     pub accounts: Vec<SimpleFinAccount>,
     pub errors: Vec<String>,
+    pub issues: Vec<SimpleFinIssue>,
+    pub connections: Vec<SimpleFinConnection>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SimpleFinIssue {
+    pub code: String,
+    pub msg: String,
+    pub conn_id: Option<String>,
+    pub account_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SimpleFinConnection {
+    pub id: String,
+    pub name: String,
 }
 
 /// Exchange a setup token for a persistent access URL.
@@ -114,9 +156,17 @@ pub struct SimpleFinAccountSet {
 /// invalid — the caller should tell the user to disable it.
 pub async fn claim_access_url(setup_token: &str) -> Result<String, SimpleFinError> {
     let claim_url = decode_setup_token(setup_token)?;
-    let resp = reqwest::Client::new().post(&claim_url).send().await?;
+    let resp = http_client()?
+        .post(&claim_url)
+        .header("Content-Length", "0")
+        .send()
+        .await
+        .map_err(|e| SimpleFinError::Http(e.without_url()))?;
     let status = resp.status();
-    let text = resp.text().await?;
+    let text = resp
+        .text()
+        .await
+        .map_err(|e| SimpleFinError::Http(e.without_url()))?;
     if !status.is_success() {
         return Err(SimpleFinError::Claim {
             status: status.as_u16(),
@@ -124,8 +174,12 @@ pub async fn claim_access_url(setup_token: &str) -> Result<String, SimpleFinErro
         });
     }
     let access_url = text.trim().to_string();
-    reqwest::Url::parse(&access_url)
-        .map_err(|e| SimpleFinError::Parse(format!("claim did not return an access URL: {e}")))?;
+    let parsed = secure_url(&access_url)?;
+    if parsed.username().is_empty() || parsed.password().is_none_or(str::is_empty) {
+        return Err(SimpleFinError::Parse(
+            "claim did not return complete app credentials".into(),
+        ));
+    }
     Ok(access_url)
 }
 
@@ -143,9 +197,27 @@ fn decode_setup_token(token: &str) -> Result<String, SimpleFinError> {
         .map_err(|e| SimpleFinError::Parse(format!("invalid setup token: {e}")))?
         .trim()
         .to_string();
-    reqwest::Url::parse(&url)
-        .map_err(|e| SimpleFinError::Parse(format!("setup token did not decode to a URL: {e}")))?;
+    secure_url(&url)?;
     Ok(url)
+}
+
+fn secure_url(value: &str) -> Result<reqwest::Url, SimpleFinError> {
+    let url = reqwest::Url::parse(value)
+        .map_err(|_| SimpleFinError::Url("Invalid SimpleFIN URL".into()))?;
+    if url.scheme() != "https" {
+        return Err(SimpleFinError::Url(
+            "SimpleFIN requires an HTTPS connection".into(),
+        ));
+    }
+    Ok(url)
+}
+
+fn http_client() -> Result<reqwest::Client, SimpleFinError> {
+    reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(60))
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .map_err(SimpleFinError::Http)
 }
 
 pub struct SimpleFinClient {
@@ -154,43 +226,57 @@ pub struct SimpleFinClient {
 }
 
 impl SimpleFinClient {
-    pub fn new(access_url: impl Into<String>) -> Self {
-        Self {
+    pub fn new(access_url: impl Into<String>) -> Result<Self, SimpleFinError> {
+        Ok(Self {
             access_url: access_url.into(),
-            http: reqwest::Client::new(),
-        }
+            http: http_client()?,
+        })
     }
 
     /// Discover accounts without requesting transaction history. Some servers also include their
     /// bundled holdings in this response; discovery never persists them.
     pub async fn list_accounts(&self) -> Result<SimpleFinAccountSet, SimpleFinError> {
-        self.request_accounts(&[("balances-only", "1".to_string())]).await
+        self.request_accounts(&[("balances-only", "1".to_string())])
+            .await
     }
 
     /// Fetch selected accounts with balances, holdings, and recent transactions. Explicit `start-date` and
     /// `end-date` values keep the request within SimpleFIN Bridge's 90-calendar-day limit; balances
     /// and holdings are always current regardless of the transaction window.
-    pub async fn fetch_accounts(&self, account_ids: &[&str]) -> Result<SimpleFinAccountSet, SimpleFinError> {
-        if account_ids.is_empty() {
-            return Err(SimpleFinError::Parse("No accounts were selected for sync.".into()));
-        }
-        let (start_date, end_date) = transaction_date_range(chrono::Utc::now());
-        let mut query = vec![("start-date", start_date), ("end-date", end_date)];
-        query.extend(account_ids.iter().map(|id| ("account", (*id).to_string())));
-        self.request_accounts(&query).await
+    pub async fn fetch_accounts(
+        &self,
+        account_ids: &[&str],
+    ) -> Result<SimpleFinAccountSet, SimpleFinError> {
+        self.request_accounts(&selected_account_query(account_ids)?)
+            .await
     }
 
-    async fn request_accounts(&self, query: &[(&str, String)]) -> Result<SimpleFinAccountSet, SimpleFinError> {
-        let (endpoint, user, pass) = accounts_endpoint(&self.access_url)?;
+    fn accounts_request(
+        &self,
+        query: &[(&str, String)],
+    ) -> Result<reqwest::Request, SimpleFinError> {
+        self.http
+            .get(accounts_endpoint(&self.access_url)?)
+            .query(query)
+            .query(&[("version", "2")])
+            .build()
+            .map_err(|e| SimpleFinError::Http(e.without_url()))
+    }
+
+    async fn request_accounts(
+        &self,
+        query: &[(&str, String)],
+    ) -> Result<SimpleFinAccountSet, SimpleFinError> {
         let resp = self
             .http
-            .get(&endpoint)
-            .basic_auth(user, (!pass.is_empty()).then_some(pass))
-            .query(query)
-            .send()
-            .await?;
+            .execute(self.accounts_request(query)?)
+            .await
+            .map_err(|e| SimpleFinError::Http(e.without_url()))?;
         let status = resp.status();
-        let text = resp.text().await?;
+        let text = resp
+            .text()
+            .await
+            .map_err(|e| SimpleFinError::Http(e.without_url()))?;
         if !status.is_success() {
             return Err(SimpleFinError::Api {
                 status: status.as_u16(),
@@ -214,16 +300,16 @@ impl SimpleFinClient {
 
 /// Split an access URL into the `/accounts` endpoint plus the Basic-auth username + password it
 /// embeds. SimpleFIN access URLs look like `https://user:pass@host/simplefin`.
-fn accounts_endpoint(access_url: &str) -> Result<(String, String, String), SimpleFinError> {
-    let mut url =
-        reqwest::Url::parse(access_url.trim()).map_err(|e| SimpleFinError::Url(e.to_string()))?;
-    let user = url.username().to_string();
-    let pass = url.password().unwrap_or("").to_string();
-    // Strip the embedded credentials; we send them via the Authorization header instead.
-    let _ = url.set_username("");
-    let _ = url.set_password(None);
-    let base = url.as_str().trim_end_matches('/').to_string();
-    Ok((format!("{base}/accounts"), user, pass))
+fn accounts_endpoint(access_url: &str) -> Result<reqwest::Url, SimpleFinError> {
+    let mut url = secure_url(access_url.trim())?;
+    if url.username().is_empty() || url.password().is_none_or(str::is_empty) {
+        return Err(SimpleFinError::Url(
+            "SimpleFIN app credentials are missing".into(),
+        ));
+    }
+    url.set_path(&format!("{}/accounts", url.path().trim_end_matches('/')));
+    // reqwest decodes URL credentials and moves them to the Basic Auth header.
+    Ok(url)
 }
 
 /// Parse a numeric string ("100.23") or a bare JSON number into an `f64`.
@@ -232,10 +318,12 @@ fn parse_decimal(v: &Value) -> Option<f64> {
         Value::String(s) => s.trim().parse::<f64>().ok(),
         _ => v.as_f64(),
     }
+    .filter(|number| number.is_finite())
 }
 
 fn parse_account_set(v: &Value) -> Result<SimpleFinAccountSet, SimpleFinError> {
     let mut errors = Vec::new();
+    let mut issues = Vec::new();
     // Bridge uses `errors` (strings); draft v2 uses `errlist` (objects with `msg`). Support both.
     for key in ["errors", "errlist"] {
         if let Some(arr) = v.get(key).and_then(Value::as_array) {
@@ -244,6 +332,29 @@ fn parse_account_set(v: &Value) -> Result<SimpleFinAccountSet, SimpleFinError> {
                     errors.push(s.to_string());
                 } else if let Some(msg) = e.get("msg").and_then(Value::as_str) {
                     errors.push(msg.to_string());
+                    issues.push(SimpleFinIssue {
+                        code: e
+                            .get("code")
+                            .and_then(Value::as_str)
+                            .unwrap_or("gen.")
+                            .into(),
+                        msg: msg.into(),
+                        conn_id: e.get("conn_id").and_then(Value::as_str).map(str::to_owned),
+                        account_id: e
+                            .get("account_id")
+                            .and_then(Value::as_str)
+                            .map(str::to_owned),
+                    });
+                }
+                for message in &errors {
+                    if !issues.iter().any(|issue| &issue.msg == message) {
+                        issues.push(SimpleFinIssue {
+                            code: "gen.".into(),
+                            msg: message.clone(),
+                            conn_id: None,
+                            account_id: None,
+                        });
+                    }
                 }
             }
         }
@@ -267,11 +378,22 @@ fn parse_account_set(v: &Value) -> Result<SimpleFinAccountSet, SimpleFinError> {
         .and_then(Value::as_array)
         .ok_or_else(|| SimpleFinError::Parse("accounts: expected an array".into()))?
         .iter()
-        .map(|a| parse_account(a, &conn_names)
-            .ok_or_else(|| SimpleFinError::Parse("An account is missing its ID.".into())))
+        .map(|a| {
+            parse_account(a, &conn_names)
+                .ok_or_else(|| SimpleFinError::Parse("An account is missing its ID.".into()))
+        })
         .collect::<Result<Vec<_>, _>>()?;
 
-    Ok(SimpleFinAccountSet { accounts, errors })
+    let connections = conn_names
+        .into_iter()
+        .map(|(id, name)| SimpleFinConnection { id, name })
+        .collect();
+    Ok(SimpleFinAccountSet {
+        accounts,
+        errors,
+        issues,
+        connections,
+    })
 }
 
 fn parse_account(v: &Value, conn_names: &HashMap<String, String>) -> Option<SimpleFinAccount> {
@@ -326,12 +448,21 @@ fn parse_account(v: &Value, conn_names: &HashMap<String, String>) -> Option<Simp
     Some(SimpleFinAccount {
         id,
         name,
-        number: v.get("number").or_else(|| v.get("account-number"))
-            .and_then(Value::as_str).map(str::to_string),
+        number: v
+            .get("number")
+            .or_else(|| v.get("account-number"))
+            .and_then(Value::as_str)
+            .map(str::to_string),
         currency,
         balance: v.get("balance").and_then(parse_decimal),
         balance_date: v.get("balance-date").and_then(Value::as_i64),
         institution,
+        connection_id: v
+            .get("conn_id")
+            .and_then(Value::as_str)
+            .filter(|id| !id.is_empty())
+            .map(str::to_owned),
+        holdings_reported: v.get("holdings").is_some_and(Value::is_array),
         holdings,
         transactions,
     })
@@ -374,7 +505,10 @@ fn parse_holding(v: &Value) -> Option<SimpleFinHolding> {
         shares: v.get("shares").and_then(parse_decimal).unwrap_or(0.0),
         market_value: v.get("market_value").and_then(parse_decimal),
         cost_basis: v.get("cost_basis").and_then(parse_decimal),
-        currency: v.get("currency").and_then(Value::as_str).map(str::to_string),
+        currency: v
+            .get("currency")
+            .and_then(Value::as_str)
+            .map(str::to_string),
     })
 }
 
@@ -413,42 +547,29 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    #[tokio::test]
-    async fn discovery_skips_transactions_and_sync_requests_only_selected_ids() {
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
-        use tokio::net::TcpListener;
-
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let address = listener.local_addr().unwrap();
-        let server = tokio::spawn(async move {
-            let mut requests = Vec::new();
-            for _ in 0..2 {
-                let (mut stream, _) = listener.accept().await.unwrap();
-                let mut request = Vec::new();
-                loop {
-                    let mut chunk = [0; 1024];
-                    let n = stream.read(&mut chunk).await.unwrap();
-                    assert!(n > 0);
-                    request.extend_from_slice(&chunk[..n]);
-                    if request.windows(4).any(|w| w == b"\r\n\r\n") { break; }
-                }
-                stream.write_all(
-                    b"HTTP/1.1 200 OK\r\nContent-Length: 15\r\nConnection: close\r\n\r\n{\"accounts\":[]}",
-                ).await.unwrap();
-                requests.push(String::from_utf8(request).unwrap());
-            }
-            requests
-        });
-        let client = SimpleFinClient::new(format!("http://{address}/simplefin"));
-        client.list_accounts().await.unwrap();
-        client.fetch_accounts(&["chosen-1", "chosen-2"]).await.unwrap();
-        assert!(client.fetch_accounts(&[]).await.is_err());
-        let requests = tokio::time::timeout(std::time::Duration::from_secs(5), server).await.unwrap().unwrap();
-        assert!(requests[0].starts_with("GET /simplefin/accounts?balances-only=1 "));
-        assert!(!requests[0].contains("start-date"));
-        assert!(requests[1].contains("account=chosen-1&account=chosen-2"));
-        assert!(requests[1].contains("start-date="));
-        assert!(requests[1].contains("end-date="));
+    #[test]
+    fn discovery_skips_transactions_and_sync_requests_only_selected_ids() {
+        let client =
+            SimpleFinClient::new("https://synthetic:fixture@example.invalid/simplefin").unwrap();
+        let discovery = client
+            .accounts_request(&[("balances-only", "1".into())])
+            .unwrap();
+        assert_eq!(discovery.url().query(), Some("balances-only=1&version=2"));
+        let selected = client
+            .accounts_request(&selected_account_query(&["chosen-1", "chosen-2"]).unwrap())
+            .unwrap();
+        assert!(selected
+            .url()
+            .query()
+            .unwrap()
+            .contains("account=chosen-1&account=chosen-2"));
+        assert!(selected.url().query().unwrap().contains("start-date="));
+        assert!(selected.url().query().unwrap().contains("end-date="));
+        assert!(selected.url().query().unwrap().contains("version=2"));
+        assert!(selected_account_query(&[]).is_err());
+        assert_eq!(selected.url().username(), "");
+        assert!(selected.url().password().is_none());
+        assert!(accounts_endpoint("http://synthetic:fixture@example.invalid/simplefin").is_err());
     }
 
     #[test]
@@ -480,20 +601,17 @@ mod tests {
         let end = chrono::DateTime::from_timestamp(end.parse::<i64>().unwrap(), 0).unwrap();
 
         assert_eq!(end, now);
-        assert_eq!(
-            end.signed_duration_since(start),
-            chrono::Duration::days(89)
-        );
+        assert_eq!(end.signed_duration_since(start), chrono::Duration::days(89));
         assert!(end.signed_duration_since(start) < chrono::Duration::days(90));
     }
 
     #[test]
     fn splits_access_url_into_endpoint_and_credentials() {
-        let (endpoint, user, pass) =
+        let endpoint =
             accounts_endpoint("https://abc123:secretpw@bridge.simplefin.org/simplefin").unwrap();
-        assert_eq!(endpoint, "https://bridge.simplefin.org/simplefin/accounts");
-        assert_eq!(user, "abc123");
-        assert_eq!(pass, "secretpw");
+        assert_eq!(endpoint.path(), "/simplefin/accounts");
+        assert_eq!(endpoint.username(), "abc123");
+        assert_eq!(endpoint.password(), Some("secretpw"));
     }
 
     #[test]
@@ -561,6 +679,38 @@ mod tests {
         let v = json!({ "accounts": [{ "name": "no id" }] });
         assert!(parse_account_set(&v).is_err());
         assert!(parse_account_set(&json!({ "unexpected": [] })).is_err());
+    }
+
+    #[test]
+    fn preserves_scoped_auth_errors_and_missing_holdings() {
+        let set = parse_account_set(&json!({
+            "connections": [{"conn_id": "one", "name": "Bank - personal"}],
+            "errlist": [{"code": "con.auth", "msg": "Approve login", "conn_id": "one"}],
+            "accounts": [{"id": "a", "conn_id": "one", "balance": "NaN"}]
+        }))
+        .unwrap();
+        assert_eq!(set.issues[0].conn_id.as_deref(), Some("one"));
+        assert_eq!(set.issues[0].code, "con.auth");
+        assert_eq!(set.connections[0].name, "Bank - personal");
+        assert_eq!(set.accounts[0].connection_id.as_deref(), Some("one"));
+        assert!(!set.accounts[0].holdings_reported);
+        assert!(set.accounts[0].balance.is_none());
+    }
+
+    #[test]
+    fn basic_auth_decodes_credentials_without_putting_them_in_the_request_url() {
+        let url =
+            accounts_endpoint("https://sample:pass%3Aword@bridge.simplefin.org/simplefin").unwrap();
+        let request = http_client().unwrap().get(url).build().unwrap();
+        assert_eq!(request.url().username(), "");
+        assert!(request.url().password().is_none());
+        assert_eq!(
+            request.headers()["authorization"],
+            format!(
+                "Basic {}",
+                base64::engine::general_purpose::STANDARD.encode("sample:pass:word")
+            )
+        );
     }
 
     #[test]

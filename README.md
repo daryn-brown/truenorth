@@ -56,6 +56,13 @@ Opt-in local sharing, privacy information, and instructions for adding the nativ
 </details>
 
 ## Status
+**Connection health and floating sync.** A dedicated **Sync accounts** button floats at the
+dashboard's bottom-right, separate from **Refresh FX**, and updates every configured provider.
+The **Banks** tab shows per-connection SimpleFIN authentication issues and source balance dates;
+stale or unverified balances are flagged on accounts and total wealth. Guided reconnection opens
+SimpleFIN in your browser without asking you to replace the app token for ordinary bank MFA.
+See [SimpleFIN connection health](docs/simplefin.md#connection-health-and-reauthentication).
+
 **Mac net-worth widget.** Signed macOS builds can share USD and CAD totals with a native
 desktop / Notification Center widget in small and medium sizes. Sharing is off by default;
 the widget receives only a local summary, never the encrypted database or account credentials.

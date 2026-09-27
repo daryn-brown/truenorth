@@ -34,7 +34,7 @@ function remote(
   localId: number | null = null,
 ): DiscoveredSyncAccount {
   return {
-    remote_id: id, name, institution: "Robinhood", account_type: accountType,
+    remote_id: id, connection_id: null, name, institution: "Robinhood", account_type: accountType,
     currency: "USD", masked_number: `****${number}`,
     selection: localId === null ? "unreviewed" : "sync", local_account_id: localId,
     can_resume: localId !== null, unavailable_reason: null, linkable_account_ids: [],
@@ -51,6 +51,7 @@ const remotes: Record<SyncProvider, DiscoveredSyncAccount[]> = {
   simplefin: [
     remote("sf-1", "Individual", "0580", "brokerage", 1),
     remote("sf-3", "Roth IRA", "6755", "roth_ira", 3),
+    remote("sf-unreviewed", "New savings", "8888", "savings"),
   ],
 };
 
@@ -59,13 +60,17 @@ interface Fixture {
   failCommand: string | null;
   holdDelete: boolean;
   releaseDelete: (() => void) | null;
+  automaticCheckDue: boolean;
 }
 
 declare global {
   interface Window { accountSyncFixture: Fixture; }
 }
 
-const fixture: Fixture = { calls: [], failCommand: null, holdDelete: false, releaseDelete: null };
+const fixture: Fixture = {
+  calls: [], failCommand: null, holdDelete: false, releaseDelete: null,
+  automaticCheckDue: new URLSearchParams(location.search).has("automatic"),
+};
 window.accountSyncFixture = fixture;
 let revision = 0;
 const connected: Record<SyncProvider, boolean> = { snaptrade: true, simplefin: true };
@@ -145,6 +150,10 @@ mockIPC(async (command, payload) => {
     throw new Error(`Synthetic failure for ${command}`);
   }
   if (command === "list_accounts") return structuredClone(accounts.filter((a) => a.is_active));
+  if (command === "questrade_get_status") {
+    return { is_connected: false, last_synced_at: null, account_count: 0 };
+  }
+  if (command === "plugin:shell|open") return;
   if (command === "delete_account") {
     if (!payload || !("accountId" in payload) || typeof payload.accountId !== "number") {
       throw new Error("Delete requires an accountId.");
@@ -171,6 +180,15 @@ mockIPC(async (command, payload) => {
       has_credentials: true, is_connected: connected[provider], is_personal: true,
       client_id: "PERS-SYNTHETIC", last_synced_at: null,
       account_count: accounts.filter((a) => a.is_active && a.connector_kind === provider).length,
+      last_attempt_at: fixture.automaticCheckDue ? null : new Date().toISOString(),
+      app_auth_required: false, messages: [],
+      connections: provider === "simplefin" ? [{
+        id: "sf-bank", name: "Robinhood", status: "stale", messages: ["Synthetic stale balance"],
+        accounts: accounts.filter((a) => a.is_active && a.connector_kind === provider).map((a) => ({
+          account_id: a.id, name: a.name,
+          health: { status: "stale", balance_as_of: stamp, message: "Synthetic stale balance" },
+        })),
+      }].filter((b) => b.accounts.length > 0) : [],
     };
   }
   if (command === `${provider}_discover_accounts`) return review(provider);
@@ -179,11 +197,12 @@ mockIPC(async (command, payload) => {
     return saveChoices(provider, payload.payload);
   }
   if (command === `${provider}_sync`) {
+    fixture.automaticCheckDue = false;
     const selected = remotes[provider].filter((r) => r.selection === "sync");
     if (selected.length === 0) throw new Error("No accounts are selected for sync. Open Choose accounts to sync.");
     return {
       accounts_synced: selected.length, holdings_synced: selected.length, transactions_synced: 0,
-      synced_at: stamp, warnings: [],
+      synced_at: stamp, warnings: [], skipped: false,
       accounts_needing_review: remotes[provider].filter((r) => r.selection === "unreviewed").length,
     };
   }
@@ -195,6 +214,7 @@ mockIPC(async (command, payload) => {
     return {
       has_credentials: true, is_connected: false, is_personal: true,
       client_id: "PERS-SYNTHETIC", last_synced_at: null, account_count: 0,
+      last_attempt_at: null, app_auth_required: false, messages: [], connections: [],
     };
   }
   if (Object.prototype.hasOwnProperty.call(responses, command)) return structuredClone(responses[command]);

@@ -7,6 +7,8 @@ interface Props {
   homeCurrency: Currency;
   onToggleCurrency: () => void;
   loading: boolean;
+  connectionAttention?: boolean;
+  onReviewConnections?: () => void;
 }
 
 const fmt = (value: number, currency: Currency) =>
@@ -106,6 +108,8 @@ export default function NetWorthCard({
   homeCurrency,
   onToggleCurrency,
   loading,
+  connectionAttention = false,
+  onReviewConnections,
 }: Props) {
   const primary = homeCurrency === "CAD" ? netWorth?.total_cad : netWorth?.total_usd;
   const secondary = homeCurrency === "CAD" ? netWorth?.total_usd : netWorth?.total_cad;
@@ -142,6 +146,19 @@ export default function NetWorthCard({
           <span>{secondaryCurrency}</span>
         </button>
       </div>
+
+      {!loading && connectionAttention && (
+        <div role="status" className="mt-4 rounded-xl border border-amber-700/40 bg-amber-900/20 px-4 py-3">
+          <p className="text-sm font-semibold text-amber-200">Figures may be out of date or incomplete</p>
+          <p className="mt-1 text-xs text-slate-400">
+            Some SimpleFIN connections or balances need attention. Totals include last-known
+            balances; accounts without a balance are not included.
+          </p>
+          <button type="button" onClick={onReviewConnections} className="mt-2 text-xs text-amber-200 underline">
+            Review connections
+          </button>
+        </div>
+      )}
 
       {!loading && (
         <div className={`net-worth-orbs net-worth-orbs--${hasAccounts ? 3 : 1}`}>

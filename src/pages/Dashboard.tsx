@@ -17,6 +17,7 @@ import type {
   ProgressMetrics,
   ProgressInputs,
   MacWidgetSettings,
+  SimpleFinStatus,
 } from "../types/finance";
 import {
   addAccount,
@@ -40,6 +41,14 @@ import {
   setSeattleAssumptions,
   setProgressInputs,
   updateAccountCurrency,
+  simplefinGetStatus,
+  simplefinSync,
+  snaptradeGetStatus,
+  snaptradeSync,
+  tellerGetStatus,
+  tellerSync,
+  questradeGetStatus,
+  questradeSync,
 } from "../hooks/useFinanceApi";
 import NetWorthCard from "../components/NetWorthCard";
 import GoalCountdownCard from "../components/GoalCountdownCard";
@@ -86,7 +95,6 @@ export default function Dashboard({
   const [history, setHistory] = useState<NetWorthHistoryPoint[]>([]);
   const [homeCurrency, setHomeCurrency] = useState<Currency>("CAD");
   const [loading, setLoading] = useState(true);
-  const [dashboardError, setDashboardError] = useState<string | null>(null);
   const [accountToDelete, setAccountToDelete] = useState<Account | null>(null);
   const [deleting, setDeleting] = useState(false);
   const [deleteError, setDeleteError] = useState<string | null>(null);
@@ -100,7 +108,27 @@ export default function Dashboard({
   const [widgetSettings, setWidgetSettings] = useState<MacWidgetSettings | null>(null);
   const [widgetOpen, setWidgetOpen] = useState(false);
   const [widgetError, setWidgetError] = useState<string | null>(null);
+  const [simplefinStatus, setSimplefinStatus] = useState<SimpleFinStatus | null>(null);
+  const [healthError, setHealthError] = useState<string | null>(null);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [syncing, setSyncing] = useState(false);
+  const [syncError, setSyncError] = useState<string | null>(null);
+  const [syncNotice, setSyncNotice] = useState<string | null>(null);
+  const [connectProvider, setConnectProvider] = useState<"snaptrade" | "simplefin">("snaptrade");
+  const syncInFlight = useRef(false);
   const dividendRequest = useRef(0);
+
+  const refreshConnectionHealth = useCallback(async () => {
+    try {
+      const status = await simplefinGetStatus();
+      setSimplefinStatus(status);
+      setHealthError(null);
+      return status;
+    } catch (err) {
+      setHealthError(`Could not verify SimpleFIN connection health: ${String(err)}`);
+      return null;
+    }
+  }, []);
 
   const refreshWidget = useCallback(async () => {
     try {
@@ -144,8 +172,9 @@ export default function Dashboard({
 
   const load = useCallback(async (completedAction?: string) => {
     setLoading(true);
-    setDashboardError(null);
+    setLoadError(null);
     try {
+      void refreshConnectionHealth();
       // Keep conversions current without a manual click: refresh FX at most once per day. This is
       // a no-op (DB check only) when today's rates are already stored, and stays best-effort so an
       // offline launch still renders with the last known rates.
@@ -175,14 +204,15 @@ export default function Dashboard({
       setProjection(proj);
       setCashflow(cf);
       setHistory(hist);
+      setLoadError(null);
     } catch (err) {
       console.error("Failed to load dashboard data:", err);
-      setDashboardError(`${completedAction ? `${completedAction} ` : ""}Could not refresh dashboard data: ${String(err)}`);
+      setLoadError(`${completedAction ? `${completedAction} ` : ""}Could not refresh dashboard data. Shown figures may be out of date: ${String(err)}`);
     } finally {
       setLoading(false);
       await refreshWidget();
     }
-  }, [loadDividends, refreshWidget]);
+  }, [loadDividends, refreshWidget, refreshConnectionHealth]);
 
   useEffect(() => {
     void load();
@@ -259,6 +289,98 @@ export default function Dashboard({
     }
     await load();
   }, [load]);
+
+  const handleSyncAccounts = async () => {
+    if (syncInFlight.current) return;
+    syncInFlight.current = true;
+    setSyncing(true);
+    setSyncError(null);
+    setSyncNotice(null);
+    let connected = 0;
+    let synced = 0;
+    let succeeded = 0;
+    const problems: string[] = [];
+    const providers: {
+      name: string;
+      status: () => Promise<{ is_connected: boolean }>;
+      sync: () => Promise<{ accounts_synced: number; warnings?: string[]; accounts_needing_review?: number; skipped?: boolean }>;
+    }[] = [
+      { name: "SimpleFIN", status: simplefinGetStatus, sync: simplefinSync },
+      { name: "SnapTrade", status: snaptradeGetStatus, sync: snaptradeSync },
+      { name: "Teller", status: tellerGetStatus, sync: tellerSync },
+      { name: "Questrade", status: questradeGetStatus, sync: questradeSync },
+    ];
+    try {
+      await Promise.all(providers.map(async (provider) => {
+        try {
+          if (!(await provider.status()).is_connected) return;
+          connected += 1;
+          const result = await provider.sync();
+          if (result.skipped) return;
+          synced += result.accounts_synced;
+          succeeded += 1;
+          problems.push(...(result.warnings ?? []).map((message) => `${provider.name}: ${message}`));
+          if (result.accounts_needing_review) {
+            problems.push(`${provider.name}: ${result.accounts_needing_review} new account(s) need review. They were not imported. Open Choose accounts to sync.`);
+          }
+        } catch (err) {
+          problems.push(`${provider.name}: ${String(err)}`);
+        }
+      }));
+      if (succeeded > 0) await handleConnectorChanged();
+      await refreshConnectionHealth();
+      if (problems.length > 0) setSyncError(problems.join("\n"));
+      if (succeeded > 0) {
+        setSyncNotice(`Received updates for ${synced} account(s). Check source dates: banks can still return cached balances.`);
+      } else if (connected === 0 && problems.length === 0) {
+        setConnectOpen(true);
+        setSyncNotice("Connect an account to enable syncing.");
+      }
+    } finally {
+      syncInFlight.current = false;
+      setSyncing(false);
+    }
+  };
+
+  useEffect(() => {
+    let disposed = false;
+    const check = async () => {
+      if (syncInFlight.current) return;
+      const status = await refreshConnectionHealth();
+      if (disposed || !status?.is_connected || status.app_auth_required || connectOpen || syncInFlight.current) return;
+      const lastAttempt = status.last_attempt_at ? Date.parse(status.last_attempt_at) : 0;
+      if (Number.isFinite(lastAttempt) && lastAttempt > Date.now() - 6 * 3600_000) return;
+      syncInFlight.current = true;
+      setSyncing(true);
+      try {
+        const result = await simplefinSync(true);
+        if (!result.skipped) {
+          if (result.accounts_needing_review) {
+            setSyncNotice(`SimpleFIN: ${result.accounts_needing_review} new account(s) need review. They were not imported. Open Choose accounts to sync.`);
+          }
+          if (result.warnings.length) setSyncError(result.warnings.join("\n"));
+          await handleConnectorChanged();
+        }
+      } catch (err) {
+        setSyncError(`SimpleFIN: ${String(err)}`);
+      } finally {
+        await refreshConnectionHealth();
+        syncInFlight.current = false;
+        setSyncing(false);
+      }
+    };
+    void check();
+    const interval = window.setInterval(() => void check(), 60_000);
+    return () => { disposed = true; window.clearInterval(interval); };
+  }, [connectOpen, handleConnectorChanged, refreshConnectionHealth]);
+
+  const reviewConnections = () => {
+    setConnectProvider("simplefin");
+    setConnectOpen(true);
+  };
+  const connectionAttention = Boolean(healthError || simplefinStatus?.app_auth_required ||
+    simplefinStatus?.messages.length ||
+    simplefinStatus?.connections.some((bank) => bank.status !== "current"));
 
   const handleUpdateCurrency = useCallback(
     async (accountId: number, currency: string) => {
@@ -349,10 +471,10 @@ export default function Dashboard({
             <strong>TrueNorth</strong>
           </div>
 
-          <div className="desktop-topbar__status">
+          <div className={`desktop-topbar__status ${connectionAttention ? "desktop-topbar__status--attention" : ""}`}>
             <i />
-            {connectedAccountCount > 0
-              ? `${connectedAccountCount} account${connectedAccountCount === 1 ? "" : "s"} synced`
+            {connectionAttention ? "Connections need attention" : connectedAccountCount > 0
+              ? `${connectedAccountCount} account${connectedAccountCount === 1 ? "" : "s"} linked`
               : "Local-first mode"}
           </div>
 
@@ -410,6 +532,22 @@ export default function Dashboard({
             </div>
           </section>
 
+          {loadError && (
+            <div role="alert" className="desktop-alert desktop-alert--error">
+              {loadError}
+              <button type="button" className="desktop-action" disabled={loading} onClick={() => void load()}>
+                Retry refresh
+              </button>
+            </div>
+          )}
+          {(syncError || healthError) && (
+            <div role="alert" className="desktop-alert desktop-alert--error">
+              <span className="whitespace-pre-wrap">{syncError ?? healthError}</span>{" "}
+              <button type="button" className="desktop-section-action" onClick={reviewConnections}>Review connections</button>
+            </div>
+          )}
+          {syncNotice && <p role="status" className="mb-4 text-sm text-slate-400">{syncNotice}</p>}
+
         {fxError && (
           <div className="desktop-alert desktop-alert--error">
             FX refresh failed: {fxError}
@@ -435,6 +573,8 @@ export default function Dashboard({
                   setHomeCurrency((currency) => (currency === "CAD" ? "USD" : "CAD"))
                 }
                 loading={loading}
+                connectionAttention={connectionAttention}
+                onReviewConnections={reviewConnections}
               />
             </div>
             <div className="desktop-span-4">
@@ -533,15 +673,9 @@ export default function Dashboard({
             onEditCurrency={(account) =>
               setModal({ open: true, mode: "edit_currency", account })
             }
+            simplefinHealth={simplefinStatus?.connections}
+            onManageConnections={reviewConnections}
           />
-          {dashboardError && (
-            <div className="desktop-alert desktop-alert--error" role="alert">
-              {dashboardError}
-              <button type="button" className="desktop-action" disabled={loading} onClick={() => void load()}>
-                Retry refresh
-              </button>
-            </div>
-          )}
           </section>
 
         {accounts.length === 0 && !loading && (
@@ -552,6 +686,20 @@ export default function Dashboard({
         )}
         </main>
       </div>
+
+      {!connectOpen && !importOpen && !modal.open && !widgetOpen && !accountToDelete && (
+        <button
+          type="button"
+          className="desktop-sync-fab"
+          onClick={() => void handleSyncAccounts()}
+          disabled={syncing}
+          aria-busy={syncing}
+          title="Sync connected accounts. Bank refreshes may still be pending; this is separate from Refresh FX."
+        >
+          <DesktopIcon name="refresh" />
+          <span>{syncing ? "Syncing..." : "Sync accounts"}</span>
+        </button>
+      )}
 
       {modal.open && modal.mode === "add_account" && (
         <AccountModal
@@ -618,6 +766,7 @@ export default function Dashboard({
 
       <ConnectionsModal
         isOpen={connectOpen}
+        initialProvider={connectProvider}
         onClose={() => setConnectOpen(false)}
         onChanged={handleConnectorChanged}
       />

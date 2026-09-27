@@ -33,6 +33,7 @@ CREATE TABLE IF NOT EXISTS account_sync_selections (
     account_id INTEGER REFERENCES accounts(id),
     decision   TEXT NOT NULL CHECK (decision IN ('sync', 'ignore')),
     institution TEXT,
+    connection_id TEXT,
     PRIMARY KEY (provider, remote_id),
     CHECK (decision != 'sync' OR account_id IS NOT NULL)
 );

@@ -45,6 +45,9 @@ jobs:
       - name: Net-worth category UI tests
         run: npm run test:net-worth
 
+      - name: Account selection and sync UI tests
+        run: npm run test:account-sync
+
       - name: Exercise demo UI and widget settings
         run: npm run screenshots:readme
 
@@ -86,6 +89,9 @@ jobs:
 
       - name: Widget snapshot and net-worth tests
         run: cargo test --manifest-path src-tauri/Cargo.toml --lib -- commands::widget::tests commands::net_worth::tests
+
+      - name: Account selection and connection health tests
+        run: cargo test --manifest-path src-tauri/Cargo.toml --lib -- account_selection simplefin snaptrade questrade db::schema commands::accounts cashflow
 
       - name: Compile native widget and test its snapshot reader
         if: runner.os == 'macOS'

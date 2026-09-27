@@ -122,6 +122,7 @@ pub(super) fn remote_accounts(accounts: &[SnapAccount]) -> Vec<RemoteAccount> {
         .iter()
         .map(|a| RemoteAccount {
             remote_id: a.id.clone(),
+            connection_id: None,
             name: a.name.clone().unwrap_or_else(|| "Brokerage account".into()),
             institution: a.institution_name.clone().unwrap_or_else(|| "SnapTrade".into()),
             account_type: map_account_type(a.raw_type.as_deref(), a.name.as_deref()),
