@@ -88,6 +88,7 @@ pub struct SimpleFinAccount {
     /// SimpleFIN account id — stored as `connector_ref`.
     pub id: String,
     pub name: String,
+    pub number: Option<String>,
     pub currency: String,
     /// Current balance in `currency`. The figure that flows into net worth.
     pub balance: Option<f64>,
@@ -160,21 +161,32 @@ impl SimpleFinClient {
         }
     }
 
-    /// Fetch accounts with balances, holdings, and recent transactions. Explicit `start-date` and
+    /// Discover accounts without requesting transaction history. Some servers also include their
+    /// bundled holdings in this response; discovery never persists them.
+    pub async fn list_accounts(&self) -> Result<SimpleFinAccountSet, SimpleFinError> {
+        self.request_accounts(&[("balances-only", "1".to_string())]).await
+    }
+
+    /// Fetch selected accounts with balances, holdings, and recent transactions. Explicit `start-date` and
     /// `end-date` values keep the request within SimpleFIN Bridge's 90-calendar-day limit; balances
     /// and holdings are always current regardless of the transaction window.
-    pub async fn fetch_accounts(&self) -> Result<SimpleFinAccountSet, SimpleFinError> {
-        let (endpoint, user, pass) = accounts_endpoint(&self.access_url)?;
-        // SimpleFIN expects both date bounds as UNIX epoch seconds.
+    pub async fn fetch_accounts(&self, account_ids: &[&str]) -> Result<SimpleFinAccountSet, SimpleFinError> {
+        if account_ids.is_empty() {
+            return Err(SimpleFinError::Parse("No accounts were selected for sync.".into()));
+        }
         let (start_date, end_date) = transaction_date_range(chrono::Utc::now());
+        let mut query = vec![("start-date", start_date), ("end-date", end_date)];
+        query.extend(account_ids.iter().map(|id| ("account", (*id).to_string())));
+        self.request_accounts(&query).await
+    }
+
+    async fn request_accounts(&self, query: &[(&str, String)]) -> Result<SimpleFinAccountSet, SimpleFinError> {
+        let (endpoint, user, pass) = accounts_endpoint(&self.access_url)?;
         let resp = self
             .http
             .get(&endpoint)
             .basic_auth(user, (!pass.is_empty()).then_some(pass))
-            .query(&[
-                ("start-date", start_date.as_str()),
-                ("end-date", end_date.as_str()),
-            ])
+            .query(query)
             .send()
             .await?;
         let status = resp.status();
@@ -187,12 +199,12 @@ impl SimpleFinClient {
         }
         let v: Value =
             serde_json::from_str(&text).map_err(|e| SimpleFinError::Parse(e.to_string()))?;
-        Ok(parse_account_set(&v))
+        parse_account_set(&v)
     }
 
     /// Validate the access URL by fetching accounts. Used right after claiming.
     pub async fn check(&self) -> Result<(), SimpleFinError> {
-        self.fetch_accounts().await.map(|_| ())
+        self.list_accounts().await.map(|_| ())
     }
 }
 
@@ -222,7 +234,7 @@ fn parse_decimal(v: &Value) -> Option<f64> {
     }
 }
 
-fn parse_account_set(v: &Value) -> SimpleFinAccountSet {
+fn parse_account_set(v: &Value) -> Result<SimpleFinAccountSet, SimpleFinError> {
     let mut errors = Vec::new();
     // Bridge uses `errors` (strings); draft v2 uses `errlist` (objects with `msg`). Support both.
     for key in ["errors", "errlist"] {
@@ -253,14 +265,13 @@ fn parse_account_set(v: &Value) -> SimpleFinAccountSet {
     let accounts = v
         .get("accounts")
         .and_then(Value::as_array)
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|a| parse_account(a, &conn_names))
-                .collect()
-        })
-        .unwrap_or_default();
+        .ok_or_else(|| SimpleFinError::Parse("accounts: expected an array".into()))?
+        .iter()
+        .map(|a| parse_account(a, &conn_names)
+            .ok_or_else(|| SimpleFinError::Parse("An account is missing its ID.".into())))
+        .collect::<Result<Vec<_>, _>>()?;
 
-    SimpleFinAccountSet { accounts, errors }
+    Ok(SimpleFinAccountSet { accounts, errors })
 }
 
 fn parse_account(v: &Value, conn_names: &HashMap<String, String>) -> Option<SimpleFinAccount> {
@@ -273,7 +284,7 @@ fn parse_account(v: &Value, conn_names: &HashMap<String, String>) -> Option<Simp
     let currency = v
         .get("currency")
         .and_then(Value::as_str)
-        .unwrap_or("USD")
+        .unwrap_or("")
         .to_string();
 
     // Institution: Bridge embeds `org.name`/`org.domain`; the protocol uses `conn_name` or a
@@ -315,6 +326,8 @@ fn parse_account(v: &Value, conn_names: &HashMap<String, String>) -> Option<Simp
     Some(SimpleFinAccount {
         id,
         name,
+        number: v.get("number").or_else(|| v.get("account-number"))
+            .and_then(Value::as_str).map(str::to_string),
         currency,
         balance: v.get("balance").and_then(parse_decimal),
         balance_date: v.get("balance-date").and_then(Value::as_i64),
@@ -400,6 +413,44 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    #[tokio::test]
+    async fn discovery_skips_transactions_and_sync_requests_only_selected_ids() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let mut requests = Vec::new();
+            for _ in 0..2 {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut request = Vec::new();
+                loop {
+                    let mut chunk = [0; 1024];
+                    let n = stream.read(&mut chunk).await.unwrap();
+                    assert!(n > 0);
+                    request.extend_from_slice(&chunk[..n]);
+                    if request.windows(4).any(|w| w == b"\r\n\r\n") { break; }
+                }
+                stream.write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Length: 15\r\nConnection: close\r\n\r\n{\"accounts\":[]}",
+                ).await.unwrap();
+                requests.push(String::from_utf8(request).unwrap());
+            }
+            requests
+        });
+        let client = SimpleFinClient::new(format!("http://{address}/simplefin"));
+        client.list_accounts().await.unwrap();
+        client.fetch_accounts(&["chosen-1", "chosen-2"]).await.unwrap();
+        assert!(client.fetch_accounts(&[]).await.is_err());
+        let requests = tokio::time::timeout(std::time::Duration::from_secs(5), server).await.unwrap().unwrap();
+        assert!(requests[0].starts_with("GET /simplefin/accounts?balances-only=1 "));
+        assert!(!requests[0].contains("start-date"));
+        assert!(requests[1].contains("account=chosen-1&account=chosen-2"));
+        assert!(requests[1].contains("start-date="));
+        assert!(requests[1].contains("end-date="));
+    }
+
     #[test]
     fn decodes_demo_setup_token() {
         // Base64 of https://bridge.simplefin.org/simplefin/claim/demo
@@ -465,7 +516,7 @@ mod tests {
                 }]
             }]
         });
-        let set = parse_account_set(&v);
+        let set = parse_account_set(&v).unwrap();
         assert!(set.errors.is_empty());
         assert_eq!(set.accounts.len(), 1);
         let acc = &set.accounts[0];
@@ -495,7 +546,7 @@ mod tests {
                 "balance-date": 978366153i64
             }]
         });
-        let set = parse_account_set(&v);
+        let set = parse_account_set(&v).unwrap();
         assert_eq!(set.errors, vec!["Authentication required".to_string()]);
         assert_eq!(set.accounts.len(), 1);
         let acc = &set.accounts[0];
@@ -506,9 +557,10 @@ mod tests {
     }
 
     #[test]
-    fn account_missing_id_is_skipped() {
+    fn account_missing_id_is_an_explicit_error() {
         let v = json!({ "accounts": [{ "name": "no id" }] });
-        assert!(parse_account_set(&v).accounts.is_empty());
+        assert!(parse_account_set(&v).is_err());
+        assert!(parse_account_set(&json!({ "unexpected": [] })).is_err());
     }
 
     #[test]
@@ -539,7 +591,7 @@ mod tests {
                 ]
             }]
         });
-        let set = parse_account_set(&v);
+        let set = parse_account_set(&v).unwrap();
         let txns = &set.accounts[0].transactions;
         assert_eq!(txns.len(), 2);
         assert_eq!(txns[0].id, "txn-1");

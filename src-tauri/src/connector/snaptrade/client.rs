@@ -245,7 +245,10 @@ impl SnapTradeClient {
         let arr = v
             .as_array()
             .ok_or_else(|| SnapTradeError::Parse("accounts: expected an array".into()))?;
-        Ok(arr.iter().filter_map(parse_account).collect())
+        arr.iter()
+            .map(|a| parse_account(a)
+                .ok_or_else(|| SnapTradeError::Parse("An account is missing its ID.".into())))
+            .collect()
     }
 
     /// List positions (holdings) for one account.
@@ -422,7 +425,7 @@ mod tests {
     }
 
     #[test]
-    fn account_missing_id_is_skipped() {
+    fn account_parser_requires_an_id() {
         let v = json!({ "name": "no id here" });
         assert!(parse_account(&v).is_none());
     }

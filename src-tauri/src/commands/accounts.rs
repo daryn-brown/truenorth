@@ -190,14 +190,8 @@ pub fn add_account(
 /// Soft-delete an account (set is_active = 0).
 #[tauri::command]
 pub fn delete_account(db: State<AppDb>, account_id: i64) -> Result<(), String> {
-    let conn = db.0.lock().map_err(|e| e.to_string())?;
-    conn.execute(
-        "UPDATE accounts SET is_active = 0, updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') \
-         WHERE id = ?1",
-        params![account_id],
-    )
-    .map_err(|e| e.to_string())?;
-    Ok(())
+    let mut conn = db.0.lock().map_err(|e| e.to_string())?;
+    super::account_selection::deactivate_account(&mut conn, account_id)
 }
 
 /// Upsert a balance snapshot for an account.
