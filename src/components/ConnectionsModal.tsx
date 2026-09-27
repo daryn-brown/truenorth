@@ -1,10 +1,13 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { isTauri } from "@tauri-apps/api/core";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import { open as openUrl } from "@tauri-apps/plugin-shell";
 import type {
   QuestradeStatus,
   QuestradeSyncSummary,
   SimpleFinStatus,
   SimpleFinSyncSummary,
+  SimpleFinConnectionHealth,
   SnapTradeStatus,
   SnapTradeSyncSummary,
   TellerStatus,
@@ -32,12 +35,14 @@ import {
   tellerSaveConfig,
   tellerSync,
 } from "../hooks/useFinanceApi";
+import ConnectionStatus, { formatConnectionTime } from "./ConnectionStatus";
 
 interface Props {
   isOpen: boolean;
   onClose: () => void;
   /** Called after a successful sync or disconnect so the dashboard can reload. */
   onChanged: () => void;
+  initialProvider?: Provider;
 }
 
 type Provider = "snaptrade" | "simplefin" | "teller" | "direct";
@@ -117,8 +122,9 @@ function loadTellerConnect(): Promise<TellerConnectFactory> {
   });
 }
 
-export default function ConnectionsModal({ isOpen, onClose, onChanged }: Props) {
-  const [provider, setProvider] = useState<Provider>("snaptrade");
+export default function ConnectionsModal({ isOpen, onClose, onChanged, initialProvider = "snaptrade" }: Props) {
+  const [provider, setProvider] = useState<Provider>(initialProvider);
+  useEffect(() => { if (isOpen) setProvider(initialProvider); }, [isOpen, initialProvider]);
 
   if (!isOpen) return null;
 
@@ -128,7 +134,7 @@ export default function ConnectionsModal({ isOpen, onClose, onChanged }: Props) 
       onClick={(e) => e.target === e.currentTarget && onClose()}
     >
       <div className="tn-modal tn-connections-modal w-full max-w-lg rounded-2xl border border-slate-700 bg-slate-900 p-6 shadow-2xl">
-        <h2 className="mb-1 text-lg font-semibold text-white">Connect accounts</h2>
+        <h2 className="mb-1 text-lg font-semibold text-white">Connections</h2>
         <p className="mb-4 text-xs text-slate-400">
           Sync real balances automatically instead of entering them by hand. TrueNorth requests{" "}
           <span className="font-semibold text-slate-300">read-only</span> access only — it can never
@@ -577,6 +583,9 @@ function SimpleFinPanel({ onChanged }: { onChanged: () => void }) {
   const [error, setError] = useState<string | null>(null);
   const [info, setInfo] = useState<string | null>(null);
   const [summary, setSummary] = useState<SimpleFinSyncSummary | null>(null);
+  const [reconnectBank, setReconnectBank] = useState<string | null>(null);
+  const pendingReturn = useRef(false);
+  const syncInFlight = useRef(false);
 
   const refreshStatus = useCallback(async () => {
     try {
@@ -595,27 +604,13 @@ function SimpleFinPanel({ onChanged }: { onChanged: () => void }) {
     setError(null);
     setInfo(null);
     try {
-      const next = await simplefinConnect(setupToken);
+      const token = setupToken;
+      setSetupToken("");
+      const next = await simplefinConnect(token);
       setStatus(next);
       setSetupToken("");
       setReclaiming(false);
-      setInfo("SimpleFIN connected. Click “Sync now” to pull balances.");
-    } catch (err) {
-      setError(messageOf(err));
-    } finally {
-      setBusy(null);
-    }
-  };
-
-  const handleSync = async () => {
-    setBusy("sync");
-    setError(null);
-    setInfo(null);
-    setSummary(null);
-    try {
-      const result = await simplefinSync();
-      setSummary(result);
-      await refreshStatus();
+      setInfo("App token saved. Sync to verify access and available balances.");
       onChanged();
     } catch (err) {
       setError(messageOf(err));
@@ -623,6 +618,73 @@ function SimpleFinPanel({ onChanged }: { onChanged: () => void }) {
       setBusy(null);
     }
   };
+
+  const handleSync = useCallback(async () => {
+    if (syncInFlight.current) return;
+    syncInFlight.current = true;
+    pendingReturn.current = false;
+    setBusy("sync");
+    setError(null);
+    setInfo(null);
+    setSummary(null);
+    try {
+      const result = await simplefinSync();
+      if (!result.skipped) setSummary(result);
+    } catch (err) {
+      setError(messageOf(err));
+    } finally {
+      await refreshStatus();
+      onChanged();
+      syncInFlight.current = false;
+      setBusy(null);
+    }
+  }, [refreshStatus, onChanged]);
+
+  const handleReconnect = async (bank: SimpleFinConnectionHealth) => {
+    setError(null);
+    setInfo(null);
+    setReconnectBank(bank.name);
+    pendingReturn.current = true;
+    try {
+      await openUrl(SIMPLEFIN_BRIDGE);
+    } catch (err) {
+      pendingReturn.current = false;
+      setReconnectBank(null);
+      setError(`Could not open SimpleFIN: ${messageOf(err)}`);
+    }
+  };
+
+  const openBridge = async () => {
+    try {
+      await openUrl(SIMPLEFIN_BRIDGE);
+    } catch (err) {
+      setError(`Could not open SimpleFIN: ${messageOf(err)}`);
+    }
+  };
+
+  useEffect(() => {
+    const onFocus = () => {
+      if (!pendingReturn.current || syncInFlight.current) return;
+      pendingReturn.current = false;
+      void handleSync();
+    };
+    const onVisible = () => { if (document.visibilityState === "visible") onFocus(); };
+    window.addEventListener("focus", onFocus);
+    document.addEventListener("visibilitychange", onVisible);
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+    if (isTauri()) {
+      void getCurrentWindow().onFocusChanged(({ payload }) => { if (payload) onFocus(); })
+        .then((stop) => { if (disposed) stop(); else unlisten = stop; })
+        .catch((err) => setError(`Use Sync now after returning from your browser: ${messageOf(err)}`));
+    }
+    return () => {
+      disposed = true;
+      unlisten?.();
+      window.removeEventListener("focus", onFocus);
+      document.removeEventListener("visibilitychange", onVisible);
+    };
+  }, [handleSync]);
 
   const handleDisconnect = async () => {
     if (
@@ -649,7 +711,7 @@ function SimpleFinPanel({ onChanged }: { onChanged: () => void }) {
   };
 
   const isConnected = status?.is_connected ?? false;
-  const showTokenForm = !isConnected || reclaiming;
+  const showTokenForm = !isConnected || reclaiming || status?.app_auth_required;
 
   return (
     <>
@@ -657,13 +719,23 @@ function SimpleFinPanel({ onChanged }: { onChanged: () => void }) {
         Connect banks and other institutions through{" "}
         <button
           type="button"
-          onClick={() => void openUrl(SIMPLEFIN_BRIDGE)}
+          onClick={() => void openBridge()}
           className="text-indigo-400 underline hover:text-indigo-300"
         >
           SimpleFIN
         </button>
         . Create a setup token in your bridge, then paste it below.
       </p>
+      <p className="mb-4 text-xs text-slate-400">
+        SimpleFIN normally updates daily. Automatic checks run every six hours while the app is
+        open; balance dates below come from the bank, not the time of the app check.
+      </p>
+      {status?.app_auth_required && (
+        <p role="alert" className="mb-4 rounded-lg border border-amber-700/40 bg-amber-900/20 p-3 text-xs text-amber-200">
+          This app&apos;s access token was rejected. Replace it below. Reauthenticating individual
+          banks will not fix an app-token failure.
+        </p>
+      )}
 
       {/* Step 1 — Setup token */}
       <Section step={1} title="SimpleFIN setup token" done={isConnected}>
@@ -673,7 +745,7 @@ function SimpleFinPanel({ onChanged }: { onChanged: () => void }) {
               In your{" "}
               <button
                 type="button"
-                onClick={() => void openUrl(SIMPLEFIN_BRIDGE)}
+                onClick={() => void openBridge()}
                 className="text-indigo-400 underline hover:text-indigo-300"
               >
                 SimpleFIN bridge
@@ -681,13 +753,15 @@ function SimpleFinPanel({ onChanged }: { onChanged: () => void }) {
               , connect your bank and click <span className="text-slate-300">Connect</span> to
               generate a one-time setup token, then paste it here.
             </p>
-            <textarea
+            <input
+              type="password"
+              autoComplete="off"
+              aria-label="SimpleFIN setup token"
               value={setupToken}
               onChange={(e) => setSetupToken(e.target.value)}
               placeholder="Paste your setup token (a long string of letters and numbers)"
               spellCheck={false}
-              rows={3}
-              className={`${inputClass} resize-none font-mono text-xs`}
+              className={`${inputClass} font-mono text-xs`}
             />
             <div className="flex items-center gap-2">
               <button
@@ -733,7 +807,7 @@ function SimpleFinPanel({ onChanged }: { onChanged: () => void }) {
             {status?.account_count
               ? `${status.account_count} account${status.account_count === 1 ? "" : "s"} connected`
               : "No accounts synced yet"}
-            {status?.last_synced_at ? ` · last synced ${formatStamp(status.last_synced_at)}` : ""}
+            {status?.last_synced_at ? ` · last SimpleFIN response ${formatStamp(status.last_synced_at)}` : ""}
           </p>
           <button
             type="button"
@@ -747,11 +821,12 @@ function SimpleFinPanel({ onChanged }: { onChanged: () => void }) {
 
         {summary && (
           <div className="mt-3 space-y-2">
-            <p className="rounded-lg bg-emerald-900/20 border border-emerald-700/40 px-3 py-2 text-xs text-emerald-300">
-              Synced {summary.accounts_synced} account
+            <p className="rounded-lg bg-slate-900/20 border border-slate-700/40 px-3 py-2 text-xs text-slate-300">
+              Received data for {summary.accounts_synced} account
               {summary.accounts_synced === 1 ? "" : "s"}, {summary.holdings_synced} holding
               {summary.holdings_synced === 1 ? "" : "s"}, and {summary.transactions_synced}{" "}
-              transaction{summary.transactions_synced === 1 ? "" : "s"}. Net worth is up to date.
+              transaction{summary.transactions_synced === 1 ? "" : "s"}. Check the source dates:
+              a successful response can still contain cached balances.
             </p>
             {summary.warnings.length > 0 && (
               <ul className="rounded-lg bg-amber-900/20 border border-amber-700/40 px-3 py-2 text-xs text-amber-300 space-y-1">
@@ -763,6 +838,55 @@ function SimpleFinPanel({ onChanged }: { onChanged: () => void }) {
           </div>
         )}
       </Section>
+
+      {reconnectBank && (
+        <div role="status" className="my-4 rounded-lg border border-indigo-700/40 bg-indigo-950/30 p-3 text-xs text-slate-300">
+          <p className="font-semibold">Reconnect {reconnectBank}</p>
+          <p className="mt-2">
+            Select this institution in SimpleFIN and complete its code, login, or app approval.
+            Keep the existing bank connection and app token. We check once when you return;
+            the bank may need time to refresh its data.
+          </p>
+          <button type="button" onClick={() => void handleSync()} disabled={busy !== null}
+            className="mt-3 text-indigo-300 underline">I&apos;ve finished - check balances</button>
+        </div>
+      )}
+      {status && status.messages.length > 0 && (
+        <ul role="alert" className="my-3 space-y-2 text-xs text-amber-200">
+          {[...new Set(status.messages)].map((message) => <li key={message}>{message}</li>)}
+        </ul>
+      )}
+      {status?.connections.map((bank) => (
+        <section key={bank.id} className="my-4 rounded-xl border border-slate-700 p-3">
+          <div className="flex items-start justify-between gap-3">
+            <div><h3 className="text-sm font-semibold text-slate-200">{bank.name}</h3>
+              <div className="mt-1"><ConnectionStatus status={bank.status} /></div>
+            </div>
+            {isConnected && !status.app_auth_required && (
+              <button type="button" disabled={busy !== null}
+                aria-label={`${bank.status === "reauth_required" ? "Reconnect" : "Manage"} ${bank.name} in SimpleFIN`}
+                onClick={() => void handleReconnect(bank)}
+                className="rounded-lg border border-slate-600 px-3 py-2 text-xs text-slate-300 hover:bg-slate-800">
+                {bank.status === "reauth_required" ? "Reconnect" : "Open SimpleFIN"}
+              </button>
+            )}
+          </div>
+          {bank.messages.map((message, index) => <p key={index} className="mt-2 text-xs text-amber-200">{message}</p>)}
+          {bank.accounts.map((account) => (
+            <div key={account.account_id} className="mt-3 border-t border-slate-700 pt-3">
+              <p className="text-xs font-medium text-slate-300">{account.name}</p>
+              <p className="my-1 text-xs text-slate-400">Balance as of {formatConnectionTime(account.health.balance_as_of)}</p>
+              <ConnectionStatus status={account.health.status} />
+              {account.health.message && <p className="mt-1 text-xs text-slate-400">{account.health.message}</p>}
+            </div>
+          ))}
+        </section>
+      ))}
+      {status?.last_attempt_at && <p className="my-3 text-xs text-slate-500">
+        Last check attempted: {formatConnectionTime(status.last_attempt_at)}. Balances at least
+        48 hours old are flagged. Allow a minute between checks; this app makes at most 24 SimpleFIN
+        requests per rolling 24 hours.
+      </p>}
 
       <Feedback info={info} error={error} />
 
