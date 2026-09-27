@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { open as openUrl } from "@tauri-apps/plugin-shell";
+import AccountSyncSelection from "./AccountSyncSelection";
+import ConfirmationDialog from "./ConfirmationDialog";
 import type {
   QuestradeStatus,
   QuestradeSyncSummary,
@@ -36,7 +38,7 @@ import {
 interface Props {
   isOpen: boolean;
   onClose: () => void;
-  /** Called after a successful sync or disconnect so the dashboard can reload. */
+  /** Called after saving choices, syncing, or disconnecting so the dashboard can reload. */
   onChanged: () => void;
 }
 
@@ -119,16 +121,22 @@ function loadTellerConnect(): Promise<TellerConnectFactory> {
 
 export default function ConnectionsModal({ isOpen, onClose, onChanged }: Props) {
   const [provider, setProvider] = useState<Provider>("snaptrade");
+  const [selectionBusy, setSelectionBusy] = useState(false);
 
   if (!isOpen) return null;
 
   return (
     <div
       className="tn-modal-overlay fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm"
-      onClick={(e) => e.target === e.currentTarget && onClose()}
+      onClick={(e) => e.target === e.currentTarget && !selectionBusy && onClose()}
     >
-      <div className="tn-modal tn-connections-modal w-full max-w-lg rounded-2xl border border-slate-700 bg-slate-900 p-6 shadow-2xl">
-        <h2 className="mb-1 text-lg font-semibold text-white">Connect accounts</h2>
+      <div
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="connections-title"
+        className="tn-modal tn-connections-modal w-full max-w-lg rounded-2xl border border-slate-700 bg-slate-900 p-6 shadow-2xl"
+      >
+        <h2 id="connections-title" className="mb-1 text-lg font-semibold text-white">Connect accounts</h2>
         <p className="mb-4 text-xs text-slate-400">
           Sync real balances automatically instead of entering them by hand. TrueNorth requests{" "}
           <span className="font-semibold text-slate-300">read-only</span> access only — it can never
@@ -137,24 +145,28 @@ export default function ConnectionsModal({ isOpen, onClose, onChanged }: Props) 
 
         <div className="mb-5 grid grid-cols-2 gap-1 rounded-lg border border-slate-700 bg-slate-800/60 p-1">
           <TabButton
+            disabled={selectionBusy}
             active={provider === "snaptrade"}
             onClick={() => setProvider("snaptrade")}
             label="Brokerages"
             hint="via SnapTrade"
           />
           <TabButton
+            disabled={selectionBusy}
             active={provider === "simplefin"}
             onClick={() => setProvider("simplefin")}
             label="Banks"
             hint="via SimpleFIN"
           />
           <TabButton
+            disabled={selectionBusy}
             active={provider === "teller"}
             onClick={() => setProvider("teller")}
             label="US banks"
             hint="via Teller (free)"
           />
           <TabButton
+            disabled={selectionBusy}
             active={provider === "direct"}
             onClick={() => setProvider("direct")}
             label="Direct"
@@ -163,9 +175,9 @@ export default function ConnectionsModal({ isOpen, onClose, onChanged }: Props) 
         </div>
 
         {provider === "snaptrade" ? (
-          <SnapTradePanel onChanged={onChanged} />
+          <SnapTradePanel onChanged={onChanged} onSelectionBusyChange={setSelectionBusy} />
         ) : provider === "simplefin" ? (
-          <SimpleFinPanel onChanged={onChanged} />
+          <SimpleFinPanel onChanged={onChanged} onSelectionBusyChange={setSelectionBusy} />
         ) : provider === "teller" ? (
           <TellerPanel onChanged={onChanged} />
         ) : (
@@ -176,6 +188,7 @@ export default function ConnectionsModal({ isOpen, onClose, onChanged }: Props) 
           <button
             type="button"
             onClick={onClose}
+            disabled={selectionBusy}
             className="rounded-lg border border-slate-600 px-4 py-2 text-sm font-medium text-slate-300 hover:bg-slate-700 transition-colors"
           >
             Done
@@ -190,7 +203,12 @@ export default function ConnectionsModal({ isOpen, onClose, onChanged }: Props) 
 // SnapTrade — brokerages
 // ---------------------------------------------------------------------------
 
-function SnapTradePanel({ onChanged }: { onChanged: () => void }) {
+interface AggregatePanelProps {
+  onChanged: () => void;
+  onSelectionBusyChange: (busy: boolean) => void;
+}
+
+function SnapTradePanel({ onChanged, onSelectionBusyChange }: AggregatePanelProps) {
   const [status, setStatus] = useState<SnapTradeStatus | null>(null);
   const [clientId, setClientId] = useState("");
   const [consumerKey, setConsumerKey] = useState("");
@@ -203,6 +221,8 @@ function SnapTradePanel({ onChanged }: { onChanged: () => void }) {
   const [error, setError] = useState<string | null>(null);
   const [info, setInfo] = useState<string | null>(null);
   const [summary, setSummary] = useState<SnapTradeSyncSummary | null>(null);
+  const [choosingAccounts, setChoosingAccounts] = useState(false);
+  const [confirmDisconnect, setConfirmDisconnect] = useState(false);
 
   const refreshStatus = useCallback(async () => {
     try {
@@ -224,7 +244,8 @@ function SnapTradePanel({ onChanged }: { onChanged: () => void }) {
       const next = await snaptradeSaveCredentials(clientId, consumerKey);
       setStatus(next);
       setConsumerKey("");
-      setInfo("API key saved and verified.");
+      setInfo("API key saved and verified. Choose accounts before syncing a new connection.");
+      onChanged();
     } catch (err) {
       setError(messageOf(err));
     } finally {
@@ -264,7 +285,9 @@ function SnapTradePanel({ onChanged }: { onChanged: () => void }) {
       setStatus(next);
       setUserSecret("");
       setRelinking(false);
-      setInfo("SnapTrade user linked. You can sync now.");
+      setInfo("SnapTrade user linked. Choose the accounts you want to sync.");
+      setChoosingAccounts(true);
+      onChanged();
     } catch (err) {
       setError(messageOf(err));
     } finally {
@@ -281,7 +304,7 @@ function SnapTradePanel({ onChanged }: { onChanged: () => void }) {
       await openUrl(url);
       await refreshStatus();
       setInfo(
-        "A secure SnapTrade window opened in your browser. Authorize your brokerage there, then come back and click “Sync now”.",
+        "A secure SnapTrade window opened in your browser. Authorize your brokerage there, then come back and click “Choose accounts to sync”.",
       );
     } catch (err) {
       setError(messageOf(err));
@@ -308,13 +331,6 @@ function SnapTradePanel({ onChanged }: { onChanged: () => void }) {
   };
 
   const handleDisconnect = async () => {
-    if (
-      !confirm(
-        "Disconnect your brokerage? Connected accounts will be hidden and synced balances stop updating. Your API key stays saved so you can reconnect.",
-      )
-    ) {
-      return;
-    }
     setBusy("disconnect");
     setError(null);
     setInfo(null);
@@ -322,6 +338,7 @@ function SnapTradePanel({ onChanged }: { onChanged: () => void }) {
       const next = await snaptradeDisconnect();
       setStatus(next);
       setSummary(null);
+      setConfirmDisconnect(false);
       onChanged();
       setInfo("Brokerage disconnected.");
     } catch (err) {
@@ -335,6 +352,24 @@ function SnapTradePanel({ onChanged }: { onChanged: () => void }) {
   const isConnected = status?.is_connected ?? false;
   const isPersonal = status?.is_personal ?? false;
   const showLinkForm = isPersonal && (!isConnected || relinking);
+
+  if (choosingAccounts) {
+    return (
+      <AccountSyncSelection
+        provider="snaptrade"
+        onBusyChange={onSelectionBusyChange}
+        onCancel={() => { setChoosingAccounts(false); void refreshStatus(); }}
+        onSaved={async () => {
+          onChanged();
+          setSummary(null);
+          setStatus(await snaptradeGetStatus());
+          setChoosingAccounts(false);
+          setInfo("Account choices saved. Sync now updates only selected accounts.");
+          setError(null);
+        }}
+      />
+    );
+  }
 
   return (
     <>
@@ -502,7 +537,7 @@ function SnapTradePanel({ onChanged }: { onChanged: () => void }) {
         <p className="mb-3 text-xs text-slate-500">
           Opens SnapTrade's secure connection portal in your browser to link an institution.
           {isPersonal
-            ? " Already linked a brokerage in the SnapTrade dashboard? You can skip straight to Sync."
+            ? " Already linked a brokerage in the SnapTrade dashboard? Choose which accounts to sync below."
             : ""}
         </p>
         <button
@@ -524,8 +559,8 @@ function SnapTradePanel({ onChanged }: { onChanged: () => void }) {
         <div className="flex items-center justify-between gap-3">
           <p className="text-xs text-slate-500">
             {status?.account_count
-              ? `${status.account_count} account${status.account_count === 1 ? "" : "s"} connected`
-              : "No accounts synced yet"}
+              ? `${status.account_count} account${status.account_count === 1 ? "" : "s"} selected`
+              : "No accounts selected"}
             {status?.last_synced_at ? ` · last synced ${formatStamp(status.last_synced_at)}` : ""}
           </p>
           <button
@@ -537,13 +572,24 @@ function SnapTradePanel({ onChanged }: { onChanged: () => void }) {
             {busy === "sync" ? "Syncing…" : "Sync now"}
           </button>
         </div>
+        <button
+          type="button"
+          onClick={() => { setError(null); setChoosingAccounts(true); }}
+          disabled={busy !== null || !isConnected}
+          className="mt-3 rounded-lg border border-slate-600 px-3 py-2 text-sm font-medium text-slate-200 hover:bg-slate-700 disabled:opacity-50"
+        >
+          Choose accounts to sync
+        </button>
 
         {summary && (
-          <p className="mt-3 rounded-lg bg-emerald-900/20 border border-emerald-700/40 px-3 py-2 text-xs text-emerald-300">
-            Synced {summary.accounts_synced} account
-            {summary.accounts_synced === 1 ? "" : "s"} and {summary.holdings_synced} holding
-            {summary.holdings_synced === 1 ? "" : "s"}. Net worth is up to date.
-          </p>
+          <div className="mt-3 space-y-2">
+            <p role="status" className="rounded-lg bg-emerald-900/20 border border-emerald-700/40 px-3 py-2 text-xs text-emerald-300">
+              Synced {summary.accounts_synced} selected account
+              {summary.accounts_synced === 1 ? "" : "s"} and {summary.holdings_synced} holding
+              {summary.holdings_synced === 1 ? "" : "s"}.
+            </p>
+            <AccountReviewNotice count={summary.accounts_needing_review} />
+          </div>
         )}
       </Section>
 
@@ -553,13 +599,26 @@ function SnapTradePanel({ onChanged }: { onChanged: () => void }) {
         <div className="pt-4">
           <button
             type="button"
-            onClick={handleDisconnect}
+            onClick={() => { setError(null); setConfirmDisconnect(true); }}
             disabled={busy !== null}
             className="text-xs font-medium text-red-400 hover:text-red-300 disabled:opacity-50"
           >
             {busy === "disconnect" ? "Disconnecting…" : "Disconnect brokerage"}
           </button>
         </div>
+      )}
+      {confirmDisconnect && (
+        <ConfirmationDialog
+          title="Disconnect SnapTrade?"
+          confirmLabel="Disconnect"
+          busy={busy === "disconnect"}
+          error={error}
+          onCancel={() => setConfirmDisconnect(false)}
+          onConfirm={() => void handleDisconnect()}
+        >
+          <p>SnapTrade accounts will be hidden and excluded from syncing. Stored history is kept.</p>
+          <p>Your API key stays saved. After reconnecting, use Choose accounts to explicitly resume accounts.</p>
+        </ConfirmationDialog>
       )}
     </>
   );
@@ -569,7 +628,7 @@ function SnapTradePanel({ onChanged }: { onChanged: () => void }) {
 // SimpleFIN — banks
 // ---------------------------------------------------------------------------
 
-function SimpleFinPanel({ onChanged }: { onChanged: () => void }) {
+function SimpleFinPanel({ onChanged, onSelectionBusyChange }: AggregatePanelProps) {
   const [status, setStatus] = useState<SimpleFinStatus | null>(null);
   const [setupToken, setSetupToken] = useState("");
   const [reclaiming, setReclaiming] = useState(false);
@@ -577,6 +636,8 @@ function SimpleFinPanel({ onChanged }: { onChanged: () => void }) {
   const [error, setError] = useState<string | null>(null);
   const [info, setInfo] = useState<string | null>(null);
   const [summary, setSummary] = useState<SimpleFinSyncSummary | null>(null);
+  const [choosingAccounts, setChoosingAccounts] = useState(false);
+  const [confirmDisconnect, setConfirmDisconnect] = useState(false);
 
   const refreshStatus = useCallback(async () => {
     try {
@@ -599,7 +660,9 @@ function SimpleFinPanel({ onChanged }: { onChanged: () => void }) {
       setStatus(next);
       setSetupToken("");
       setReclaiming(false);
-      setInfo("SimpleFIN connected. Click “Sync now” to pull balances.");
+      setInfo("SimpleFIN connected. Choose the accounts you want to sync.");
+      setChoosingAccounts(true);
+      onChanged();
     } catch (err) {
       setError(messageOf(err));
     } finally {
@@ -625,13 +688,6 @@ function SimpleFinPanel({ onChanged }: { onChanged: () => void }) {
   };
 
   const handleDisconnect = async () => {
-    if (
-      !confirm(
-        "Disconnect SimpleFIN? Connected accounts will be hidden and synced balances stop updating. Your history is kept.",
-      )
-    ) {
-      return;
-    }
     setBusy("disconnect");
     setError(null);
     setInfo(null);
@@ -639,6 +695,7 @@ function SimpleFinPanel({ onChanged }: { onChanged: () => void }) {
       const next = await simplefinDisconnect();
       setStatus(next);
       setSummary(null);
+      setConfirmDisconnect(false);
       onChanged();
       setInfo("SimpleFIN disconnected.");
     } catch (err) {
@@ -650,6 +707,24 @@ function SimpleFinPanel({ onChanged }: { onChanged: () => void }) {
 
   const isConnected = status?.is_connected ?? false;
   const showTokenForm = !isConnected || reclaiming;
+
+  if (choosingAccounts) {
+    return (
+      <AccountSyncSelection
+        provider="simplefin"
+        onBusyChange={onSelectionBusyChange}
+        onCancel={() => { setChoosingAccounts(false); void refreshStatus(); }}
+        onSaved={async () => {
+          onChanged();
+          setSummary(null);
+          setStatus(await simplefinGetStatus());
+          setChoosingAccounts(false);
+          setInfo("Account choices saved. Sync now updates only selected accounts.");
+          setError(null);
+        }}
+      />
+    );
+  }
 
   return (
     <>
@@ -731,8 +806,8 @@ function SimpleFinPanel({ onChanged }: { onChanged: () => void }) {
         <div className="flex items-center justify-between gap-3">
           <p className="text-xs text-slate-500">
             {status?.account_count
-              ? `${status.account_count} account${status.account_count === 1 ? "" : "s"} connected`
-              : "No accounts synced yet"}
+              ? `${status.account_count} account${status.account_count === 1 ? "" : "s"} selected`
+              : "No accounts selected"}
             {status?.last_synced_at ? ` · last synced ${formatStamp(status.last_synced_at)}` : ""}
           </p>
           <button
@@ -744,15 +819,24 @@ function SimpleFinPanel({ onChanged }: { onChanged: () => void }) {
             {busy === "sync" ? "Syncing…" : "Sync now"}
           </button>
         </div>
+        <button
+          type="button"
+          onClick={() => { setError(null); setChoosingAccounts(true); }}
+          disabled={busy !== null || !isConnected}
+          className="mt-3 rounded-lg border border-slate-600 px-3 py-2 text-sm font-medium text-slate-200 hover:bg-slate-700 disabled:opacity-50"
+        >
+          Choose accounts to sync
+        </button>
 
         {summary && (
           <div className="mt-3 space-y-2">
-            <p className="rounded-lg bg-emerald-900/20 border border-emerald-700/40 px-3 py-2 text-xs text-emerald-300">
-              Synced {summary.accounts_synced} account
+            <p role="status" className="rounded-lg bg-emerald-900/20 border border-emerald-700/40 px-3 py-2 text-xs text-emerald-300">
+              Synced {summary.accounts_synced} selected account
               {summary.accounts_synced === 1 ? "" : "s"}, {summary.holdings_synced} holding
               {summary.holdings_synced === 1 ? "" : "s"}, and {summary.transactions_synced}{" "}
-              transaction{summary.transactions_synced === 1 ? "" : "s"}. Net worth is up to date.
+              transaction{summary.transactions_synced === 1 ? "" : "s"}.
             </p>
+            <AccountReviewNotice count={summary.accounts_needing_review} />
             {summary.warnings.length > 0 && (
               <ul className="rounded-lg bg-amber-900/20 border border-amber-700/40 px-3 py-2 text-xs text-amber-300 space-y-1">
                 {summary.warnings.map((w, i) => (
@@ -770,13 +854,26 @@ function SimpleFinPanel({ onChanged }: { onChanged: () => void }) {
         <div className="pt-4">
           <button
             type="button"
-            onClick={handleDisconnect}
+            onClick={() => { setError(null); setConfirmDisconnect(true); }}
             disabled={busy !== null}
             className="text-xs font-medium text-red-400 hover:text-red-300 disabled:opacity-50"
           >
             {busy === "disconnect" ? "Disconnecting…" : "Disconnect SimpleFIN"}
           </button>
         </div>
+      )}
+      {confirmDisconnect && (
+        <ConfirmationDialog
+          title="Disconnect SimpleFIN?"
+          confirmLabel="Disconnect"
+          busy={busy === "disconnect"}
+          error={error}
+          onCancel={() => setConfirmDisconnect(false)}
+          onConfirm={() => void handleDisconnect()}
+        >
+          <p>SimpleFIN accounts will be hidden and excluded from syncing. Stored history is kept.</p>
+          <p>After reconnecting, use Choose accounts to explicitly resume accounts.</p>
+        </ConfirmationDialog>
       )}
     </>
   );
@@ -1442,11 +1539,13 @@ function QuestradeConnection({ onChanged }: { onChanged: () => void }) {
 
 function TabButton({
   active,
+  disabled,
   onClick,
   label,
   hint,
 }: {
   active: boolean;
+  disabled?: boolean;
   onClick: () => void;
   label: string;
   hint: string;
@@ -1455,6 +1554,7 @@ function TabButton({
     <button
       type="button"
       onClick={onClick}
+      disabled={disabled}
       className={`rounded-md px-3 py-2 text-left transition-colors ${
         active ? "bg-indigo-600 text-white" : "text-slate-300 hover:bg-slate-700/60"
       }`}
@@ -1476,9 +1576,19 @@ function Feedback({ info, error }: { info: string | null; error: string | null }
         </p>
       )}
       {error && (
-        <p className="mt-4 rounded-lg bg-red-900/20 px-3 py-2 text-sm text-red-400">{error}</p>
+        <p role="alert" className="mt-4 rounded-lg bg-red-900/20 px-3 py-2 text-sm text-red-400">{error}</p>
       )}
     </>
+  );
+}
+
+function AccountReviewNotice({ count }: { count: number }) {
+  if (count === 0) return null;
+  return (
+    <p role="status" className="rounded-lg border border-amber-700/40 bg-amber-900/20 px-3 py-2 text-xs text-amber-300">
+      {count} new account{count === 1 ? " needs" : "s need"} review. They were not imported.
+      Use Choose accounts to sync to include or ignore them.
+    </p>
   );
 }
 

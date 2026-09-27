@@ -1,20 +1,6 @@
 import type { Account, AccountNetWorth, Currency } from "../types/finance";
 import DesktopIcon from "../apps/desktop/DesktopIcon";
-
-const ACCOUNT_TYPE_LABELS: Record<string, string> = {
-  chequing: "Chequing",
-  savings: "Savings",
-  brokerage: "Brokerage",
-  tfsa: "TFSA",
-  rrsp: "RRSP",
-  fhsa: "FHSA",
-  "401k": "401(k)",
-  ira: "IRA",
-  roth_ira: "Roth IRA",
-  credit: "Credit",
-  crypto: "Crypto",
-  other: "Other",
-};
+import { ACCOUNT_TYPE_LABELS, CONNECTOR_LABELS } from "../shared/accountLabels";
 
 const JURISDICTION_COLORS: Record<string, string> = {
   US: "bg-blue-900/40 text-blue-300 border-blue-700/50",
@@ -39,7 +25,7 @@ interface Props {
   netWorthBreakdown: AccountNetWorth[];
   homeCurrency: Currency;
   onAddAccount: () => void;
-  onDeleteAccount: (id: number) => void;
+  onDeleteAccount: (account: Account) => void;
   onUpdateBalance: (account: Account) => void;
   onEditCurrency: (account: Account) => void;
 }
@@ -103,9 +89,9 @@ export default function AccountList({
             <p className="text-xs text-slate-500">
               {account.institution} ·{" "}
               {ACCOUNT_TYPE_LABELS[account.account_type] ?? account.account_type}
-              {account.connector_kind === "snaptrade" && (
+              {account.connector_kind !== "manual" && (
                 <span className="ml-1.5 inline-flex items-center rounded bg-indigo-900/40 border border-indigo-700/50 px-1.5 py-0.5 text-[10px] font-medium text-indigo-300">
-                  via SnapTrade
+                  via {CONNECTOR_LABELS[account.connector_kind]}
                 </span>
               )}
             </p>
@@ -149,8 +135,9 @@ export default function AccountList({
               <DesktopIcon name="edit" />
             </button>
             <button
-              onClick={() => onDeleteAccount(account.id)}
+              onClick={() => onDeleteAccount(account)}
               title="Delete account"
+              aria-label={`Delete ${account.name}`}
               className="rounded p-1.5 text-slate-400 hover:bg-red-900/50 hover:text-red-400 transition-colors"
             >
               <DesktopIcon name="trash" />

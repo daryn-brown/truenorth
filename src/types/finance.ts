@@ -366,6 +366,50 @@ export interface ImportSummary {
   errors: string[];
 }
 
+/** Providers using the shared explicit account-review flow. */
+export type SyncProvider = "snaptrade" | "simplefin";
+
+export interface SyncLocalAccount {
+  id: number;
+  name: string;
+  institution: string;
+  account_type: AccountTypeId;
+  currency: string;
+  connector_kind: ConnectorKind;
+  connector_ref: string | null;
+  is_active: boolean;
+}
+
+export interface DiscoveredSyncAccount {
+  remote_id: string;
+  name: string;
+  institution: string;
+  account_type: AccountTypeId;
+  currency: string | null;
+  masked_number: string | null;
+  selection: "unreviewed" | "sync" | "ignore";
+  local_account_id: number | null;
+  can_resume: boolean;
+  linkable_account_ids: number[];
+  unavailable_reason: string | null;
+}
+
+export interface AccountSyncReview {
+  revision: string;
+  accounts: DiscoveredSyncAccount[];
+  local_accounts: SyncLocalAccount[];
+  warnings: string[];
+}
+
+export type AccountSyncChoice =
+  | { remote_id: string; action: "create" | "sync" | "ignore" }
+  | { remote_id: string; action: "link"; account_id: number };
+
+export interface SaveAccountSyncChoices {
+  revision: string;
+  choices: AccountSyncChoice[];
+}
+
 /** SnapTrade connection state, mirrored from the Rust `SnapTradeStatus`. */
 export interface SnapTradeStatus {
   /** API key pair saved (clientId + consumerKey). */
@@ -388,6 +432,7 @@ export interface SnapTradeSyncSummary {
   accounts_synced: number;
   holdings_synced: number;
   synced_at: string;
+  accounts_needing_review: number;
 }
 
 /** SimpleFIN connection state, mirrored from the Rust `SimpleFinStatus`. */
@@ -405,6 +450,7 @@ export interface SimpleFinSyncSummary {
   holdings_synced: number;
   transactions_synced: number;
   synced_at: string;
+  accounts_needing_review: number;
   /** Non-fatal messages SimpleFIN returned (e.g. an institution needs re-auth). */
   warnings: string[];
 }

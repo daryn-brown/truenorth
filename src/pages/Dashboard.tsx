@@ -56,6 +56,8 @@ import NetWorthChart from "../components/NetWorthChart";
 import DesktopIcon from "../apps/desktop/DesktopIcon";
 import BrandMark from "../shared/BrandMark";
 import MacWidgetModal from "../components/MacWidgetModal";
+import ConfirmationDialog from "../components/ConfirmationDialog";
+import { ACCOUNT_TYPE_LABELS, CONNECTOR_LABELS } from "../shared/accountLabels";
 
 type ModalState =
   | { open: false }
@@ -84,6 +86,10 @@ export default function Dashboard({
   const [history, setHistory] = useState<NetWorthHistoryPoint[]>([]);
   const [homeCurrency, setHomeCurrency] = useState<Currency>("CAD");
   const [loading, setLoading] = useState(true);
+  const [dashboardError, setDashboardError] = useState<string | null>(null);
+  const [accountToDelete, setAccountToDelete] = useState<Account | null>(null);
+  const [deleting, setDeleting] = useState(false);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
   const [modal, setModal] = useState<ModalState>({ open: false });
   const [importOpen, setImportOpen] = useState(false);
   const [connectOpen, setConnectOpen] = useState(false);
@@ -136,8 +142,9 @@ export default function Dashboard({
     }
   }, []);
 
-  const load = useCallback(async () => {
+  const load = useCallback(async (completedAction?: string) => {
     setLoading(true);
+    setDashboardError(null);
     try {
       // Keep conversions current without a manual click: refresh FX at most once per day. This is
       // a no-op (DB check only) when today's rates are already stored, and stays best-effort so an
@@ -170,6 +177,7 @@ export default function Dashboard({
       setHistory(hist);
     } catch (err) {
       console.error("Failed to load dashboard data:", err);
+      setDashboardError(`${completedAction ? `${completedAction} ` : ""}Could not refresh dashboard data: ${String(err)}`);
     } finally {
       setLoading(false);
       await refreshWidget();
@@ -190,10 +198,19 @@ export default function Dashboard({
     await load();
   };
 
-  const handleDeleteAccount = async (id: number) => {
-    if (!confirm("Delete this account and all its snapshots?")) return;
-    await deleteAccount(id);
-    await load();
+  const handleDeleteAccount = async (account: Account) => {
+    setDeleting(true);
+    setDeleteError(null);
+    try {
+      await deleteAccount(account.id);
+      setAccounts((current) => current.filter((a) => a.id !== account.id));
+      await load(`Account "${account.name}" was hidden successfully. Its stored history was retained.`);
+      setAccountToDelete(null);
+    } catch (err) {
+      setDeleteError(`Could not delete account: ${String(err)}`);
+    } finally {
+      setDeleting(false);
+    }
   };
 
   const handleRefreshFx = async () => {
@@ -506,7 +523,10 @@ export default function Dashboard({
             netWorthBreakdown={netWorth?.accounts ?? []}
             homeCurrency={homeCurrency}
             onAddAccount={() => setModal({ open: true, mode: "add_account" })}
-            onDeleteAccount={handleDeleteAccount}
+            onDeleteAccount={(account) => {
+              setDeleteError(null);
+              setAccountToDelete(account);
+            }}
             onUpdateBalance={(account) =>
               setModal({ open: true, mode: "update_balance", account })
             }
@@ -514,6 +534,14 @@ export default function Dashboard({
               setModal({ open: true, mode: "edit_currency", account })
             }
           />
+          {dashboardError && (
+            <div className="desktop-alert desktop-alert--error" role="alert">
+              {dashboardError}
+              <button type="button" className="desktop-action" disabled={loading} onClick={() => void load()}>
+                Retry refresh
+              </button>
+            </div>
+          )}
           </section>
 
         {accounts.length === 0 && !loading && (
@@ -533,6 +561,32 @@ export default function Dashboard({
           onAddAccount={handleAddAccount}
           onUpdateBalance={handleUpdateBalance}
         />
+      )}
+      {accountToDelete && (
+        <ConfirmationDialog
+          title="Delete account?"
+          confirmLabel="Delete account"
+          busy={deleting}
+          error={deleteError}
+          onConfirm={() => void handleDeleteAccount(accountToDelete)}
+          onCancel={() => setAccountToDelete(null)}
+        >
+          <p>
+            Hide <strong>{accountToDelete.name}</strong> at {accountToDelete.institution} from
+            accounts, net worth, and history charts? Stored snapshots and transactions are kept,
+            not erased.
+          </p>
+          <p>
+            {accountToDelete.currency} · {ACCOUNT_TYPE_LABELS[accountToDelete.account_type]} ·{" "}
+            {CONNECTOR_LABELS[accountToDelete.connector_kind]} · Local account #{accountToDelete.id}
+          </p>
+          {(accountToDelete.connector_kind === "snaptrade" || accountToDelete.connector_kind === "simplefin") && (
+            <p>
+              This provider account will also be excluded from future syncs. You can intentionally
+              resume it in Connect &gt; Choose accounts to sync.
+            </p>
+          )}
+        </ConfirmationDialog>
       )}
       {modal.open && modal.mode === "update_balance" && (
         <AccountModal
