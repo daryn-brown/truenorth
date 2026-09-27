@@ -25,6 +25,22 @@ CREATE TABLE IF NOT EXISTS accounts (
     updated_at       TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
 );
 
+-- An ignored binding is a durable tombstone, including after a provider handoff. Absence means
+-- unreviewed, never permission to import. account_id is retained when an imported row is hidden.
+CREATE TABLE IF NOT EXISTS account_sync_selections (
+    provider   TEXT NOT NULL CHECK (provider IN ('snaptrade', 'simplefin')),
+    remote_id  TEXT NOT NULL CHECK (length(trim(remote_id)) > 0),
+    account_id INTEGER REFERENCES accounts(id),
+    decision   TEXT NOT NULL CHECK (decision IN ('sync', 'ignore')),
+    institution TEXT,
+    connection_id TEXT,
+    PRIMARY KEY (provider, remote_id),
+    CHECK (decision != 'sync' OR account_id IS NOT NULL)
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_account_sync_owner
+    ON account_sync_selections (account_id) WHERE decision = 'sync';
+
 CREATE TABLE IF NOT EXISTS balance_snapshots (
     id            INTEGER PRIMARY KEY AUTOINCREMENT,
     account_id    INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
@@ -162,6 +178,19 @@ pub fn apply_schema(conn: &Connection) -> SqlResult<()> {
     // Lightweight migrations for databases created before a column existed. CREATE TABLE
     // IF NOT EXISTS never alters an existing table, so additive columns are added here.
     add_column_if_missing(conn, "transactions", "flow_override", "TEXT")?;
+    // Preserve existing imported identities, not guesses based on names or balances. Ambiguous
+    // legacy IDs are left unmapped and explicitly rejected by the account-review/sync commands.
+    conn.execute(
+        "INSERT INTO account_sync_selections (provider, remote_id, account_id, decision, institution) \
+         SELECT connector_kind, connector_ref, id, \
+                CASE WHEN is_active = 1 THEN 'sync' ELSE 'ignore' END, institution \
+         FROM accounts \
+         WHERE connector_kind IN ('snaptrade', 'simplefin') \
+           AND connector_ref IS NOT NULL AND length(trim(connector_ref)) > 0 \
+         GROUP BY connector_kind, connector_ref HAVING COUNT(*) = 1 \
+         ON CONFLICT(provider, remote_id) DO NOTHING",
+        [],
+    )?;
     Ok(())
 }
 
@@ -173,7 +202,10 @@ pub fn reconcile_aggregated_questrade_accounts(conn: &Connection) -> SqlResult<u
         "UPDATE accounts SET jurisdiction = 'CA', \
          updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') \
          WHERE connector_kind IN ('simplefin', 'snaptrade') \
-         AND lower(institution) LIKE '%questrade%' AND jurisdiction != 'CA'",
+         AND (lower(institution) LIKE '%questrade%' OR EXISTS ( \
+             SELECT 1 FROM account_sync_selections s WHERE s.account_id = accounts.id \
+             AND s.provider = accounts.connector_kind AND s.remote_id = accounts.connector_ref \
+             AND lower(s.institution) LIKE '%questrade%')) AND jurisdiction != 'CA'",
         [],
     )?;
 
@@ -181,7 +213,10 @@ pub fn reconcile_aggregated_questrade_accounts(conn: &Connection) -> SqlResult<u
         "UPDATE accounts SET is_active = 0, \
          updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') \
          WHERE is_active = 1 AND connector_kind IN ('simplefin', 'snaptrade') \
-         AND lower(institution) LIKE '%questrade%' \
+         AND (lower(institution) LIKE '%questrade%' OR EXISTS ( \
+             SELECT 1 FROM account_sync_selections s WHERE s.account_id = accounts.id \
+             AND s.provider = accounts.connector_kind AND s.remote_id = accounts.connector_ref \
+             AND lower(s.institution) LIKE '%questrade%')) \
          AND EXISTS (SELECT 1 FROM accounts AS direct \
                      WHERE direct.connector_kind = 'questrade' AND direct.is_active = 1)",
         [],

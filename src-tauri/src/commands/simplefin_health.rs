@@ -167,13 +167,20 @@ impl HealthState {
                 return Err("Wait at least one minute between SimpleFIN checks. Bank updates can take longer.".into());
             }
         }
+        self.reserve_request(now)?;
+        self.last_attempt_at = Some(stamp(now));
+        Ok(true)
+    }
+
+    /// Metadata review and the selected-data request share the same rolling HTTP budget.
+    /// Only a sync attempt sets the automatic cooldown; reviewing and saving are separate actions.
+    pub fn reserve_request(&mut self, now: DateTime<Utc>) -> Result<(), String> {
         self.requests.retain(|at| *at > now.timestamp() - 86_400);
         if self.requests.len() >= 24 {
             return Err("This app has made 24 SimpleFIN requests in the last 24 hours. Wait before syncing again.".into());
         }
         self.requests.push(now.timestamp());
-        self.last_attempt_at = Some(stamp(now));
-        Ok(true)
+        Ok(())
     }
 
     pub fn token_saved(&mut self) {
@@ -193,12 +200,16 @@ impl HealthState {
 
     pub fn response(&mut self, data: &SimpleFinAccountSet, now: DateTime<Utc>) {
         self.last_response_at = Some(stamp(now));
-        self.last_error = None;
-        self.app_auth_required = data.issues.iter().any(|issue| issue.code == "gen.auth");
-        self.issues = data.issues.clone();
+        self.review_response(data);
         for bank in &data.connections {
             self.ensure_connection(&bank.id, &bank.name, now);
         }
+    }
+
+    pub fn review_response(&mut self, data: &SimpleFinAccountSet) {
+        self.last_error = None;
+        self.app_auth_required = data.issues.iter().any(|issue| issue.code == "gen.auth");
+        self.issues = data.issues.clone();
     }
 
     fn ensure_connection(&mut self, id: &str, name: &str, now: DateTime<Utc>) -> usize {
@@ -465,21 +476,9 @@ impl HealthState {
                 health,
             });
         }
-        result.retain(|bank| {
-            !bank.accounts.is_empty()
-                || (connected
-                    && self
-                        .connections
-                        .iter()
-                        .any(|stored| stored.id == bank.id && stored.accounts.is_empty()))
-        });
-        for bank in &mut result {
-            if bank.accounts.is_empty() {
-                bank.status = bank.status.max(BalanceStatus::Missing);
-                bank.messages
-                    .push("No active account balances are available for this connection.".into());
-            }
-        }
+        // An ignored/unreviewed connection is not a missing financial account. Keep history in
+        // state for an intentional resume, but expose health only for active local ownership.
+        result.retain(|bank| !bank.accounts.is_empty());
         result.sort_by(|a, b| a.name.cmp(&b.name).then(a.id.cmp(&b.id)));
         Ok(result)
     }
@@ -512,6 +511,42 @@ mod tests {
         let mut reloaded = load(&conn).unwrap();
         assert!(reloaded.reserve(now() + Duration::hours(6), false).is_err());
         assert!(reloaded.reserve(now() + Duration::days(1), false).unwrap());
+    }
+
+    #[test]
+    fn review_and_selected_requests_share_the_budget_without_bypassing_sync_cooldowns() {
+        let mut state = HealthState::default();
+        state.reserve_request(now()).unwrap();
+        assert_eq!(state.last_attempt_at, None);
+        assert!(state.reserve(now(), true).unwrap());
+        state.reserve_request(now()).unwrap();
+        assert!(!state.reserve(now() + Duration::hours(1), true).unwrap());
+        for _ in 3..24 {
+            state.reserve_request(now()).unwrap();
+        }
+        assert!(state.reserve_request(now()).is_err());
+        assert!(state.reserve(now() + Duration::hours(6), true).is_err());
+    }
+
+    #[test]
+    fn discovery_updates_auth_issues_without_relabeling_balance_freshness() {
+        let mut state = HealthState::default();
+        let original = stamp(now() - Duration::days(3));
+        state.last_response_at = Some(original.clone());
+        let data = SimpleFinAccountSet {
+            issues: vec![SimpleFinIssue {
+                code: "gen.auth".into(),
+                msg: "Replace app token".into(),
+                conn_id: None,
+                account_id: None,
+            }],
+            ..Default::default()
+        };
+        state.review_response(&data);
+        assert!(state.app_auth_required);
+        assert_eq!(state.last_response_at, Some(original));
+        assert!(!state.reserve(now(), true).unwrap());
+        assert_eq!(state.messages(), ["Replace app token"]);
     }
 
     #[test]

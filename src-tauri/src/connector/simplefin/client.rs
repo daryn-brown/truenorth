@@ -29,6 +29,20 @@ fn transaction_date_range(now: chrono::DateTime<chrono::Utc>) -> (String, String
     (start.timestamp().to_string(), now.timestamp().to_string())
 }
 
+fn selected_account_query(
+    account_ids: &[&str],
+) -> Result<Vec<(&'static str, String)>, SimpleFinError> {
+    if account_ids.is_empty() {
+        return Err(SimpleFinError::Parse(
+            "No accounts were selected for sync.".into(),
+        ));
+    }
+    let (start_date, end_date) = transaction_date_range(chrono::Utc::now());
+    let mut query = vec![("start-date", start_date), ("end-date", end_date)];
+    query.extend(account_ids.iter().map(|id| ("account", (*id).to_string())));
+    Ok(query)
+}
+
 #[derive(Debug, Error)]
 pub enum SimpleFinError {
     #[error("HTTP error: {0}")]
@@ -89,6 +103,7 @@ pub struct SimpleFinAccount {
     /// SimpleFIN account id — stored as `connector_ref`.
     pub id: String,
     pub name: String,
+    pub number: Option<String>,
     pub currency: String,
     /// Current balance in `currency`. The figure that flows into net worth.
     pub balance: Option<f64>,
@@ -100,6 +115,15 @@ pub struct SimpleFinAccount {
     pub holdings_reported: bool,
     pub holdings: Vec<SimpleFinHolding>,
     pub transactions: Vec<SimpleFinTransaction>,
+}
+
+impl SimpleFinAccount {
+    pub fn reference(&self) -> String {
+        match &self.connection_id {
+            Some(connection) => serde_json::json!([connection, self.id]).to_string(),
+            None => self.id.clone(),
+        }
+    }
 }
 
 /// The parsed `/accounts` response: the accounts plus any user-facing errors SimpleFIN returned.
@@ -209,22 +233,43 @@ impl SimpleFinClient {
         })
     }
 
-    /// Fetch accounts with balances, holdings, and recent transactions. Explicit `start-date` and
+    /// Discover accounts without requesting transaction history. Some servers also include their
+    /// bundled holdings in this response; discovery never persists them.
+    pub async fn list_accounts(&self) -> Result<SimpleFinAccountSet, SimpleFinError> {
+        self.request_accounts(&[("balances-only", "1".to_string())])
+            .await
+    }
+
+    /// Fetch selected accounts with balances, holdings, and recent transactions. Explicit `start-date` and
     /// `end-date` values keep the request within SimpleFIN Bridge's 90-calendar-day limit; balances
     /// and holdings are always current regardless of the transaction window.
-    pub async fn fetch_accounts(&self) -> Result<SimpleFinAccountSet, SimpleFinError> {
-        let endpoint = accounts_endpoint(&self.access_url)?;
-        // SimpleFIN expects both date bounds as UNIX epoch seconds.
-        let (start_date, end_date) = transaction_date_range(chrono::Utc::now());
+    pub async fn fetch_accounts(
+        &self,
+        account_ids: &[&str],
+    ) -> Result<SimpleFinAccountSet, SimpleFinError> {
+        self.request_accounts(&selected_account_query(account_ids)?)
+            .await
+    }
+
+    fn accounts_request(
+        &self,
+        query: &[(&str, String)],
+    ) -> Result<reqwest::Request, SimpleFinError> {
+        self.http
+            .get(accounts_endpoint(&self.access_url)?)
+            .query(query)
+            .query(&[("version", "2")])
+            .build()
+            .map_err(|e| SimpleFinError::Http(e.without_url()))
+    }
+
+    async fn request_accounts(
+        &self,
+        query: &[(&str, String)],
+    ) -> Result<SimpleFinAccountSet, SimpleFinError> {
         let resp = self
             .http
-            .get(endpoint)
-            .query(&[
-                ("start-date", start_date.as_str()),
-                ("end-date", end_date.as_str()),
-                ("version", "2"),
-            ])
-            .send()
+            .execute(self.accounts_request(query)?)
             .await
             .map_err(|e| SimpleFinError::Http(e.without_url()))?;
         let status = resp.status();
@@ -240,17 +285,12 @@ impl SimpleFinClient {
         }
         let v: Value =
             serde_json::from_str(&text).map_err(|e| SimpleFinError::Parse(e.to_string()))?;
-        if !v.get("accounts").is_some_and(Value::is_array) {
-            return Err(SimpleFinError::Parse(
-                "missing account list; saved balances were kept".into(),
-            ));
-        }
-        Ok(parse_account_set(&v))
+        parse_account_set(&v)
     }
 
     /// Validate the access URL by fetching accounts. Used right after claiming.
     pub async fn check(&self) -> Result<(), SimpleFinError> {
-        self.fetch_accounts().await.map(|_| ())
+        self.list_accounts().await.map(|_| ())
     }
 }
 
@@ -281,7 +321,7 @@ fn parse_decimal(v: &Value) -> Option<f64> {
     .filter(|number| number.is_finite())
 }
 
-fn parse_account_set(v: &Value) -> SimpleFinAccountSet {
+fn parse_account_set(v: &Value) -> Result<SimpleFinAccountSet, SimpleFinError> {
     let mut errors = Vec::new();
     let mut issues = Vec::new();
     // Bridge uses `errors` (strings); draft v2 uses `errlist` (objects with `msg`). Support both.
@@ -333,35 +373,27 @@ fn parse_account_set(v: &Value) -> SimpleFinAccountSet {
         }
     }
 
-    let mut accounts = Vec::new();
-    if let Some(rows) = v.get("accounts").and_then(Value::as_array) {
-        for row in rows {
-            if let Some(account) = parse_account(row, &conn_names) {
-                accounts.push(account);
-            } else {
-                let message =
-                    "SimpleFIN returned an account without an ID; it could not be imported.";
-                errors.push(message.into());
-                issues.push(SimpleFinIssue {
-                    code: "gen.".into(),
-                    msg: message.into(),
-                    conn_id: None,
-                    account_id: None,
-                });
-            }
-        }
-    }
+    let accounts = v
+        .get("accounts")
+        .and_then(Value::as_array)
+        .ok_or_else(|| SimpleFinError::Parse("accounts: expected an array".into()))?
+        .iter()
+        .map(|a| {
+            parse_account(a, &conn_names)
+                .ok_or_else(|| SimpleFinError::Parse("An account is missing its ID.".into()))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
 
     let connections = conn_names
         .into_iter()
         .map(|(id, name)| SimpleFinConnection { id, name })
         .collect();
-    SimpleFinAccountSet {
+    Ok(SimpleFinAccountSet {
         accounts,
         errors,
         issues,
         connections,
-    }
+    })
 }
 
 fn parse_account(v: &Value, conn_names: &HashMap<String, String>) -> Option<SimpleFinAccount> {
@@ -374,7 +406,7 @@ fn parse_account(v: &Value, conn_names: &HashMap<String, String>) -> Option<Simp
     let currency = v
         .get("currency")
         .and_then(Value::as_str)
-        .unwrap_or("USD")
+        .unwrap_or("")
         .to_string();
 
     // Institution: Bridge embeds `org.name`/`org.domain`; the protocol uses `conn_name` or a
@@ -416,6 +448,11 @@ fn parse_account(v: &Value, conn_names: &HashMap<String, String>) -> Option<Simp
     Some(SimpleFinAccount {
         id,
         name,
+        number: v
+            .get("number")
+            .or_else(|| v.get("account-number"))
+            .and_then(Value::as_str)
+            .map(str::to_string),
         currency,
         balance: v.get("balance").and_then(parse_decimal),
         balance_date: v.get("balance-date").and_then(Value::as_i64),
@@ -511,6 +548,31 @@ mod tests {
     use serde_json::json;
 
     #[test]
+    fn discovery_skips_transactions_and_sync_requests_only_selected_ids() {
+        let client =
+            SimpleFinClient::new("https://synthetic:fixture@example.invalid/simplefin").unwrap();
+        let discovery = client
+            .accounts_request(&[("balances-only", "1".into())])
+            .unwrap();
+        assert_eq!(discovery.url().query(), Some("balances-only=1&version=2"));
+        let selected = client
+            .accounts_request(&selected_account_query(&["chosen-1", "chosen-2"]).unwrap())
+            .unwrap();
+        assert!(selected
+            .url()
+            .query()
+            .unwrap()
+            .contains("account=chosen-1&account=chosen-2"));
+        assert!(selected.url().query().unwrap().contains("start-date="));
+        assert!(selected.url().query().unwrap().contains("end-date="));
+        assert!(selected.url().query().unwrap().contains("version=2"));
+        assert!(selected_account_query(&[]).is_err());
+        assert_eq!(selected.url().username(), "");
+        assert!(selected.url().password().is_none());
+        assert!(accounts_endpoint("http://synthetic:fixture@example.invalid/simplefin").is_err());
+    }
+
+    #[test]
     fn decodes_demo_setup_token() {
         // Base64 of https://bridge.simplefin.org/simplefin/claim/demo
         let token = "aHR0cHM6Ly9icmlkZ2Uuc2ltcGxlZmluLm9yZy9zaW1wbGVmaW4vY2xhaW0vZGVtbw==";
@@ -572,7 +634,7 @@ mod tests {
                 }]
             }]
         });
-        let set = parse_account_set(&v);
+        let set = parse_account_set(&v).unwrap();
         assert!(set.errors.is_empty());
         assert_eq!(set.accounts.len(), 1);
         let acc = &set.accounts[0];
@@ -602,7 +664,7 @@ mod tests {
                 "balance-date": 978366153i64
             }]
         });
-        let set = parse_account_set(&v);
+        let set = parse_account_set(&v).unwrap();
         assert_eq!(set.errors, vec!["Authentication required".to_string()]);
         assert_eq!(set.accounts.len(), 1);
         let acc = &set.accounts[0];
@@ -613,9 +675,10 @@ mod tests {
     }
 
     #[test]
-    fn account_missing_id_is_skipped() {
+    fn account_missing_id_is_an_explicit_error() {
         let v = json!({ "accounts": [{ "name": "no id" }] });
-        assert!(parse_account_set(&v).accounts.is_empty());
+        assert!(parse_account_set(&v).is_err());
+        assert!(parse_account_set(&json!({ "unexpected": [] })).is_err());
     }
 
     #[test]
@@ -624,7 +687,8 @@ mod tests {
             "connections": [{"conn_id": "one", "name": "Bank - personal"}],
             "errlist": [{"code": "con.auth", "msg": "Approve login", "conn_id": "one"}],
             "accounts": [{"id": "a", "conn_id": "one", "balance": "NaN"}]
-        }));
+        }))
+        .unwrap();
         assert_eq!(set.issues[0].conn_id.as_deref(), Some("one"));
         assert_eq!(set.issues[0].code, "con.auth");
         assert_eq!(set.connections[0].name, "Bank - personal");
@@ -677,7 +741,7 @@ mod tests {
                 ]
             }]
         });
-        let set = parse_account_set(&v);
+        let set = parse_account_set(&v).unwrap();
         let txns = &set.accounts[0].transactions;
         assert_eq!(txns.len(), 2);
         assert_eq!(txns[0].id, "txn-1");

@@ -16,6 +16,6 @@
     "noUnusedParameters": true,
     "noFallthroughCasesInSwitch": true
   },
-  "include": ["src", "scripts/readme-preview"],
+  "include": ["src", "scripts/readme-preview", "scripts/account-sync-preview"],
   "references": [{ "path": "./tsconfig.node.json" }]
 }

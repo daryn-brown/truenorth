@@ -13,7 +13,9 @@ use rusqlite::{params, Connection, OptionalExtension};
 use serde::Serialize;
 use tauri::State;
 
-use crate::commands::accounts::aggregated_account_jurisdiction;
+use super::account_selection::{
+    self, AccountReview, Provider, RemoteAccount, SaveAccountChoices, SyncPlan,
+};
 use crate::connector::snaptrade::{SnapAccount, SnapPosition, SnapTradeClient, SnapTradeError};
 use crate::db::secrets::{self, SNAPTRADE_CONSUMER_KEY, SNAPTRADE_USER_SECRET};
 use crate::db::{reconcile_aggregated_questrade_accounts, AppDb};
@@ -48,6 +50,7 @@ pub struct SnapTradeSyncSummary {
     pub accounts_synced: usize,
     pub holdings_synced: usize,
     pub synced_at: String,
+    pub accounts_needing_review: usize,
 }
 
 // ---------------------------------------------------------------------------
@@ -114,6 +117,63 @@ fn map_account_type(raw_type: Option<&str>, name: Option<&str>) -> String {
     kind.to_string()
 }
 
+pub(super) fn remote_accounts(accounts: &[SnapAccount]) -> Vec<RemoteAccount> {
+    accounts
+        .iter()
+        .map(|a| RemoteAccount {
+            remote_id: a.id.clone(),
+            connection_id: None,
+            name: a.name.clone().unwrap_or_else(|| "Brokerage account".into()),
+            institution: a.institution_name.clone().unwrap_or_else(|| "SnapTrade".into()),
+            account_type: map_account_type(a.raw_type.as_deref(), a.name.as_deref()),
+            currency: a.currency.as_deref().map(|c| c.trim().to_ascii_uppercase()),
+            masked_number: account_selection::mask_account_number(a.number.as_deref()),
+        })
+        .collect()
+}
+
+struct SnapConnection {
+    client: SnapTradeClient,
+    client_id: String,
+    user_id: String,
+    user_secret: String,
+}
+
+fn load_connection(db: &AppDb) -> Result<SnapConnection, String> {
+    let (client_id, user_id) = {
+        let conn = db.0.lock().map_err(|e| e.to_string())?;
+        (
+            get_setting(&conn, SETTING_CLIENT_ID).map_err(|e| e.to_string())?,
+            get_setting(&conn, SETTING_USER_ID).map_err(|e| e.to_string())?,
+        )
+    };
+    let client_id = client_id.ok_or("Save your SnapTrade API credentials first.")?;
+    let user_id = user_id.ok_or("Connect a brokerage before choosing accounts or syncing.")?;
+    let consumer_key = secrets::get_secret(SNAPTRADE_CONSUMER_KEY)
+        .map_err(|e| e.to_string())?
+        .ok_or("Save your SnapTrade API credentials first.")?;
+    let user_secret = secrets::get_secret(SNAPTRADE_USER_SECRET)
+        .map_err(|e| e.to_string())?
+        .ok_or("Connect a brokerage before choosing accounts or syncing.")?;
+    Ok(SnapConnection {
+        client: SnapTradeClient::new(client_id.clone(), consumer_key),
+        client_id,
+        user_id,
+        user_secret,
+    })
+}
+
+fn check_connection(conn: &Connection, source: &SnapConnection) -> Result<(), String> {
+    if get_setting(conn, SETTING_CLIENT_ID).map_err(|e| e.to_string())?.as_deref()
+        != Some(&source.client_id)
+        || get_setting(conn, SETTING_USER_ID).map_err(|e| e.to_string())?.as_deref()
+            != Some(&source.user_id)
+    {
+        return Err("The SnapTrade connection changed. Reopen Choose accounts or sync again.".into());
+    }
+    Ok(())
+}
+
 /// Turn a SnapTrade API error into a user-facing message.
 fn friendly(e: SnapTradeError) -> String {
     if e.is_auth() {
@@ -154,13 +214,7 @@ pub fn snaptrade_get_status(db: State<AppDb>) -> Result<SnapTradeStatus, String>
         let client_id = get_setting(&conn, SETTING_CLIENT_ID).map_err(|e| e.to_string())?;
         let user_id = get_setting(&conn, SETTING_USER_ID).map_err(|e| e.to_string())?;
         let last_synced_at = get_setting(&conn, SETTING_LAST_SYNCED).map_err(|e| e.to_string())?;
-        let account_count: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM accounts WHERE connector_kind = 'snaptrade' AND is_active = 1",
-                [],
-                |r| r.get(0),
-            )
-            .map_err(|e| e.to_string())?;
+        let account_count = account_selection::active_count(&conn, Provider::SnapTrade)?;
         (client_id, user_id, last_synced_at, account_count)
     };
 
@@ -198,8 +252,16 @@ pub async fn snaptrade_save_credentials(
 
     secrets::set_secret(SNAPTRADE_CONSUMER_KEY, &consumer_key).map_err(|e| e.to_string())?;
     {
-        let conn = db.0.lock().map_err(|e| e.to_string())?;
-        set_setting(&conn, SETTING_CLIENT_ID, &client_id).map_err(|e| e.to_string())?;
+        let mut conn = db.0.lock().map_err(|e| e.to_string())?;
+        let tx = conn.transaction().map_err(|e| e.to_string())?;
+        let previous = get_setting(&tx, SETTING_CLIENT_ID).map_err(|e| e.to_string())?;
+        if previous.as_deref().is_some_and(|id| id != client_id) {
+            account_selection::pause_provider(&tx, Provider::SnapTrade)?;
+            delete_setting(&tx, SETTING_USER_ID).map_err(|e| e.to_string())?;
+            delete_setting(&tx, SETTING_LAST_SYNCED).map_err(|e| e.to_string())?;
+        }
+        set_setting(&tx, SETTING_CLIENT_ID, &client_id).map_err(|e| e.to_string())?;
+        tx.commit().map_err(|e| e.to_string())?;
     }
 
     snaptrade_get_status(db)
@@ -265,8 +327,15 @@ pub async fn snaptrade_link_user(
 
     secrets::set_secret(SNAPTRADE_USER_SECRET, &user_secret).map_err(|e| e.to_string())?;
     {
-        let conn = db.0.lock().map_err(|e| e.to_string())?;
-        set_setting(&conn, SETTING_USER_ID, &user_id).map_err(|e| e.to_string())?;
+        let mut conn = db.0.lock().map_err(|e| e.to_string())?;
+        let tx = conn.transaction().map_err(|e| e.to_string())?;
+        let previous = get_setting(&tx, SETTING_USER_ID).map_err(|e| e.to_string())?;
+        if previous.as_deref().is_some_and(|id| id != user_id) {
+            account_selection::pause_provider(&tx, Provider::SnapTrade)?;
+            delete_setting(&tx, SETTING_LAST_SYNCED).map_err(|e| e.to_string())?;
+        }
+        set_setting(&tx, SETTING_USER_ID, &user_id).map_err(|e| e.to_string())?;
+        tx.commit().map_err(|e| e.to_string())?;
     }
 
     snaptrade_get_status(db)
@@ -323,153 +392,127 @@ pub async fn snaptrade_get_login_link(db: State<'_, AppDb>) -> Result<String, St
         .map_err(friendly)
 }
 
-/// Pull accounts + balances + holdings from SnapTrade and reconcile them into the local DB.
-/// Writes one balance snapshot per account so net worth updates automatically.
+/// Discover provider metadata and saved choices without importing financial data.
 #[tauri::command]
-pub async fn snaptrade_sync(db: State<'_, AppDb>) -> Result<SnapTradeSyncSummary, String> {
-    let (client_id, user_id) = {
-        let conn = db.0.lock().map_err(|e| e.to_string())?;
-        (
-            get_setting(&conn, SETTING_CLIENT_ID).map_err(|e| e.to_string())?,
-            get_setting(&conn, SETTING_USER_ID).map_err(|e| e.to_string())?,
-        )
-    };
-    let client_id = client_id.ok_or("Save your SnapTrade API credentials first.")?;
-    let user_id = user_id.ok_or("Connect a brokerage before syncing.")?;
-    let consumer_key = secrets::get_secret(SNAPTRADE_CONSUMER_KEY)
-        .map_err(|e| e.to_string())?
-        .ok_or("Save your SnapTrade API credentials first.")?;
-    let user_secret = secrets::get_secret(SNAPTRADE_USER_SECRET)
-        .map_err(|e| e.to_string())?
-        .ok_or("Connect a brokerage before syncing.")?;
-
-    let client = SnapTradeClient::new(client_id, consumer_key);
-
-    // Fetch everything over the network first — no DB lock is held across an await.
-    let accounts = client
-        .list_accounts(&user_id, &user_secret)
+pub async fn snaptrade_discover_accounts(db: State<'_, AppDb>) -> Result<AccountReview, String> {
+    let source = load_connection(&db)?;
+    let accounts = source.client
+        .list_accounts(&source.user_id, &source.user_secret)
         .await
         .map_err(friendly)?;
-    let mut synced: Vec<(SnapAccount, Vec<SnapPosition>)> = Vec::with_capacity(accounts.len());
-    for account in accounts {
-        let positions = client
-            .account_positions(&user_id, &user_secret, &account.id)
-            .await
-            .map_err(friendly)?;
-        synced.push((account, positions));
-    }
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    check_connection(&conn, &source)?;
+    account_selection::discover(&conn, Provider::SnapTrade, &remote_accounts(&accounts))
+}
 
-    let now = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
-    let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
+#[tauri::command]
+pub async fn snaptrade_save_account_choices(
+    db: State<'_, AppDb>,
+    payload: SaveAccountChoices,
+) -> Result<AccountReview, String> {
+    let source = load_connection(&db)?;
+    let accounts = source.client
+        .list_accounts(&source.user_id, &source.user_secret)
+        .await
+        .map_err(friendly)?;
+    let mut conn = db.0.lock().map_err(|e| e.to_string())?;
+    check_connection(&conn, &source)?;
+    account_selection::save_choices(&mut conn, Provider::SnapTrade, &remote_accounts(&accounts), &payload)
+}
 
-    let mut accounts_synced = 0usize;
-    let mut holdings_synced = 0usize;
-
-    {
-        let mut conn = db.0.lock().map_err(|e| e.to_string())?;
-        let tx = conn.transaction().map_err(|e| e.to_string())?;
-
-        for (account, positions) in &synced {
-            let reported_currency = account
-                .currency
-                .clone()
-                .unwrap_or_else(|| "USD".to_string());
-            let account_type =
-                map_account_type(account.raw_type.as_deref(), account.name.as_deref());
-            let display_name = account
-                .name
-                .clone()
-                .or_else(|| account.number.clone())
-                .unwrap_or_else(|| "Brokerage account".to_string());
-            let institution = account
-                .institution_name
-                .clone()
-                .unwrap_or_else(|| "SnapTrade".to_string());
-            let jurisdiction =
-                aggregated_account_jurisdiction(&reported_currency, Some(institution.as_str()));
-
-            // Upsert the account, keyed by (connector_kind, connector_ref). On an existing account
-            // we preserve the stored currency/jurisdiction so a user correction (see
-            // `update_account_currency`) isn't clobbered by what the aggregator reports.
-            let existing: Option<(i64, String)> = tx
-                .query_row(
-                    "SELECT id, currency FROM accounts WHERE connector_kind = 'snaptrade' AND connector_ref = ?1",
-                    params![account.id],
-                    |r| Ok((r.get(0)?, r.get(1)?)),
-                )
-                .optional()
-                .map_err(|e| e.to_string())?;
-
-            let (account_id, account_currency) = if let Some((id, stored_currency)) = existing {
-                tx.execute(
-                    "UPDATE accounts SET name = ?1, institution = ?2, account_type = ?3, \
-                     is_active = 1, updated_at = ?4 WHERE id = ?5",
-                    params![display_name, institution, account_type, now, id],
-                )
-                .map_err(|e| e.to_string())?;
-                (id, stored_currency)
-            } else {
-                tx.execute(
-                    "INSERT INTO accounts \
-                     (name, institution, account_type, currency, jurisdiction, connector_kind, connector_ref) \
-                     VALUES (?1, ?2, ?3, ?4, ?5, 'snaptrade', ?6)",
-                    params![display_name, institution, account_type, reported_currency, jurisdiction, account.id],
-                )
-                .map_err(|e| e.to_string())?;
-                (tx.last_insert_rowid(), reported_currency.clone())
-            };
-            accounts_synced += 1;
-
-            // Balance snapshot → picked up by the net-worth pipeline.
-            if let Some(total) = account.balance_total {
-                tx.execute(
-                    "INSERT OR REPLACE INTO balance_snapshots \
-                     (account_id, snapshot_date, balance, currency, source) \
-                     VALUES (?1, ?2, ?3, ?4, 'snaptrade')",
-                    params![account_id, today, total, account_currency],
-                )
-                .map_err(|e| e.to_string())?;
-            }
-
-            // Replace the holdings set for this account so closed positions disappear.
+pub(super) fn apply_sync(
+    conn: &mut Connection,
+    remotes: &[RemoteAccount],
+    plan: &SyncPlan,
+    synced: &[(SnapAccount, Vec<SnapPosition>)],
+    today: &str,
+    now: &str,
+) -> Result<SnapTradeSyncSummary, String> {
+    plan.require_selected()?;
+    let tx = conn.transaction().map_err(|e| e.to_string())?;
+    account_selection::validate_sync(&tx, Provider::SnapTrade, remotes, plan)?;
+    let mut holdings_synced = 0;
+    for target in &plan.targets {
+        let (account, positions) = synced.iter().find(|(a, _)| a.id == target.remote_id)
+            .ok_or("SnapTrade did not return a selected account. Nothing was imported.")?;
+        if let Some(total) = account.balance_total {
             tx.execute(
-                "DELETE FROM holdings WHERE account_id = ?1",
-                params![account_id],
+                "INSERT OR REPLACE INTO balance_snapshots \
+                 (account_id, snapshot_date, balance, currency, source) \
+                 VALUES (?1, ?2, ?3, ?4, 'snaptrade')",
+                params![target.account_id, today, total, target.currency],
             )
             .map_err(|e| e.to_string())?;
-            for pos in positions {
-                let holding_currency = pos.currency.clone().unwrap_or_else(|| reported_currency.clone());
-                let last_price_at = pos.price.map(|_| now.clone());
-                tx.execute(
-                    "INSERT OR REPLACE INTO holdings \
-                     (account_id, symbol, quantity, average_cost, currency, last_price, last_price_at, updated_at) \
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-                    params![
-                        account_id,
-                        pos.symbol,
-                        pos.units,
-                        pos.average_purchase_price,
-                        holding_currency,
-                        pos.price,
-                        last_price_at,
-                        now
-                    ],
-                )
-                .map_err(|e| e.to_string())?;
-                holdings_synced += 1;
-            }
         }
-
-        reconcile_aggregated_questrade_accounts(&tx).map_err(|e| e.to_string())?;
-        set_setting(&tx, SETTING_LAST_SYNCED, &now).map_err(|e| e.to_string())?;
-        tx.commit().map_err(|e| e.to_string())?;
+        tx.execute("DELETE FROM holdings WHERE account_id = ?1", [target.account_id])
+            .map_err(|e| e.to_string())?;
+        for pos in positions {
+            let holding_currency = pos.currency.as_deref().unwrap_or(&target.currency);
+            let last_price_at = pos.price.map(|_| now);
+            tx.execute(
+                "INSERT OR REPLACE INTO holdings \
+                 (account_id, symbol, quantity, average_cost, currency, last_price, last_price_at, updated_at) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                params![target.account_id, pos.symbol, pos.units, pos.average_purchase_price,
+                    holding_currency, pos.price, last_price_at, now],
+            )
+            .map_err(|e| e.to_string())?;
+            holdings_synced += 1;
+        }
     }
-
+    reconcile_aggregated_questrade_accounts(&tx).map_err(|e| e.to_string())?;
+    set_setting(&tx, SETTING_LAST_SYNCED, now).map_err(|e| e.to_string())?;
+    tx.commit().map_err(|e| e.to_string())?;
     Ok(SnapTradeSyncSummary {
-        accounts_synced,
+        accounts_synced: plan.targets.len(),
         holdings_synced,
-        synced_at: now,
+        synced_at: now.to_string(),
+        accounts_needing_review: plan.accounts_needing_review,
     })
+}
+
+/// Fetch positions only for selected accounts, then recheck ownership before writing.
+async fn fetch_selected_positions(
+    source: &SnapConnection,
+    accounts: &[SnapAccount],
+    plan: &SyncPlan,
+) -> Result<Vec<(SnapAccount, Vec<SnapPosition>)>, String> {
+    plan.require_selected()?;
+    let mut synced = Vec::with_capacity(plan.targets.len());
+    for target in &plan.targets {
+        let account = accounts.iter().find(|a| a.id == target.remote_id)
+            .ok_or("A selected SnapTrade account is no longer available.")?;
+        let positions = source.client
+            .account_positions(&source.user_id, &source.user_secret, &target.remote_id)
+            .await
+            .map_err(friendly)?;
+        synced.push((account.clone(), positions));
+    }
+    Ok(synced)
+}
+
+#[tauri::command]
+pub async fn snaptrade_sync(db: State<'_, AppDb>) -> Result<SnapTradeSyncSummary, String> {
+    let source = load_connection(&db)?;
+    let accounts = source.client
+        .list_accounts(&source.user_id, &source.user_secret)
+        .await
+        .map_err(friendly)?;
+    let remotes = remote_accounts(&accounts);
+    let plan = {
+        let conn = db.0.lock().map_err(|e| e.to_string())?;
+        check_connection(&conn, &source)?;
+        account_selection::plan_sync(&conn, Provider::SnapTrade, &remotes)?
+    };
+    let synced = fetch_selected_positions(&source, &accounts, &plan).await?;
+    let now = chrono::Utc::now();
+    let mut conn = db.0.lock().map_err(|e| e.to_string())?;
+    check_connection(&conn, &source)?;
+    apply_sync(
+        &mut conn, &remotes, &plan, &synced,
+        &now.format("%Y-%m-%d").to_string(),
+        &now.format("%Y-%m-%dT%H:%M:%SZ").to_string(),
+    )
 }
 
 /// Disconnect the brokerage: delete the SnapTrade user remotely, clear the local user secret
@@ -497,15 +540,12 @@ pub async fn snaptrade_disconnect(db: State<'_, AppDb>) -> Result<SnapTradeStatu
 
     secrets::delete_secret(SNAPTRADE_USER_SECRET).map_err(|e| e.to_string())?;
     {
-        let conn = db.0.lock().map_err(|e| e.to_string())?;
-        delete_setting(&conn, SETTING_USER_ID).map_err(|e| e.to_string())?;
-        delete_setting(&conn, SETTING_LAST_SYNCED).map_err(|e| e.to_string())?;
-        conn.execute(
-            "UPDATE accounts SET is_active = 0, updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') \
-             WHERE connector_kind = 'snaptrade'",
-            [],
-        )
-        .map_err(|e| e.to_string())?;
+        let mut conn = db.0.lock().map_err(|e| e.to_string())?;
+        let tx = conn.transaction().map_err(|e| e.to_string())?;
+        delete_setting(&tx, SETTING_USER_ID).map_err(|e| e.to_string())?;
+        delete_setting(&tx, SETTING_LAST_SYNCED).map_err(|e| e.to_string())?;
+        account_selection::pause_provider(&tx, Provider::SnapTrade)?;
+        tx.commit().map_err(|e| e.to_string())?;
     }
 
     snaptrade_get_status(db)
@@ -514,6 +554,60 @@ pub async fn snaptrade_disconnect(db: State<'_, AppDb>) -> Result<SnapTradeStatu
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::commands::accounts::aggregated_account_jurisdiction;
+
+    #[tokio::test]
+    async fn positions_are_requested_only_for_selected_accounts() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = Vec::new();
+            loop {
+                let mut chunk = [0; 1024];
+                let n = stream.read(&mut chunk).await.unwrap();
+                assert!(n > 0);
+                request.extend_from_slice(&chunk[..n]);
+                if request.windows(4).any(|w| w == b"\r\n\r\n") { break; }
+            }
+            stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n[]").await.unwrap();
+            String::from_utf8(request).unwrap()
+        });
+        let source = SnapConnection {
+            client: SnapTradeClient::new("synthetic-client", "synthetic-key")
+                .with_base_url(format!("http://{address}")),
+            client_id: "synthetic-client".into(),
+            user_id: "synthetic-user".into(),
+            user_secret: "synthetic-secret".into(),
+        };
+        let accounts: Vec<SnapAccount> = ["selected", "ignored", "unreviewed"].into_iter().map(|id| SnapAccount {
+            id: id.into(), name: Some("Individual".into()), number: None,
+            institution_name: Some("Robinhood".into()), raw_type: Some("Individual".into()),
+            balance_total: Some(100.0), currency: Some("USD".into()),
+        }).collect();
+        let remotes = remote_accounts(&accounts);
+        let mut conn = Connection::open_in_memory().unwrap();
+        crate::db::apply_schema(&conn).unwrap();
+        let revision = account_selection::discover(&conn, Provider::SnapTrade, &remotes).unwrap().revision;
+        account_selection::save_choices(&mut conn, Provider::SnapTrade, &remotes, &SaveAccountChoices {
+            revision, choices: vec![
+                account_selection::AccountChoice::Create { remote_id: "selected".into() },
+                account_selection::AccountChoice::Ignore { remote_id: "ignored".into() },
+            ],
+        }).unwrap();
+        let plan = account_selection::plan_sync(&conn, Provider::SnapTrade, &remotes).unwrap();
+        let synced = fetch_selected_positions(&source, &accounts, &plan).await.unwrap();
+        assert_eq!(synced.len(), 1);
+        assert_eq!(synced[0].0.id, "selected");
+        let request = tokio::time::timeout(std::time::Duration::from_secs(5), server).await.unwrap().unwrap();
+        assert!(request.starts_with("GET /api/v1/accounts/selected/positions?"));
+        assert!(!request.contains("ignored"));
+        assert!(!request.contains("unreviewed"));
+        assert_eq!(plan.accounts_needing_review, 1);
+    }
 
     #[test]
     fn maps_registered_account_types_from_keywords() {

@@ -31,11 +31,38 @@ Open **Connections** from the sidebar or **Connect account** in the header, and 
 1. **SimpleFIN setup token** — paste your setup token and click **Connect**. TrueNorth claims the
    token and saves the access URL in the app's existing local credential store before fetching
    any bank data. A temporary outage therefore cannot lose an already-claimed setup token.
-2. **Sync balances** — click **Sync now**. TrueNorth pulls your accounts, balances, and up to 90
-   calendar days of transactions, then updates your net worth.
+2. **Choose accounts to sync** — review institution, name, inferred type, currency, and a masked
+   account number if supplied. Choose **Create new account**, **Link to existing account**, or
+   **Ignore**, then **Save choices**. New accounts start **not selected**; existing active imported
+   accounts keep their selections when upgrading.
+3. **Sync balances** — click **Sync now**. Only selected accounts update their balances, holdings,
+   and up to 90 calendar days of transactions.
 
-To connect more institutions, add them in your SimpleFIN bridge — they appear automatically on the
-next sync. To rotate credentials, click **Use a new token** and claim a fresh setup token.
+To connect more institutions, add them in your SimpleFIN bridge, then use **Choose accounts to
+sync** next to **Sync now**. Newly discovered accounts are never automatically imported.
+To rotate credentials, click **Use a new token** and claim a fresh setup token; changing the access
+URL pauses existing selections until you explicitly resume them.
+
+## Choosing sources and cleaning up duplicates
+
+Both SimpleFIN and SnapTrade use the same persisted account-selection flow. **Link to existing**
+requires an explicit confirmation that this is the same real account. It switches an active,
+currency- and type-compatible manual or SnapTrade account to SimpleFIN while retaining its local
+ID, labels, notes, jurisdiction, snapshots, transactions/classifications, and goal references.
+The old provider binding stays excluded, including across later syncs and restarts. Switching a
+SimpleFIN account to SnapTrade works the same way; future SimpleFIN syncs cannot recreate it.
+
+**Ignore** is durable. If the provider account was already imported, Ignore hides that local row
+from accounts, net worth, cashflow, and history charts while keeping the stored records. Ignoring
+an old source after a handoff does not hide the account now supplied by the other provider.
+**Delete account** has the same exclusion behavior for these two providers, through an in-app
+confirmation. It does not erase historical records.
+
+Already-imported provider accounts cannot be reassigned to another local row or merged. To remove
+an existing duplicate, Ignore it and keep the original. **Resume syncing to the same account**
+restores the original imported row only after confirmation. Linking a different account ID from
+the same provider, or a Teller/direct account, is not supported. Names, balances, and masked
+number endings are never used to auto-merge accounts.
 
 ## Connection health and reauthentication
 
@@ -62,20 +89,30 @@ Old installations show unverified status until their first health-aware sync.
 
 SimpleFIN normally updates daily. Automatic SimpleFIN checks run at most every **six hours while
 the desktop app is open**. Manual and return-from-browser checks have a **one-minute cooldown**;
-a persisted rolling budget limits the app to **24 requests per 24 hours**, including failed attempts.
+a persisted rolling budget limits the app to **24 requests per 24 hours**, including failed attempts,
+account discovery, save-time validation, and selected-account data requests. Review/save requests
+share the budget but do not trigger the six-hour automatic-sync cooldown.
 Repeated requests cannot bypass a bank's MFA or force a bank refresh.
 
 ## What a sync does
 
-For each account SimpleFIN reports, TrueNorth (in a single transaction):
+Discovery requests `balances-only=1`, without transaction history, and writes no financial or
+selection data. Only request-budget and connection-error metadata may be saved during discovery.
+Sync then requests only selected IDs using the protocol's `account` filter.
+Some servers bundle holdings with discovery or ignore filters; TrueNorth also filters responses
+locally, so excluded accounts still cannot write balances, holdings, or transactions.
 
-- **Upserts the account**, keyed by its connection and account ID in protocol v2, so re-syncing
-  updates the existing row instead of creating duplicates. The account type is inferred from the
-  account name (e.g. chequing, savings, credit, TFSA, RRSP, brokerage) and the jurisdiction from the
-  account currency (CAD → CA, otherwise US). Questrade accounts are always classified as CA,
-  including USD-denominated accounts.
-- Existing unscoped account IDs are migrated without replacing the local account or losing history,
-  transaction classifications, or user-corrected currencies.
+For each selected account, TrueNorth (in a single transaction):
+
+- **Rechecks saved ownership** after network requests. Stale/concurrent changes, invalid or
+  duplicate target IDs, currency/type mismatches, and missing selected responses fail explicitly
+  instead of partially importing data or reactivating exclusions.
+- **Uses the saved local account ID** and preserves its metadata, including user-corrected
+  currency. A newly created account gets its type from the account name/holdings and jurisdiction
+  from currency (CAD → CA, otherwise US). Questrade is always CA, including USD accounts.
+- **Scopes new identities by connection and account ID** in protocol v2. Unambiguous legacy
+  unscoped selections keep their local ID/history/exclusions and are pinned to the first reported
+  connection. A legacy ID appearing in multiple connections is rejected rather than guessed.
 - **Writes the bank's dated balance snapshot** (`source = 'simplefin'`), never a made-up "today"
   date. Missing, invalid, or future dates and authentication failures keep the previous balance
   with a warning. Older source timestamps cannot overwrite a newer saved balance.
@@ -88,7 +125,9 @@ For each account SimpleFIN reports, TrueNorth (in a single transaction):
 
 If SimpleFIN reports a per-connection problem (for example, an institution needs to be
 re-authenticated at the bridge), the sync still succeeds for everything else and surfaces the
-message as a **warning** under the sync summary.
+message as a **warning** under the sync summary. A missing selected account aborts the import with
+a visible error, including provider warnings. New accounts needing review are reported separately;
+a sync with no eligible selections reports that nothing is selected, not success.
 
 > **Brokerages may report cash only.** For some investment accounts, the SimpleFIN bridge returns
 > just the **uninvested cash** balance and not the stock equity (market value) — Questrade is a known
@@ -100,16 +139,18 @@ message as a **warning** under the sync summary.
 
 ## Disconnecting
 
-**Disconnect SimpleFIN** (in Connections) removes the stored access URL from the credential store and
-hides the connected accounts. Historical snapshots already written are left untouched. To fully
-revoke access, also disable or delete the token in your SimpleFIN bridge.
+**Disconnect SimpleFIN** (in Connections) removes the stored access URL from the secret store
+and hides/excludes its connected accounts. Historical records and exclusion choices are kept.
+After reconnecting, use **Choose accounts to sync** to intentionally resume accounts with the same
+provider IDs. New IDs require review. Accounts handed off to SnapTrade are left untouched.
+To fully revoke access, also disable or delete the token in your SimpleFIN bridge.
 
 ## Privacy & security
 
 - **Existing secret-store policy is preserved.** The access URL embeds HTTP Basic credentials and
   is stored through TrueNorth's local credential store. Open mode stores secrets in a local file
   with restrictive permissions; see [Privacy](../README.md#privacy). The encrypted finance database
-  holds financial records and non-secret connection-health metadata, not the access URL.
+  holds financial records, account selections, and non-secret connection-health metadata, not the access URL.
 - **Read-only by design.** TrueNorth requests account data and a transaction window of up to 90
   calendar days from the SimpleFIN protocol.
 - **Direct HTTPS.** Requests go only to your SimpleFIN server (e.g. `bridge.simplefin.org`) over
@@ -127,10 +168,15 @@ revoke access, also disable or delete the token in your SimpleFIN bridge.
 - **A connection warning after syncing.** SimpleFIN flagged one institution (often it needs to be
   re-authenticated at the bridge). Fix it in the bridge, then sync again — other accounts are
   unaffected.
-- **No accounts after syncing.** Make sure at least one institution is connected in your SimpleFIN
-  bridge before syncing.
-- **A balance is missing from net worth.** Check the source balance/date and any connection warning.
-  Accounts in other currencies are supported; use **Refresh FX** if their conversion rate is missing.
+- **No accounts selected / new accounts need review.** Connect the institution at the bridge, then
+  save your choices in **Choose accounts to sync**. Connecting alone no longer imports accounts.
+- **No compatible existing account.** Linking requires the same reported currency and inferred
+  account type; hidden targets and unsupported connectors are not offered. Existing imported
+  accounts keep a user-corrected currency on later syncs.
+- **Choices changed while saving or syncing.** Reload the review. No partial batch was committed.
+- **A balance is missing from net worth.** Check that the account is selected, a balance was
+  reported with a valid source date, and its currency has an exchange rate. Use **Refresh FX**
+  if the conversion rate is missing.
 
 ## Cross-references
 

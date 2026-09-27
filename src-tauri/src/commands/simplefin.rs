@@ -5,12 +5,16 @@
 //! `.await`: network calls happen first, then results are written under a short-lived lock, and
 //! one balance snapshot per account flows straight into the existing net-worth pipeline.
 
+use std::collections::HashSet;
+
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::Serialize;
 use tauri::State;
 
+use super::account_selection::{
+    self, AccountReview, Provider, RemoteAccount, SaveAccountChoices, SyncPlan,
+};
 use super::simplefin_health::{self as health, ConnectionHealth};
-use crate::commands::accounts::aggregated_account_jurisdiction;
 use crate::connector::simplefin::{
     claim_access_url, SimpleFinAccount, SimpleFinAccountSet, SimpleFinClient, SimpleFinError,
     SimpleFinHolding, SimpleFinTransaction,
@@ -46,6 +50,7 @@ pub struct SimpleFinSyncSummary {
     pub holdings_synced: usize,
     pub transactions_synced: usize,
     pub synced_at: Option<String>,
+    pub accounts_needing_review: usize,
     /// Non-fatal messages SimpleFIN returned (e.g. one institution needs to be re-authenticated).
     pub warnings: Vec<String>,
     pub skipped: bool,
@@ -118,6 +123,71 @@ fn map_account_type(name: &str, has_holdings: bool) -> String {
     kind.to_string()
 }
 
+pub(super) fn remote_accounts(accounts: &[SimpleFinAccount]) -> Vec<RemoteAccount> {
+    accounts
+        .iter()
+        .map(|a| RemoteAccount {
+            remote_id: a.reference(),
+            connection_id: a.connection_id.clone(),
+            name: a.name.clone(),
+            institution: a.institution.clone().unwrap_or_else(|| "SimpleFIN".into()),
+            account_type: map_account_type(&a.name, !a.holdings.is_empty()),
+            currency: Some(a.currency.trim().to_ascii_uppercase()).filter(|c| !c.is_empty()),
+            masked_number: account_selection::mask_account_number(a.number.as_deref()),
+        })
+        .collect()
+}
+
+fn review_accounts(
+    conn: &Connection,
+    accounts: &[SimpleFinAccount],
+) -> Result<Vec<RemoteAccount>, String> {
+    let mut remotes = remote_accounts(accounts);
+    for (account, remote) in accounts.iter().zip(&mut remotes) {
+        let canonical: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM account_sync_selections WHERE provider = 'simplefin' AND remote_id = ?1)",
+            [&remote.remote_id], |r| r.get(0),
+        ).map_err(|e| e.to_string())?;
+        if !canonical && account.connection_id.is_some() {
+            let legacy: Option<Option<String>> = conn.query_row(
+                "SELECT connection_id FROM account_sync_selections WHERE provider = 'simplefin' AND remote_id = ?1",
+                [&account.id], |r| r.get(0),
+            ).optional().map_err(|e| e.to_string())?;
+            if legacy.is_some_and(|connection| {
+                connection.is_none() || connection == account.connection_id
+            }) {
+                if accounts.iter().filter(|a| a.id == account.id).count() != 1 {
+                    return Err("A legacy SimpleFIN account ID is shared by multiple bank connections. No accounts were imported; its existing history needs explicit reconciliation.".into());
+                }
+                // Preserve an exact, unambiguous legacy identity (including exclusions) without
+                // changing financial accounts during discovery. New identities remain scoped.
+                remote.remote_id = account.id.clone();
+            }
+        }
+    }
+    Ok(remotes)
+}
+
+fn matches_remote(account: &SimpleFinAccount, remote: &RemoteAccount) -> bool {
+    account.connection_id == remote.connection_id
+        && (account.reference() == remote.remote_id || account.id == remote.remote_id)
+}
+
+fn access_url() -> Result<String, String> {
+    secrets::get_secret(SIMPLEFIN_ACCESS_URL)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "Connect SimpleFIN before choosing accounts or syncing.".into())
+}
+
+fn check_connection(expected_url: &str) -> Result<(), String> {
+    if access_url()? != expected_url {
+        return Err(
+            "The SimpleFIN connection changed. Reopen Choose accounts or sync again.".into(),
+        );
+    }
+    Ok(())
+}
+
 /// Turn a SimpleFIN error into a user-facing message.
 fn friendly(e: SimpleFinError) -> String {
     if e.is_auth() {
@@ -142,63 +212,15 @@ fn snapshot_date_for(balance_date: Option<i64>, today: &str) -> Option<String> {
         .filter(|date| date.as_str() <= today)
 }
 
-/// Upsert one SimpleFIN account (keyed by `connector_ref`) and write its balance snapshot — dated
-/// by SimpleFIN's `balance-date` (see [`snapshot_date_for`]) so a stale balance stays visibly
-/// stale — which the net-worth pipeline picks up automatically. Returns the local account row id.
-fn upsert_account(
+/// Update only a selected account's observed balance, preserving its identity and metadata.
+fn write_balance_snapshot(
     conn: &Connection,
+    account_id: i64,
+    currency: &str,
     account: &SimpleFinAccount,
     today: &str,
     now: &str,
-) -> rusqlite::Result<i64> {
-    let reported_currency = &account.currency;
-    let mut account_type = map_account_type(&account.name, !account.holdings.is_empty());
-    let institution = account
-        .institution
-        .clone()
-        .unwrap_or_else(|| "SimpleFIN".to_string());
-    let jurisdiction =
-        aggregated_account_jurisdiction(reported_currency, Some(institution.as_str()));
-
-    // Keyed by connector_ref. On an existing account we deliberately do NOT overwrite the stored
-    // currency/jurisdiction: aggregators sometimes mislabel a foreign account's currency (e.g.
-    // SimpleFIN reporting a Jamaican JMD account as CAD). The user can correct it via
-    // `update_account_currency`, and preserving the stored value keeps that fix across syncs.
-    // Questrade jurisdiction is normalized by `reconcile_aggregated_questrade_accounts`.
-    let reference = match &account.connection_id {
-        Some(connection) => serde_json::to_string(&(connection, &account.id))
-            .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?,
-        None => account.id.clone(),
-    };
-    let existing: Option<(i64, String, String)> = conn
-        .query_row(
-            "SELECT id, currency, account_type FROM accounts WHERE connector_kind = 'simplefin' \
-             AND connector_ref IN (?1, ?2) ORDER BY CASE WHEN connector_ref = ?1 THEN 0 ELSE 1 END LIMIT 1",
-            params![reference, account.id],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-        )
-        .optional()?;
-
-    let (account_id, currency) = if let Some((id, stored_currency, stored_type)) = existing {
-        if !account.holdings_reported {
-            account_type = stored_type;
-        }
-        conn.execute(
-            "UPDATE accounts SET name = ?1, institution = ?2, account_type = ?3, \
-             is_active = 1, updated_at = ?4, connector_ref = ?6 WHERE id = ?5",
-            params![account.name, institution, account_type, now, id, reference],
-        )?;
-        (id, stored_currency)
-    } else {
-        conn.execute(
-            "INSERT INTO accounts \
-             (name, institution, account_type, currency, jurisdiction, connector_kind, connector_ref) \
-             VALUES (?1, ?2, ?3, ?4, ?5, 'simplefin', ?6)",
-            params![account.name, institution, account_type, reported_currency, jurisdiction, reference],
-        )?;
-        (conn.last_insert_rowid(), reported_currency.clone())
-    };
-
+) -> rusqlite::Result<()> {
     let checked_at = chrono::DateTime::parse_from_rfc3339(now)
         .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?
         .with_timezone(&chrono::Utc);
@@ -210,7 +232,7 @@ fn upsert_account(
         source_time,
     ) {
         if previous_time.is_some_and(|previous| source_time < previous) {
-            return Ok(account_id);
+            return Ok(());
         }
         conn.execute(
             "INSERT OR REPLACE INTO balance_snapshots \
@@ -220,7 +242,7 @@ fn upsert_account(
         )?;
     }
 
-    Ok(account_id)
+    Ok(())
 }
 
 /// SimpleFIN reports `market_value`/`cost_basis` as position totals; derive the per-share
@@ -241,6 +263,7 @@ fn replace_holdings(
     conn: &Connection,
     account_id: i64,
     account: &SimpleFinAccount,
+    account_currency: &str,
     now: &str,
 ) -> rusqlite::Result<usize> {
     conn.execute(
@@ -250,10 +273,7 @@ fn replace_holdings(
     let mut count = 0usize;
     for h in &account.holdings {
         let (last_price, average_cost) = holding_unit_prices(h);
-        let holding_currency = h
-            .currency
-            .clone()
-            .unwrap_or_else(|| account.currency.clone());
+        let holding_currency = h.currency.as_deref().unwrap_or(account_currency);
         let last_price_at = last_price.map(|_| now.to_string());
         conn.execute(
             "INSERT OR REPLACE INTO holdings \
@@ -327,13 +347,7 @@ pub fn simplefin_get_status(db: State<AppDb>) -> Result<SimpleFinStatus, String>
     let (last_synced_at, account_count) = {
         let conn = db.0.lock().map_err(|e| e.to_string())?;
         let last_synced_at = get_setting(&conn, SETTING_LAST_SYNCED).map_err(|e| e.to_string())?;
-        let account_count: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM accounts WHERE connector_kind = 'simplefin' AND is_active = 1",
-                [],
-                |r| r.get(0),
-            )
-            .map_err(|e| e.to_string())?;
+        let account_count = account_selection::active_count(&conn, Provider::SimpleFin)?;
         (last_synced_at, account_count)
     };
 
@@ -370,19 +384,222 @@ pub async fn simplefin_connect(
 
     // Persist a claimed token before fetching. An outage must not lose a one-time credential.
     let access_url = claim_access_url(&setup_token).await.map_err(friendly)?;
+    let previous = secrets::get_secret(SIMPLEFIN_ACCESS_URL).map_err(|e| e.to_string())?;
     secrets::set_secret(SIMPLEFIN_ACCESS_URL, &access_url).map_err(|e| e.to_string())?;
     {
-        let conn = db.0.lock().map_err(|e| e.to_string())?;
-        let mut state = health::load(&conn).map_err(|e| e.to_string())?;
+        let mut conn = db.0.lock().map_err(|e| e.to_string())?;
+        let tx = conn.transaction().map_err(|e| e.to_string())?;
+        if previous.as_deref().is_some_and(|url| url != access_url) {
+            account_selection::pause_provider(&tx, Provider::SimpleFin)?;
+            delete_setting(&tx, SETTING_LAST_SYNCED).map_err(|e| e.to_string())?;
+        }
+        let mut state = health::load(&tx).map_err(|e| e.to_string())?;
         state.token_saved();
-        health::save(&conn, &state).map_err(|e| e.to_string())?;
+        health::save(&tx, &state).map_err(|e| e.to_string())?;
+        tx.commit().map_err(|e| e.to_string())?;
     }
 
     simplefin_get_status(db)
 }
 
-/// Pull accounts + balances + holdings from SimpleFIN and reconcile them into the local DB.
-/// Writes one balance snapshot per account so net worth updates automatically.
+fn reserve_request(db: &AppDb) -> Result<(), String> {
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    let mut state = health::load(&conn).map_err(|e| e.to_string())?;
+    state.reserve_request(chrono::Utc::now())?;
+    health::save(&conn, &state).map_err(|e| e.to_string())
+}
+
+fn record_failure(db: &AppDb, message: String, auth: bool) -> String {
+    let save = (|| -> Result<(), String> {
+        let conn = db.0.lock().map_err(|e| e.to_string())?;
+        let mut state = health::load(&conn).map_err(|e| e.to_string())?;
+        state.app_auth_required |= auth;
+        state.last_error = Some(message.clone());
+        health::save(&conn, &state).map_err(|e| e.to_string())
+    })();
+    match save {
+        Ok(()) => message,
+        Err(error) => format!("{message} Could not save connection status: {error}"),
+    }
+}
+
+fn record_provider_failure(db: &AppDb, error: SimpleFinError) -> String {
+    let auth = error.is_auth();
+    record_failure(db, friendly(error), auth)
+}
+
+async fn fetch_catalog(db: &AppDb, url: &str) -> Result<SimpleFinAccountSet, String> {
+    let catalog = SimpleFinClient::new(url)
+        .map_err(|e| record_provider_failure(db, e))?
+        .list_accounts()
+        .await
+        .map_err(|e| record_provider_failure(db, e))?;
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    let mut state = health::load(&conn).map_err(|e| e.to_string())?;
+    state.review_response(&catalog);
+    health::save(&conn, &state).map_err(|e| e.to_string())?;
+    Ok(catalog)
+}
+
+#[tauri::command]
+pub async fn simplefin_discover_accounts(
+    db: State<'_, AppDb>,
+    sync: State<'_, SimpleFinSyncLock>,
+) -> Result<AccountReview, String> {
+    let _guard = sync.0.lock().await;
+    let url = access_url()?;
+    reserve_request(&db)?;
+    let catalog = fetch_catalog(&db, &url).await?;
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    check_connection(&url)?;
+    let remotes = review_accounts(&conn, &catalog.accounts)?;
+    let mut review = account_selection::discover(&conn, Provider::SimpleFin, &remotes)?;
+    review.warnings = catalog.errors;
+    Ok(review)
+}
+
+#[tauri::command]
+pub async fn simplefin_save_account_choices(
+    db: State<'_, AppDb>,
+    sync: State<'_, SimpleFinSyncLock>,
+    payload: SaveAccountChoices,
+) -> Result<AccountReview, String> {
+    let _guard = sync.0.lock().await;
+    let url = access_url()?;
+    reserve_request(&db)?;
+    let catalog = fetch_catalog(&db, &url).await?;
+    let mut conn = db.0.lock().map_err(|e| e.to_string())?;
+    check_connection(&url)?;
+    let remotes = review_accounts(&conn, &catalog.accounts)?;
+    let mut review =
+        account_selection::save_choices(&mut conn, Provider::SimpleFin, &remotes, &payload)?;
+    review.warnings = catalog.errors;
+    Ok(review)
+}
+
+pub(super) fn apply_sync(
+    conn: &mut Connection,
+    remotes: &[RemoteAccount],
+    plan: &SyncPlan,
+    account_set: &SimpleFinAccountSet,
+    today: &str,
+    now: &str,
+) -> Result<SimpleFinSyncSummary, String> {
+    plan.require_selected()?;
+    let tx = conn.transaction().map_err(|e| e.to_string())?;
+    account_selection::validate_sync(&tx, Provider::SimpleFin, remotes, plan)?;
+    let mut returned_ids = HashSet::new();
+    for account in &account_set.accounts {
+        if account.id.trim().is_empty() || !returned_ids.insert(account.reference()) {
+            return Err(
+                "SimpleFIN returned missing or duplicate account IDs. Nothing was imported.".into(),
+            );
+        }
+    }
+    let checked_at = chrono::DateTime::parse_from_rfc3339(now)
+        .map_err(|e| e.to_string())?
+        .with_timezone(&chrono::Utc);
+    let mut state = health::load(&tx).map_err(|e| e.to_string())?;
+    state.response(account_set, checked_at);
+    let mut holdings_synced = 0;
+    let mut transactions_synced = 0;
+    for target in &plan.targets {
+        let expected = remotes
+            .iter()
+            .find(|a| a.remote_id == target.remote_id)
+            .ok_or("The selected account is missing from the reviewed catalog.")?;
+        let account = account_set
+            .accounts
+            .iter()
+            .find(|a| matches_remote(a, expected))
+            .ok_or_else(|| {
+                format!(
+                    "SimpleFIN did not return a selected account. Nothing was imported. {}",
+                    account_set.errors.join(" ")
+                )
+            })?;
+        if !account
+            .currency
+            .trim()
+            .eq_ignore_ascii_case(expected.currency.as_deref().unwrap_or(""))
+        {
+            return Err("SimpleFIN changed an account's reported currency during sync. Nothing was imported; review accounts again.".into());
+        }
+        tx.execute(
+            "UPDATE account_sync_selections SET connection_id = ?1 \
+             WHERE provider = 'simplefin' AND remote_id = ?2 AND connection_id IS NULL",
+            params![expected.connection_id, target.remote_id],
+        )
+        .map_err(|e| e.to_string())?;
+        let failed = health::account_data_failed(account_set, account);
+        let mut safe_account = account.clone();
+        if failed {
+            safe_account.balance = None;
+            safe_account.holdings_reported = false;
+        }
+        write_balance_snapshot(
+            &tx,
+            target.account_id,
+            &target.currency,
+            &safe_account,
+            today,
+            now,
+        )
+        .map_err(|e| e.to_string())?;
+        if account.holdings_reported && !failed {
+            holdings_synced +=
+                replace_holdings(&tx, target.account_id, account, &target.currency, now)
+                    .map_err(|e| e.to_string())?;
+        }
+        transactions_synced += reconcile_transactions(
+            &tx,
+            target.account_id,
+            &account.transactions,
+            &target.currency,
+            today,
+        )
+        .map_err(|e| e.to_string())?;
+        state.record_account(target.account_id, &safe_account, checked_at);
+    }
+    reconcile_aggregated_questrade_accounts(&tx).map_err(|e| e.to_string())?;
+    set_setting(&tx, SETTING_LAST_SYNCED, now).map_err(|e| e.to_string())?;
+    state.finish_response();
+    health::save(&tx, &state).map_err(|e| e.to_string())?;
+    tx.commit().map_err(|e| e.to_string())?;
+    Ok(SimpleFinSyncSummary {
+        accounts_synced: plan.targets.len(),
+        holdings_synced,
+        transactions_synced,
+        synced_at: Some(now.to_string()),
+        accounts_needing_review: plan.accounts_needing_review,
+        warnings: account_set.errors.clone(),
+        skipped: false,
+    })
+}
+
+fn require_available_selection(
+    conn: &Connection,
+    plan: &SyncPlan,
+    catalog: &SimpleFinAccountSet,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Result<(), String> {
+    let Err(mut message) = plan.require_selected() else {
+        return Ok(());
+    };
+    let mut state = health::load(conn).map_err(|e| e.to_string())?;
+    if account_selection::active_count(conn, Provider::SimpleFin)? > 0 {
+        message = "SimpleFIN did not return any of the selected accounts. Saved balances were kept. Review connection health and account choices.".into();
+        state.response(catalog, now);
+    }
+    if !catalog.errors.is_empty() {
+        message = format!("{message} {}", catalog.errors.join(" "));
+    }
+    state.last_error = Some(message.clone());
+    health::save(conn, &state)
+        .map_err(|e| format!("{message} Could not save connection status: {e}"))?;
+    Err(message)
+}
+
 #[tauri::command]
 pub async fn simplefin_sync(
     db: State<'_, AppDb>,
@@ -390,11 +607,8 @@ pub async fn simplefin_sync(
     automatic: Option<bool>,
 ) -> Result<SimpleFinSyncSummary, String> {
     let _guard = sync.0.lock().await;
-    let access_url = secrets::get_secret(SIMPLEFIN_ACCESS_URL)
-        .map_err(|e| e.to_string())?
-        .ok_or("Connect SimpleFIN before syncing.")?;
-
-    let mut state = {
+    let url = access_url()?;
+    {
         let conn = db.0.lock().map_err(|e| e.to_string())?;
         let mut state = health::load(&conn).map_err(|e| e.to_string())?;
         if !state.reserve(chrono::Utc::now(), automatic.unwrap_or(false))? {
@@ -402,90 +616,60 @@ pub async fn simplefin_sync(
                 accounts_synced: 0,
                 holdings_synced: 0,
                 transactions_synced: 0,
+                accounts_needing_review: 0,
                 synced_at: state.last_response_at.clone(),
                 warnings: state.messages(),
                 skipped: true,
             });
         }
         health::save(&conn, &state).map_err(|e| e.to_string())?;
-        state
-    };
-    let fetched = async { SimpleFinClient::new(access_url)?.fetch_accounts().await }.await;
-    let account_set: SimpleFinAccountSet = match fetched {
-        Ok(data) => data,
-        Err(error) => {
-            state.app_auth_required |= error.is_auth();
-            let message = friendly(error);
-            state.last_error = Some(message.clone());
-            let conn = db.0.lock().map_err(|e| e.to_string())?;
-            health::save(&conn, &state)
-                .map_err(|e| format!("{message} Could not save connection status: {e}"))?;
-            return Err(message);
-        }
-    };
-
-    let checked_at = chrono::Utc::now();
-    let now = health::stamp(checked_at);
-    let today = checked_at.format("%Y-%m-%d").to_string();
-
-    let mut accounts_synced = 0usize;
-    let mut holdings_synced = 0usize;
-    let mut transactions_synced = 0usize;
-
-    let reconciled = (|| -> Result<(), String> {
-        let mut conn = db.0.lock().map_err(|e| e.to_string())?;
-        let tx = conn.transaction().map_err(|e| e.to_string())?;
-        state.response(&account_set, checked_at);
-
-        for account in &account_set.accounts {
-            let failed = health::account_data_failed(&account_set, account);
-            let mut safe_account = account.clone();
-            if failed {
-                safe_account.balance = None;
-                safe_account.holdings_reported = false;
-            }
-            let account_id =
-                upsert_account(&tx, &safe_account, &today, &now).map_err(|e| e.to_string())?;
-            accounts_synced += 1;
-            if account.holdings_reported && !failed {
-                holdings_synced +=
-                    replace_holdings(&tx, account_id, account, &now).map_err(|e| e.to_string())?;
-            }
-            transactions_synced += reconcile_transactions(
-                &tx,
-                account_id,
-                &account.transactions,
-                &account.currency,
-                &today,
-            )
-            .map_err(|e| e.to_string())?;
-            state.record_account(account_id, &safe_account, checked_at);
-        }
-
-        reconcile_aggregated_questrade_accounts(&tx).map_err(|e| e.to_string())?;
-        set_setting(&tx, SETTING_LAST_SYNCED, &now).map_err(|e| e.to_string())?;
-        state.finish_response();
-        health::save(&tx, &state).map_err(|e| e.to_string())?;
-        tx.commit().map_err(|e| e.to_string())?;
-        Ok(())
-    })();
-    if let Err(message) = reconciled {
-        let conn = db.0.lock().map_err(|e| e.to_string())?;
-        let mut failed = health::load(&conn).map_err(|e| e.to_string())?;
-        failed.last_error = Some(format!("Could not import SimpleFIN data: {message}"));
-        health::save(&conn, &failed)
-            .map_err(|e| format!("{message} Could not save connection status: {e}"))?;
-        return Err(message);
     }
-
-    Ok(SimpleFinSyncSummary {
-        accounts_synced,
-        holdings_synced,
-        transactions_synced,
-        synced_at: Some(now),
-        warnings: account_set.errors,
-        skipped: false,
-    })
+    let client = SimpleFinClient::new(&url).map_err(|e| record_provider_failure(&db, e))?;
+    let catalog = fetch_catalog(&db, &url).await?;
+    let (remotes, plan) = {
+        let conn = db.0.lock().map_err(|e| e.to_string())?;
+        check_connection(&url)?;
+        let remotes = review_accounts(&conn, &catalog.accounts)?;
+        let plan = account_selection::plan_sync(&conn, Provider::SimpleFin, &remotes)?;
+        require_available_selection(&conn, &plan, &catalog, chrono::Utc::now())?;
+        (remotes, plan)
+    };
+    let ids: Vec<&str> = catalog
+        .accounts
+        .iter()
+        .zip(&remotes)
+        .filter(|(_, remote)| plan.targets.iter().any(|t| t.remote_id == remote.remote_id))
+        .map(|(account, _)| account.id.as_str())
+        .collect();
+    reserve_request(&db)?;
+    let mut account_set = client
+        .fetch_accounts(&ids)
+        .await
+        .map_err(|e| record_provider_failure(&db, e))?;
+    for warning in &catalog.errors {
+        if !account_set.errors.contains(warning) {
+            account_set.errors.push(warning.clone());
+        }
+    }
+    for issue in &catalog.issues {
+        if !account_set.issues.contains(issue) {
+            account_set.issues.push(issue.clone());
+        }
+    }
+    let now = chrono::Utc::now();
+    let result = {
+        let mut conn = db.0.lock().map_err(|e| e.to_string())?;
+        check_connection(&url)?;
+        apply_sync(
+            &mut conn,
+            &remotes,
+            &plan,
+            &account_set,
+            &now.format("%Y-%m-%d").to_string(),
+            &health::stamp(now),
+        )
+    };
+    result.map_err(|message| record_failure(&db, message, false))
 }
 
 /// Disconnect SimpleFIN: remove the stored access URL, clear the last-synced marker, and
@@ -498,18 +682,15 @@ pub async fn simplefin_disconnect(
     let _guard = sync.0.lock().await;
     secrets::delete_secret(SIMPLEFIN_ACCESS_URL).map_err(|e| e.to_string())?;
     {
-        let conn = db.0.lock().map_err(|e| e.to_string())?;
-        delete_setting(&conn, SETTING_LAST_SYNCED).map_err(|e| e.to_string())?;
-        let mut state = health::load(&conn).map_err(|e| e.to_string())?;
+        let mut conn = db.0.lock().map_err(|e| e.to_string())?;
+        let tx = conn.transaction().map_err(|e| e.to_string())?;
+        delete_setting(&tx, SETTING_LAST_SYNCED).map_err(|e| e.to_string())?;
+        account_selection::pause_provider(&tx, Provider::SimpleFin)?;
+        let mut state = health::load(&tx).map_err(|e| e.to_string())?;
         state.app_auth_required = false;
         state.last_error = None;
-        health::save(&conn, &state).map_err(|e| e.to_string())?;
-        conn.execute(
-            "UPDATE accounts SET is_active = 0, updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') \
-             WHERE connector_kind = 'simplefin'",
-            [],
-        )
-        .map_err(|e| e.to_string())?;
+        health::save(&tx, &state).map_err(|e| e.to_string())?;
+        tx.commit().map_err(|e| e.to_string())?;
     }
 
     simplefin_get_status(db)
@@ -518,6 +699,47 @@ pub async fn simplefin_disconnect(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::commands::accounts::aggregated_account_jurisdiction;
+
+    fn select_account(conn: &mut Connection, account: &SimpleFinAccount) {
+        let remotes = review_accounts(conn, std::slice::from_ref(account)).unwrap();
+        let review = account_selection::discover(conn, Provider::SimpleFin, &remotes).unwrap();
+        account_selection::save_choices(
+            conn,
+            Provider::SimpleFin,
+            &remotes,
+            &SaveAccountChoices {
+                revision: review.revision,
+                choices: vec![account_selection::AccountChoice::Create {
+                    remote_id: remotes[0].remote_id.clone(),
+                }],
+            },
+        )
+        .unwrap();
+    }
+
+    fn sync_account(
+        conn: &mut Connection,
+        account: &SimpleFinAccount,
+        today: &str,
+        now: &str,
+    ) -> i64 {
+        let remotes = review_accounts(conn, std::slice::from_ref(account)).unwrap();
+        let plan = account_selection::plan_sync(conn, Provider::SimpleFin, &remotes).unwrap();
+        apply_sync(
+            conn,
+            &remotes,
+            &plan,
+            &SimpleFinAccountSet {
+                accounts: vec![account.clone()],
+                ..Default::default()
+            },
+            today,
+            now,
+        )
+        .unwrap();
+        plan.targets[0].account_id
+    }
 
     #[test]
     fn maps_account_types_from_name_and_holdings() {
@@ -567,6 +789,7 @@ mod tests {
         SimpleFinAccount {
             id: "act-1".into(),
             name: "Self-Directed Brokerage".into(),
+            number: None,
             currency: "USD".into(),
             balance: Some(1000.0),
             balance_date: Some(1_735_689_600),
@@ -586,12 +809,20 @@ mod tests {
 
     #[test]
     fn reconcile_inserts_then_updates_by_connector_ref() {
-        let conn = Connection::open_in_memory().unwrap();
+        let mut conn = Connection::open_in_memory().unwrap();
         crate::db::apply_schema(&conn).unwrap();
 
         let account = brokerage_account();
-        let id = upsert_account(&conn, &account, "2025-01-01", "2025-01-01T00:00:00Z").unwrap();
-        let holdings = replace_holdings(&conn, id, &account, "2025-01-01T00:00:00Z").unwrap();
+        select_account(&mut conn, &account);
+        let id = sync_account(&mut conn, &account, "2025-01-01", "2025-01-01T00:00:00Z");
+        let holdings = replace_holdings(
+            &conn,
+            id,
+            &account,
+            &account.currency,
+            "2025-01-01T00:00:00Z",
+        )
+        .unwrap();
         assert_eq!(holdings, 1);
 
         // The account is created with the brokerage type and SimpleFIN connector metadata.
@@ -627,8 +858,15 @@ mod tests {
         let mut updated = brokerage_account();
         updated.balance = Some(1200.0);
         updated.holdings.clear();
-        let id2 = upsert_account(&conn, &updated, "2025-01-01", "2025-01-02T00:00:00Z").unwrap();
-        let holdings2 = replace_holdings(&conn, id2, &updated, "2025-01-02T00:00:00Z").unwrap();
+        let id2 = sync_account(&mut conn, &updated, "2025-01-01", "2025-01-02T00:00:00Z");
+        let holdings2 = replace_holdings(
+            &conn,
+            id2,
+            &updated,
+            &updated.currency,
+            "2025-01-02T00:00:00Z",
+        )
+        .unwrap();
         assert_eq!(id2, id);
         assert_eq!(holdings2, 0);
 
@@ -658,6 +896,7 @@ mod tests {
         SimpleFinAccount {
             id: "act-9".into(),
             name: "Everyday Chequing".into(),
+            number: None,
             currency: "CAD".into(),
             balance: Some(500.0),
             balance_date: Some(1_735_689_600),
@@ -709,6 +948,7 @@ mod tests {
         SimpleFinAccount {
             id: "cc-scotia".into(),
             name: "Scotiabank Visa".into(),
+            number: None,
             currency: "CAD".into(),
             balance: Some(-1234.56),
             balance_date,
@@ -722,12 +962,13 @@ mod tests {
 
     #[test]
     fn files_balance_snapshot_under_simplefin_balance_date() {
-        let conn = Connection::open_in_memory().unwrap();
+        let mut conn = Connection::open_in_memory().unwrap();
         crate::db::apply_schema(&conn).unwrap();
 
         // SimpleFIN reports the card's balance as of 2023-11-14 (epoch 1_700_000_000).
         let card = stale_credit_card(Some(1_700_000_000));
-        let id = upsert_account(&conn, &card, "2025-07-01", "2025-07-01T00:00:00Z").unwrap();
+        select_account(&mut conn, &card);
+        let id = sync_account(&mut conn, &card, "2025-07-01", "2025-07-01T00:00:00Z");
 
         // The snapshot is filed under the reported balance-date, not "today".
         let (date, balance): (String, f64) = conn
@@ -743,7 +984,7 @@ mod tests {
         // Re-syncing days later with the SAME stale balance-date rewrites that same dated row —
         // it must NOT mint a fresh "today" snapshot, which is what used to hide the stall and make
         // the balance look current while it hadn't actually moved in weeks.
-        upsert_account(&conn, &card, "2025-07-05", "2025-07-05T00:00:00Z").unwrap();
+        sync_account(&mut conn, &card, "2025-07-05", "2025-07-05T00:00:00Z");
         let rows: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM balance_snapshots WHERE account_id = ?1",
@@ -765,11 +1006,12 @@ mod tests {
 
     #[test]
     fn balance_snapshot_without_balance_date_does_not_look_fresh() {
-        let conn = Connection::open_in_memory().unwrap();
+        let mut conn = Connection::open_in_memory().unwrap();
         crate::db::apply_schema(&conn).unwrap();
 
         let card = stale_credit_card(None);
-        let id = upsert_account(&conn, &card, "2025-07-01", "2025-07-01T00:00:00Z").unwrap();
+        select_account(&mut conn, &card);
+        let id = sync_account(&mut conn, &card, "2025-07-01", "2025-07-01T00:00:00Z");
         let count: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM balance_snapshots WHERE account_id = ?1",
@@ -782,17 +1024,17 @@ mod tests {
 
     #[test]
     fn scoped_ids_migrate_existing_accounts_without_losing_history_or_currency_overrides() {
-        let conn = Connection::open_in_memory().unwrap();
+        let mut conn = Connection::open_in_memory().unwrap();
         crate::db::apply_schema(&conn).unwrap();
         let mut account = brokerage_account();
-        let id = upsert_account(&conn, &account, "2025-01-01", "2025-01-01T00:00:00Z").unwrap();
+        select_account(&mut conn, &account);
+        let id = sync_account(&mut conn, &account, "2025-01-01", "2025-01-01T00:00:00Z");
         conn.execute("UPDATE accounts SET currency = 'JMD' WHERE id = ?1", [id])
             .unwrap();
         account.connection_id = Some("personal".into());
         account.holdings_reported = false;
         account.holdings.clear();
-        let migrated =
-            upsert_account(&conn, &account, "2025-01-01", "2025-01-01T00:00:00Z").unwrap();
+        let migrated = sync_account(&mut conn, &account, "2025-01-01", "2025-01-01T00:00:00Z");
         assert_eq!(migrated, id);
         let (currency, kind): (String, String) = conn
             .query_row(
@@ -804,21 +1046,30 @@ mod tests {
         assert_eq!(currency, "JMD");
         assert_eq!(kind, "brokerage");
         account.connection_id = Some("joint".into());
+        let remotes = review_accounts(&conn, std::slice::from_ref(&account)).unwrap();
+        assert!(
+            account_selection::plan_sync(&conn, Provider::SimpleFin, &remotes)
+                .unwrap()
+                .targets
+                .is_empty()
+        );
+        select_account(&mut conn, &account);
         assert_ne!(
-            upsert_account(&conn, &account, "2025-01-01", "2025-01-01T00:00:00Z").unwrap(),
+            sync_account(&mut conn, &account, "2025-01-01", "2025-01-01T00:00:00Z"),
             id
         );
     }
 
     #[test]
     fn health_stays_stale_after_a_cached_sync_and_missing_accounts_keep_their_balance() {
-        let conn = Connection::open_in_memory().unwrap();
+        let mut conn = Connection::open_in_memory().unwrap();
         crate::db::apply_schema(&conn).unwrap();
         let checked = chrono::DateTime::parse_from_rfc3339("2025-01-03T00:00:00Z")
             .unwrap()
             .with_timezone(&chrono::Utc);
         let account = brokerage_account();
-        let id = upsert_account(&conn, &account, "2025-01-03", &health::stamp(checked)).unwrap();
+        select_account(&mut conn, &account);
+        let id = sync_account(&mut conn, &account, "2025-01-03", &health::stamp(checked));
         let mut state = health::load(&conn).unwrap();
         let data = SimpleFinAccountSet {
             accounts: vec![account.clone()],
@@ -841,7 +1092,7 @@ mod tests {
         let mut older = account.clone();
         older.balance = Some(99_999.0);
         older.balance_date = Some(1_735_689_599);
-        upsert_account(&conn, &older, "2025-01-03", &health::stamp(checked)).unwrap();
+        sync_account(&mut conn, &older, "2025-01-03", &health::stamp(checked));
         let balance: f64 = conn
             .query_row(
                 "SELECT balance FROM balance_snapshots WHERE account_id = ?1",
@@ -862,11 +1113,12 @@ mod tests {
 
     #[test]
     fn reconcile_transactions_dedups_and_preserves_user_tags() {
-        let conn = Connection::open_in_memory().unwrap();
+        let mut conn = Connection::open_in_memory().unwrap();
         crate::db::apply_schema(&conn).unwrap();
 
         let account = account_with_transactions();
-        let id = upsert_account(&conn, &account, "2025-01-01", "2025-01-01T00:00:00Z").unwrap();
+        select_account(&mut conn, &account);
+        let id = sync_account(&mut conn, &account, "2025-01-01", "2025-01-01T00:00:00Z");
         let n = reconcile_transactions(
             &conn,
             id,
@@ -931,7 +1183,7 @@ mod tests {
 
     #[test]
     fn reconcile_preserves_a_user_corrected_currency() {
-        let conn = Connection::open_in_memory().unwrap();
+        let mut conn = Connection::open_in_memory().unwrap();
         crate::db::apply_schema(&conn).unwrap();
 
         // First sync: SimpleFIN mislabels this Jamaican account as CAD.
@@ -940,7 +1192,8 @@ mod tests {
         account.currency = "CAD".into();
         account.balance = Some(75000.0);
         account.holdings.clear();
-        let id = upsert_account(&conn, &account, "2025-01-01", "2025-01-01T00:00:00Z").unwrap();
+        select_account(&mut conn, &account);
+        let id = sync_account(&mut conn, &account, "2025-01-01", "2025-01-01T00:00:00Z");
 
         // The user corrects it to JMD (as `update_account_currency` would).
         conn.execute(
@@ -952,7 +1205,7 @@ mod tests {
         // A later sync still reports CAD, but the correction must stick and the new snapshot
         // must inherit the stored JMD currency.
         account.balance_date = Some(1_735_776_000);
-        let id2 = upsert_account(&conn, &account, "2025-01-02", "2025-01-02T00:00:00Z").unwrap();
+        let id2 = sync_account(&mut conn, &account, "2025-01-02", "2025-01-02T00:00:00Z");
         assert_eq!(id2, id);
 
         let currency: String = conn
@@ -987,5 +1240,192 @@ mod tests {
         );
         delete_setting(&conn, SETTING_LAST_SYNCED).unwrap();
         assert_eq!(get_setting(&conn, SETTING_LAST_SYNCED).unwrap(), None);
+    }
+
+    #[test]
+    fn scoped_account_ids_select_independently_and_keep_exclusions() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        crate::db::apply_schema(&conn).unwrap();
+        let mut personal = brokerage_account();
+        personal.connection_id = Some("personal".into());
+        let mut joint = personal.clone();
+        joint.connection_id = Some("joint".into());
+        let accounts = vec![personal.clone(), joint.clone()];
+        let remotes = review_accounts(&conn, &accounts).unwrap();
+        let revision = account_selection::discover(&conn, Provider::SimpleFin, &remotes)
+            .unwrap()
+            .revision;
+        account_selection::save_choices(
+            &mut conn,
+            Provider::SimpleFin,
+            &remotes,
+            &SaveAccountChoices {
+                revision,
+                choices: vec![
+                    account_selection::AccountChoice::Create {
+                        remote_id: personal.reference(),
+                    },
+                    account_selection::AccountChoice::Ignore {
+                        remote_id: joint.reference(),
+                    },
+                ],
+            },
+        )
+        .unwrap();
+        let plan = account_selection::plan_sync(&conn, Provider::SimpleFin, &remotes).unwrap();
+        assert_eq!(plan.targets.len(), 1);
+        let result = apply_sync(
+            &mut conn,
+            &remotes,
+            &plan,
+            &SimpleFinAccountSet {
+                accounts,
+                ..Default::default()
+            },
+            "2025-01-01",
+            "2025-01-01T00:00:00Z",
+        )
+        .unwrap();
+        assert_eq!(result.accounts_synced, 1);
+        assert_eq!(
+            conn.query_row("SELECT COUNT(*) FROM accounts", [], |r| r.get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
+        assert_eq!(plan.targets[0].remote_id, personal.reference());
+    }
+
+    #[test]
+    fn legacy_ignore_is_not_bypassed_by_scoped_ids_and_ambiguous_ids_are_rejected() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        crate::db::apply_schema(&conn).unwrap();
+        let mut account = brokerage_account();
+        select_account(&mut conn, &account);
+        let id = sync_account(&mut conn, &account, "2025-01-01", "2025-01-01T00:00:00Z");
+        account_selection::deactivate_account(&mut conn, id).unwrap();
+        account.connection_id = Some("personal".into());
+        let remotes = review_accounts(&conn, std::slice::from_ref(&account)).unwrap();
+        assert!(
+            account_selection::plan_sync(&conn, Provider::SimpleFin, &remotes)
+                .unwrap()
+                .targets
+                .is_empty()
+        );
+        let mut joint = account.clone();
+        joint.connection_id = Some("joint".into());
+        assert!(review_accounts(&conn, &[account, joint])
+            .unwrap_err()
+            .contains("multiple bank"));
+    }
+
+    #[test]
+    fn failed_connection_preserves_its_balance_and_holdings_without_poisoning_other_accounts() {
+        use crate::connector::simplefin::SimpleFinIssue;
+        let mut conn = Connection::open_in_memory().unwrap();
+        crate::db::apply_schema(&conn).unwrap();
+        let mut first = brokerage_account();
+        first.connection_id = Some("a".into());
+        let mut second = first.clone();
+        second.connection_id = Some("b".into());
+        select_account(&mut conn, &first);
+        select_account(&mut conn, &second);
+        let id = sync_account(&mut conn, &first, "2025-01-01", "2025-01-01T00:00:00Z");
+        let id2 = sync_account(&mut conn, &second, "2025-01-01", "2025-01-01T00:00:00Z");
+        first.balance = Some(99999.0);
+        first.holdings.clear();
+        second.balance = Some(2000.0);
+        second.holdings_reported = false;
+        second.holdings.clear();
+        let data = SimpleFinAccountSet {
+            accounts: vec![first, second],
+            errors: vec!["Approve bank A".into()],
+            issues: vec![SimpleFinIssue {
+                code: "con.auth".into(),
+                msg: "Approve bank A".into(),
+                conn_id: Some("a".into()),
+                account_id: None,
+            }],
+            ..Default::default()
+        };
+        let remotes = review_accounts(&conn, &data.accounts).unwrap();
+        let plan = account_selection::plan_sync(&conn, Provider::SimpleFin, &remotes).unwrap();
+        let summary = apply_sync(
+            &mut conn,
+            &remotes,
+            &plan,
+            &data,
+            "2025-01-01",
+            "2025-01-01T01:00:00Z",
+        )
+        .unwrap();
+        assert_eq!(summary.holdings_synced, 0);
+        assert_eq!(summary.warnings, ["Approve bank A"]);
+        let balance = |id| {
+            conn.query_row(
+                "SELECT balance FROM balance_snapshots WHERE account_id = ?1",
+                [id],
+                |r| r.get::<_, f64>(0),
+            )
+            .unwrap()
+        };
+        assert_eq!(balance(id), 1000.0);
+        assert_eq!(balance(id2), 2000.0);
+        assert_eq!(
+            conn.query_row("SELECT COUNT(*) FROM holdings", [], |r| r.get::<_, i64>(0))
+                .unwrap(),
+            2
+        );
+        let now = chrono::DateTime::parse_from_rfc3339("2025-01-01T01:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        let banks = health::load(&conn)
+            .unwrap()
+            .connections(&conn, true, now)
+            .unwrap();
+        assert_eq!(
+            banks.iter().find(|b| b.id == "a").unwrap().status,
+            health::BalanceStatus::ReauthRequired
+        );
+        assert_eq!(
+            banks.iter().find(|b| b.id == "b").unwrap().status,
+            health::BalanceStatus::Current
+        );
+        account_selection::deactivate_account(&mut conn, id).unwrap();
+        let banks = health::load(&conn)
+            .unwrap()
+            .connections(&conn, true, now)
+            .unwrap();
+        assert_eq!(banks.len(), 1);
+        assert_eq!(banks[0].id, "b");
+    }
+
+    #[test]
+    fn missing_all_selected_accounts_records_missing_health_without_successful_sync() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        crate::db::apply_schema(&conn).unwrap();
+        let account = brokerage_account();
+        select_account(&mut conn, &account);
+        sync_account(&mut conn, &account, "2025-01-01", "2025-01-01T00:00:00Z");
+        let now = chrono::DateTime::parse_from_rfc3339("2025-01-01T01:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        let plan = account_selection::plan_sync(&conn, Provider::SimpleFin, &[]).unwrap();
+        assert!(
+            require_available_selection(&conn, &plan, &SimpleFinAccountSet::default(), now)
+                .unwrap_err()
+                .contains("did not return any")
+        );
+        assert_eq!(
+            get_setting(&conn, SETTING_LAST_SYNCED).unwrap().as_deref(),
+            Some("2025-01-01T00:00:00Z")
+        );
+        assert_eq!(
+            health::load(&conn)
+                .unwrap()
+                .connections(&conn, true, now)
+                .unwrap()[0]
+                .status,
+            health::BalanceStatus::Missing
+        );
     }
 }

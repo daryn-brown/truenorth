@@ -104,6 +104,8 @@ Setup lives in [`docs/snaptrade.md`](docs/snaptrade.md), [`docs/simplefin.md`](d
   (one ~$15/yr connector covers Chase + Bask + Scotiabank) or **Teller** (free, US banks),
   **Questrade** via its own free API (full cash + equity, under the **Direct** tab), plus
   **manual/CSV** fallback.
+- **Choose accounts to sync** for SnapTrade and SimpleFIN: explicit Create / Link / Ignore,
+  durable exclusions, and safe source switches that retain account history without auto-merging.
 - **Multi-currency net worth** — any account currency converted into USD + CAD totals — with history chart + dashboard.
 - **Native Mac net-worth widget** in signed macOS 14+ builds, with opt-in local sharing.
 - **Yearly dividend income** from connected holdings plus trailing distribution research, alongside

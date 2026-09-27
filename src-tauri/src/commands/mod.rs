@@ -1,4 +1,5 @@
 pub mod accounts;
+pub(crate) mod account_selection;
 pub mod ai;
 pub mod cashflow;
 pub mod dividends;

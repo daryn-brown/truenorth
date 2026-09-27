@@ -1,7 +1,7 @@
 {
   "name": "truenorth",
   "private": true,
-  "version": "1.14.0",
+  "version": "1.15.0",
   "description": "Cross-border personal finance product with a public web surface and local-first desktop app.",
   "type": "module",
   "scripts": {
@@ -14,6 +14,7 @@
     "build:desktop:widget": "node scripts/macos-widget.mjs build",
     "test:net-worth": "node --test scripts/readme-preview/net-worth.test.mjs",
     "test:widget": "node --test scripts/macos-widget.test.mjs",
+    "test:account-sync": "node scripts/account-sync.test.mjs",
     "check:widget:native": "node scripts/macos-widget.mjs check",
     "preview:readme": "vite --host 127.0.0.1 --port 1422",
     "screenshots:readme": "node scripts/readme-preview/capture.mjs",

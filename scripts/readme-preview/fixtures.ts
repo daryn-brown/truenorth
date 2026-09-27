@@ -197,12 +197,12 @@ const ai: AiSettings = {
 
 export const responses: Record<string, unknown> = {
   simplefin_get_status: simplefinStatus,
-  simplefin_sync: { accounts_synced: 2, holdings_synced: 0, transactions_synced: 12, synced_at: timestamp, warnings: [], skipped: false },
+  simplefin_sync: { accounts_synced: 2, holdings_synced: 0, transactions_synced: 12, synced_at: timestamp, warnings: [], skipped: false, accounts_needing_review: 0 },
   snaptrade_get_status: {
     has_credentials: true, is_connected: true, is_personal: false, client_id: "DEMO",
     last_synced_at: timestamp, account_count: 2,
   },
-  snaptrade_sync: { accounts_synced: 2, holdings_synced: 8, synced_at: timestamp },
+  snaptrade_sync: { accounts_synced: 2, holdings_synced: 8, synced_at: timestamp, accounts_needing_review: 0 },
   questrade_get_status: { is_connected: true, last_synced_at: timestamp, account_count: 1 },
   questrade_sync: { accounts_synced: 1, holdings_synced: 3, duplicates_hidden: 0, synced_at: timestamp },
   teller_get_status: {

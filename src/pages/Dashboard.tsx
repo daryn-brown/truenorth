@@ -65,6 +65,8 @@ import NetWorthChart from "../components/NetWorthChart";
 import DesktopIcon from "../apps/desktop/DesktopIcon";
 import BrandMark from "../shared/BrandMark";
 import MacWidgetModal from "../components/MacWidgetModal";
+import ConfirmationDialog from "../components/ConfirmationDialog";
+import { ACCOUNT_TYPE_LABELS, CONNECTOR_LABELS } from "../shared/accountLabels";
 
 type ModalState =
   | { open: false }
@@ -93,6 +95,9 @@ export default function Dashboard({
   const [history, setHistory] = useState<NetWorthHistoryPoint[]>([]);
   const [homeCurrency, setHomeCurrency] = useState<Currency>("CAD");
   const [loading, setLoading] = useState(true);
+  const [accountToDelete, setAccountToDelete] = useState<Account | null>(null);
+  const [deleting, setDeleting] = useState(false);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
   const [modal, setModal] = useState<ModalState>({ open: false });
   const [importOpen, setImportOpen] = useState(false);
   const [connectOpen, setConnectOpen] = useState(false);
@@ -165,8 +170,9 @@ export default function Dashboard({
     }
   }, []);
 
-  const load = useCallback(async () => {
+  const load = useCallback(async (completedAction?: string) => {
     setLoading(true);
+    setLoadError(null);
     try {
       void refreshConnectionHealth();
       // Keep conversions current without a manual click: refresh FX at most once per day. This is
@@ -201,7 +207,7 @@ export default function Dashboard({
       setLoadError(null);
     } catch (err) {
       console.error("Failed to load dashboard data:", err);
-      setLoadError(`Could not reload the dashboard. Shown figures may be out of date: ${String(err)}`);
+      setLoadError(`${completedAction ? `${completedAction} ` : ""}Could not refresh dashboard data. Shown figures may be out of date: ${String(err)}`);
     } finally {
       setLoading(false);
       await refreshWidget();
@@ -222,10 +228,19 @@ export default function Dashboard({
     await load();
   };
 
-  const handleDeleteAccount = async (id: number) => {
-    if (!confirm("Delete this account and all its snapshots?")) return;
-    await deleteAccount(id);
-    await load();
+  const handleDeleteAccount = async (account: Account) => {
+    setDeleting(true);
+    setDeleteError(null);
+    try {
+      await deleteAccount(account.id);
+      setAccounts((current) => current.filter((a) => a.id !== account.id));
+      await load(`Account "${account.name}" was hidden successfully. Its stored history was retained.`);
+      setAccountToDelete(null);
+    } catch (err) {
+      setDeleteError(`Could not delete account: ${String(err)}`);
+    } finally {
+      setDeleting(false);
+    }
   };
 
   const handleRefreshFx = async () => {
@@ -288,7 +303,7 @@ export default function Dashboard({
     const providers: {
       name: string;
       status: () => Promise<{ is_connected: boolean }>;
-      sync: () => Promise<{ accounts_synced: number; warnings?: string[] }>;
+      sync: () => Promise<{ accounts_synced: number; warnings?: string[]; accounts_needing_review?: number; skipped?: boolean }>;
     }[] = [
       { name: "SimpleFIN", status: simplefinGetStatus, sync: simplefinSync },
       { name: "SnapTrade", status: snaptradeGetStatus, sync: snaptradeSync },
@@ -301,9 +316,13 @@ export default function Dashboard({
           if (!(await provider.status()).is_connected) return;
           connected += 1;
           const result = await provider.sync();
+          if (result.skipped) return;
           synced += result.accounts_synced;
           succeeded += 1;
           problems.push(...(result.warnings ?? []).map((message) => `${provider.name}: ${message}`));
+          if (result.accounts_needing_review) {
+            problems.push(`${provider.name}: ${result.accounts_needing_review} new account(s) need review. They were not imported. Open Choose accounts to sync.`);
+          }
         } catch (err) {
           problems.push(`${provider.name}: ${String(err)}`);
         }
@@ -335,7 +354,13 @@ export default function Dashboard({
       setSyncing(true);
       try {
         const result = await simplefinSync(true);
-        if (!result.skipped) await handleConnectorChanged();
+        if (!result.skipped) {
+          if (result.accounts_needing_review) {
+            setSyncNotice(`SimpleFIN: ${result.accounts_needing_review} new account(s) need review. They were not imported. Open Choose accounts to sync.`);
+          }
+          if (result.warnings.length) setSyncError(result.warnings.join("\n"));
+          await handleConnectorChanged();
+        }
       } catch (err) {
         setSyncError(`SimpleFIN: ${String(err)}`);
       } finally {
@@ -507,7 +532,14 @@ export default function Dashboard({
             </div>
           </section>
 
-          {loadError && <div role="alert" className="desktop-alert desktop-alert--error">{loadError}</div>}
+          {loadError && (
+            <div role="alert" className="desktop-alert desktop-alert--error">
+              {loadError}
+              <button type="button" className="desktop-action" disabled={loading} onClick={() => void load()}>
+                Retry refresh
+              </button>
+            </div>
+          )}
           {(syncError || healthError) && (
             <div role="alert" className="desktop-alert desktop-alert--error">
               <span className="whitespace-pre-wrap">{syncError ?? healthError}</span>{" "}
@@ -631,7 +663,10 @@ export default function Dashboard({
             netWorthBreakdown={netWorth?.accounts ?? []}
             homeCurrency={homeCurrency}
             onAddAccount={() => setModal({ open: true, mode: "add_account" })}
-            onDeleteAccount={handleDeleteAccount}
+            onDeleteAccount={(account) => {
+              setDeleteError(null);
+              setAccountToDelete(account);
+            }}
             onUpdateBalance={(account) =>
               setModal({ open: true, mode: "update_balance", account })
             }
@@ -652,7 +687,7 @@ export default function Dashboard({
         </main>
       </div>
 
-      {!connectOpen && !importOpen && !modal.open && !widgetOpen && (
+      {!connectOpen && !importOpen && !modal.open && !widgetOpen && !accountToDelete && (
         <button
           type="button"
           className="desktop-sync-fab"
@@ -674,6 +709,32 @@ export default function Dashboard({
           onAddAccount={handleAddAccount}
           onUpdateBalance={handleUpdateBalance}
         />
+      )}
+      {accountToDelete && (
+        <ConfirmationDialog
+          title="Delete account?"
+          confirmLabel="Delete account"
+          busy={deleting}
+          error={deleteError}
+          onConfirm={() => void handleDeleteAccount(accountToDelete)}
+          onCancel={() => setAccountToDelete(null)}
+        >
+          <p>
+            Hide <strong>{accountToDelete.name}</strong> at {accountToDelete.institution} from
+            accounts, net worth, and history charts? Stored snapshots and transactions are kept,
+            not erased.
+          </p>
+          <p>
+            {accountToDelete.currency} · {ACCOUNT_TYPE_LABELS[accountToDelete.account_type]} ·{" "}
+            {CONNECTOR_LABELS[accountToDelete.connector_kind]} · Local account #{accountToDelete.id}
+          </p>
+          {(accountToDelete.connector_kind === "snaptrade" || accountToDelete.connector_kind === "simplefin") && (
+            <p>
+              This provider account will also be excluded from future syncs. You can intentionally
+              resume it in Connect &gt; Choose accounts to sync.
+            </p>
+          )}
+        </ConfirmationDialog>
       )}
       {modal.open && modal.mode === "update_balance" && (
         <AccountModal

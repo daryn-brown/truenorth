@@ -13,6 +13,7 @@ import type {
 } from "../types/ai";
 import type {
   Account,
+  AccountSyncReview,
   AddAccountPayload,
   AddBalanceSnapshotPayload,
   CashflowSummary,
@@ -34,10 +35,12 @@ import type {
   QuestradeSyncSummary,
   SeattleAssumptions,
   SeattleProjection,
+  SaveAccountSyncChoices,
   SimpleFinStatus,
   SimpleFinSyncSummary,
   SnapTradeStatus,
   SnapTradeSyncSummary,
+  SyncProvider,
   TellerStatus,
   TellerSyncSummary,
   TxnRule,
@@ -166,6 +169,14 @@ export const importData = (payload: ImportPayload): Promise<ImportSummary> =>
   invoke("import_data", { payload });
 
 // --- SnapTrade (Phase 2) ---------------------------------------------------
+
+export const discoverSyncAccounts = (provider: SyncProvider): Promise<AccountSyncReview> =>
+  invoke(`${provider}_discover_accounts`);
+
+export const saveSyncAccountChoices = (
+  provider: SyncProvider,
+  payload: SaveAccountSyncChoices,
+): Promise<AccountSyncReview> => invoke(`${provider}_save_account_choices`, { payload });
 
 export const snaptradeGetStatus = (): Promise<SnapTradeStatus> =>
   invoke("snaptrade_get_status");
