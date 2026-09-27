@@ -64,12 +64,16 @@ For each **active** account Questrade reports, TrueNorth (in a single transactio
 The Questrade connector writes **only its own** balances and holdings
 (`connector_kind = 'questrade'`); it never overwrites aggregator history. To avoid double-counting,
 each Questrade sync also **hides any aggregator-managed account that points at Questrade** — i.e. an
-active SimpleFIN or SnapTrade account whose institution name contains "Questrade". These are the
+active SimpleFIN or SnapTrade account whose local or saved provider institution name contains
+"Questrade". Retaining the provider label separately lets an explicitly linked account keep its
+user-defined institution label without bypassing this rule. These are the
 redundant, often cash-only duplicates of the accounts you now sync directly. They're
 **soft-deleted** (marked inactive — your history is preserved), and the count is shown in the sync
 summary.
 Later SimpleFIN or SnapTrade syncs keep those duplicates inactive while a direct Questrade account
 remains active, so sync order cannot reintroduce double-counting.
+After disconnecting direct Questrade, aggregator accounts stay hidden until deliberately resumed
+in **Choose accounts to sync**. Saved Ignore/Delete choices are never reset by a sync.
 
 > **If a duplicate remains:** the automatic cleanup matches on the institution name reported by the
 > aggregator. If your SimpleFIN bridge labels the institution as something other than "Questrade",
