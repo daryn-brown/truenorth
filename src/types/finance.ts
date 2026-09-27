@@ -140,6 +140,8 @@ export interface NetWorth {
   total_cad: number;
   /** Per-account breakdown. */
   accounts: AccountNetWorth[];
+  /** Category totals from the same active accounts and FX rates as total net worth. */
+  allocation: NetWorthAllocation;
   /** The USD→CAD rate used (or null if unavailable). */
   usd_cad_rate: number | null;
   /** The CAD→USD rate used (or null if unavailable). */
@@ -160,6 +162,15 @@ export interface NetWorthHistoryPoint {
 export interface MoneyPair {
   usd: number;
   cad: number;
+}
+
+export interface NetWorthAllocation {
+  investments: MoneyPair;
+  savings: MoneyPair;
+  /** Positive means money owed; credit balances offset debt. */
+  liabilities: MoneyPair;
+  /** Assets without a recognized category remain in total wealth, not in cash savings. */
+  unclassified: MoneyPair;
 }
 
 /**

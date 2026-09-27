@@ -25,7 +25,16 @@ real account details, or credentials are included.
 
 ### Financial overview
 
-USD/CAD net worth, account allocation, progress toward goals, and balance-aligned cashflow.
+USD/CAD net worth, Investments / Savings / Liabilities totals, progress toward goals, and
+balance-aligned cashflow.
+
+The three wealth bubbles group all active accounts: **Investments** includes brokerages,
+stock plans, and retirement accounts (including Questrade, Robinhood, Morgan Stanley stock
+plans, and Sun Life); **Savings** is cash in chequing, savings, and other recognized cash
+accounts; **Liabilities** includes credit cards, loans, and any negative account balance.
+Debt is shown as a positive amount owed, with credit balances offsetting it. All groups use
+the selected USD/CAD currency and the same exchange rates as total wealth. Unclassified
+assets remain in total wealth and are called out separately rather than labeled as cash.
 
 ![TrueNorth financial overview with fictional USD and CAD accounts, net worth, goals, and cashflow](docs/screenshots/dashboard.png)
 

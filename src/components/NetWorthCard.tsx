@@ -18,7 +18,7 @@ const fmt = (value: number, currency: Currency) =>
 
 const fmtAbs = (value: number, currency: Currency) => fmt(Math.abs(value), currency);
 
-const fmtAny = (value: number, currency: string) =>
+const fmtWhole = (value: number, currency: Currency) =>
   new Intl.NumberFormat("en-CA", {
     style: "currency",
     currency,
@@ -27,6 +27,12 @@ const fmtAny = (value: number, currency: string) =>
 
 const pick = (pair: MoneyPair | undefined, currency: Currency) =>
   pair ? (currency === "CAD" ? pair.cad : pair.usd) : 0;
+
+const ALLOCATION_GROUPS = [
+  { key: "investments", label: "Investments", description: "Stocks, plans & retirement" },
+  { key: "savings", label: "Savings", description: "Cash assets" },
+  { key: "liabilities", label: "Liabilities", description: "Credit cards & other debt" },
+] as const;
 
 /** Sub-dollar float noise shouldn't read as a real move. */
 const EPS = 1;
@@ -104,13 +110,8 @@ export default function NetWorthCard({
   const primary = homeCurrency === "CAD" ? netWorth?.total_cad : netWorth?.total_usd;
   const secondary = homeCurrency === "CAD" ? netWorth?.total_usd : netWorth?.total_cad;
   const secondaryCurrency: Currency = homeCurrency === "CAD" ? "USD" : "CAD";
-  const topAccounts = [...(netWorth?.accounts ?? [])]
-    .sort((a, b) => {
-      const aValue = homeCurrency === "CAD" ? a.balance_cad : a.balance_usd;
-      const bValue = homeCurrency === "CAD" ? b.balance_cad : b.balance_usd;
-      return bValue - aValue;
-    })
-    .slice(0, 3);
+  const hasAccounts = (netWorth?.accounts.length ?? 0) > 0;
+  const unclassified = pick(netWorth?.allocation.unclassified, homeCurrency);
 
   return (
     <div className="tn-card tn-card--hero net-worth-card rounded-2xl bg-gradient-to-br from-slate-800 to-slate-900 border border-slate-700 p-6 shadow-xl">
@@ -143,24 +144,20 @@ export default function NetWorthCard({
       </div>
 
       {!loading && (
-        <div className={`net-worth-orbs net-worth-orbs--${Math.max(topAccounts.length, 1)}`}>
-          {topAccounts.length > 0 ? (
-            topAccounts.map((account, index) => {
-              const homeValue =
-                homeCurrency === "CAD" ? account.balance_cad : account.balance_usd;
-              return (
-                <div className={`net-worth-orb net-worth-orb--${index + 1}`} key={account.account_id}>
-                  <span>{account.institution}</span>
-                  <strong>{fmtAny(homeValue, homeCurrency)}</strong>
-                  <small>
-                    {account.account_name}
-                    {account.currency !== homeCurrency
-                      ? ` · ${fmtAny(account.balance, account.currency)}`
-                      : ""}
-                  </small>
-                </div>
-              );
-            })
+        <div className={`net-worth-orbs net-worth-orbs--${hasAccounts ? 3 : 1}`}>
+          {hasAccounts ? (
+            ALLOCATION_GROUPS.map(({ key, label, description }, index) => (
+              <div
+                className={`net-worth-orb net-worth-orb--${index + 1}`}
+                key={key}
+                role="group"
+                aria-label={label}
+              >
+                <span>{label}</span>
+                <strong>{fmtWhole(pick(netWorth?.allocation[key], homeCurrency), homeCurrency)}</strong>
+                <small>{description}</small>
+              </div>
+            ))
           ) : (
             <div className="net-worth-orb net-worth-orb--empty">
               <DesktopIcon name="wallet" />
@@ -169,6 +166,13 @@ export default function NetWorthCard({
             </div>
           )}
         </div>
+      )}
+
+      {!loading && unclassified !== 0 && (
+        <p className="mt-2 text-xs text-slate-400">
+          Unclassified assets: {fmt(unclassified, homeCurrency)} included in total wealth,
+          outside these groups.
+        </p>
       )}
 
       {!loading && delta?.has_previous && (

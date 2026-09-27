@@ -42,6 +42,9 @@ jobs:
       - name: Install screenshot browser
         run: npx playwright install --with-deps chromium
 
+      - name: Net-worth category UI tests
+        run: npm run test:net-worth
+
       - name: Exercise demo UI and widget settings
         run: npm run screenshots:readme
 

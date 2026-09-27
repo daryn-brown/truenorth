@@ -25,6 +25,7 @@ pub struct NetWorthResponse {
     pub total_usd: f64,
     pub total_cad: f64,
     pub accounts: Vec<AccountNetWorth>,
+    pub allocation: NetWorthAllocation,
     pub usd_cad_rate: Option<f64>,
     pub cad_usd_rate: Option<f64>,
     pub rate_date: Option<String>,
@@ -52,14 +53,25 @@ impl MoneyPair {
     }
 }
 
+#[derive(Debug, Serialize, PartialEq, Default)]
+pub struct NetWorthAllocation {
+    pub investments: MoneyPair,
+    pub savings: MoneyPair,
+    /// Signed account debts are negated here, so a positive figure means money owed.
+    pub liabilities: MoneyPair,
+    /// Unknown assets still contribute to total wealth, but must not be labeled as cash.
+    pub unclassified: MoneyPair,
+}
+
 /// How an account contributes to the "Anxiety Buffer" split. `Liquid` is spendable cash
 /// (chequing/savings) — the balance that drops after paying a credit card and triggers panic.
-/// `Invested` is the long-horizon pile that usually offsets it. Liabilities (credit) and anything
-/// else still count toward the net-worth total but aren't broken out.
+/// `Invested` is the long-horizon pile that usually offsets it. Liabilities and unknown assets
+/// still count toward net worth but not toward either side of that split.
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum AccountClass {
     Liquid,
     Invested,
+    Liability,
     Other,
 }
 
@@ -84,15 +96,56 @@ pub(crate) fn is_investment_account_type(account_type: &str) -> bool {
     )
 }
 
-fn account_class(account_type: &str) -> AccountClass {
+fn account_class(account_type: &str, name: &str, institution: &str) -> AccountClass {
     let normalized = account_type.trim().to_ascii_lowercase();
-    if matches!(normalized.as_str(), "chequing" | "savings") {
-        AccountClass::Liquid
-    } else if is_investment_account_type(&normalized) {
-        AccountClass::Invested
-    } else {
-        AccountClass::Other
+    if matches!(
+        normalized.as_str(),
+        "credit" | "credit_card" | "loan" | "mortgage" | "line_of_credit" | "debt" | "liability"
+    ) {
+        return AccountClass::Liability;
     }
+    if is_investment_account_type(&normalized) {
+        return AccountClass::Invested;
+    }
+
+    let name = name.to_ascii_lowercase();
+    let institution = institution.to_ascii_lowercase();
+    if name.split(|c: char| !c.is_ascii_alphanumeric()).any(|word| {
+        matches!(word, "loan" | "loans" | "mortgage")
+    }) || name.contains("credit card") || name.contains("line of credit")
+    {
+        return AccountClass::Liability;
+    }
+
+    // Aggregators can default stock plans and workplace retirement accounts to chequing/savings.
+    let investment_institution = [
+        "questrade", "robinhood", "sun life", "sunlife", "morgan stanley at work",
+        "stockplan", "shareworks",
+    ]
+    .iter()
+    .any(|keyword| institution.contains(*keyword));
+    let investment_name = [
+        "brokerage", "invest", "retirement", "pension", "stock plan", "stockplan",
+        "stock award", "equity award", "employee stock", "employee share",
+    ]
+    .iter()
+    .any(|keyword| name.contains(*keyword))
+        || name.split(|c: char| !c.is_ascii_alphanumeric()).any(|word| {
+            is_investment_account_type(word) || matches!(word, "rsu" | "rsus" | "espp")
+        });
+    if investment_institution || investment_name {
+        return AccountClass::Invested;
+    }
+
+    if matches!(
+        normalized.as_str(),
+        "chequing" | "checking" | "savings" | "cash" | "money_market" | "certificate_of_deposit"
+    ) || name.split(|c: char| !c.is_ascii_alphanumeric()).any(|word| {
+        matches!(word, "chequing" | "checking" | "savings" | "cash")
+    }) {
+        return AccountClass::Liquid;
+    }
+    AccountClass::Other
 }
 
 /// Compute the current net worth across all active accounts.
@@ -153,6 +206,7 @@ pub(crate) fn compute_net_worth(conn: &Connection) -> Result<NetWorthResponse, S
     let mut total_usd = 0.0_f64;
     let mut total_cad = 0.0_f64;
     let mut accounts = Vec::with_capacity(account_rows.len());
+    let mut allocation = NetWorthAllocation::default();
 
     for (id, name, institution, account_type, jurisdiction, currency, balance_opt, snapshot_date) in
         account_rows
@@ -162,6 +216,18 @@ pub(crate) fn compute_net_worth(conn: &Connection) -> Result<NetWorthResponse, S
         let (balance_usd, balance_cad) = convert_balance(balance, &currency, &usd_rates);
         total_usd += balance_usd;
         total_cad += balance_cad;
+
+        let class = if balance < 0.0 {
+            AccountClass::Liability
+        } else {
+            account_class(&account_type, &name, &institution)
+        };
+        match class {
+            AccountClass::Invested => allocation.investments.add(balance_usd, balance_cad),
+            AccountClass::Liquid => allocation.savings.add(balance_usd, balance_cad),
+            AccountClass::Liability => allocation.liabilities.add(-balance_usd, -balance_cad),
+            AccountClass::Other => allocation.unclassified.add(balance_usd, balance_cad),
+        }
 
         accounts.push(AccountNetWorth {
             account_id: id,
@@ -181,6 +247,7 @@ pub(crate) fn compute_net_worth(conn: &Connection) -> Result<NetWorthResponse, S
         total_usd,
         total_cad,
         accounts,
+        allocation,
         usd_cad_rate: usd_cad,
         cad_usd_rate: cad_usd,
         rate_date,
@@ -408,18 +475,21 @@ fn load_account_class_meta(
     conn: &Connection,
 ) -> rusqlite::Result<HashMap<i64, (String, AccountClass)>> {
     let mut meta: HashMap<i64, (String, AccountClass)> = HashMap::new();
-    let mut stmt =
-        conn.prepare("SELECT id, currency, account_type FROM accounts WHERE is_active = 1")?;
+    let mut stmt = conn.prepare(
+        "SELECT id, currency, account_type, name, institution FROM accounts WHERE is_active = 1",
+    )?;
     let rows = stmt.query_map([], |r| {
         Ok((
             r.get::<_, i64>(0)?,
             r.get::<_, String>(1)?,
             r.get::<_, String>(2)?,
+            r.get::<_, String>(3)?,
+            r.get::<_, String>(4)?,
         ))
     })?;
     for row in rows {
-        let (id, currency, account_type) = row?;
-        meta.insert(id, (currency, account_class(&account_type)));
+        let (id, currency, account_type, name, institution) = row?;
+        meta.insert(id, (currency, account_class(&account_type, &name, &institution)));
     }
     Ok(meta)
 }
@@ -448,7 +518,7 @@ fn breakdown(
         match class {
             AccountClass::Liquid => bd.liquid.add(usd, cad),
             AccountClass::Invested => bd.invested.add(usd, cad),
-            AccountClass::Other => {}
+            AccountClass::Liability | AccountClass::Other => {}
         }
     }
     bd
@@ -609,6 +679,182 @@ mod tests {
             rusqlite::params![account_id, date, balance, currency],
         )
         .unwrap();
+    }
+
+    #[test]
+    fn allocation_recognizes_investments_cash_and_debt() {
+        for account_type in [
+            "brokerage", "tfsa", "rrsp", "fhsa", "401k", "ira", "roth_ira", "crypto",
+            "retirement", "resp", "lira", "rrif", "pension",
+        ] {
+            assert_eq!(
+                account_class(account_type, "Account", "Institution"),
+                AccountClass::Invested,
+                "{account_type}",
+            );
+        }
+        for (account_type, name, institution, expected) in [
+            ("other", "RESP", "Questrade", AccountClass::Invested),
+            ("chequing", "Individual", "Robinhood", AccountClass::Invested),
+            ("chequing", "Microsoft Stock Awards", "Morgan Stanley", AccountClass::Invested),
+            ("other", "Workplace plan", "Morgan Stanley at Work", AccountClass::Invested),
+            ("savings", "Group savings", "Sun Life Financial", AccountClass::Invested),
+            ("chequing", "Workplace plan", "SUNLIFE", AccountClass::Invested),
+            ("other", "Employee Share Purchase Plan", "Employer", AccountClass::Invested),
+            ("other", "RSU awards", "Employer", AccountClass::Invested),
+            ("savings", "Retirement savings", "Institution", AccountClass::Invested),
+            ("chequing", "Everyday account", "Scotiabank", AccountClass::Liquid),
+            ("savings", "Savings", "Bank", AccountClass::Liquid),
+            ("other", "Cash reserve", "Bank", AccountClass::Liquid),
+            ("checking", "Everyday account", "Morgan Stanley", AccountClass::Liquid),
+            ("credit", "Rewards", "Sun Life", AccountClass::Liability),
+            ("loan", "Account", "Institution", AccountClass::Liability),
+            ("other", "Home mortgage", "Bank", AccountClass::Liability),
+            ("other", "Line of credit", "Bank", AccountClass::Liability),
+            ("brokerage", "Mortgage fund", "Broker", AccountClass::Invested),
+            ("other", "Home value", "Manual", AccountClass::Other),
+        ] {
+            assert_eq!(account_class(account_type, name, institution), expected, "{name}");
+        }
+    }
+
+    #[test]
+    fn allocation_groups_every_active_account_using_latest_converted_balances() {
+        let conn = setup();
+        conn.execute(
+            "INSERT INTO fx_rates (from_currency, to_currency, rate, rate_date) \
+             VALUES ('USD', 'CAD', 2.0, '2025-01-01')",
+            [],
+        )
+        .unwrap();
+
+        for (name, institution, kind, currency, balance) in [
+            ("TFSA", "Questrade", "tfsa", "CAD", 2000.0),
+            ("Individual", "Robinhood", "brokerage", "USD", 3000.0),
+            ("Microsoft Stock Awards", "Morgan Stanley", "chequing", "USD", 4000.0),
+            ("Group savings", "Sun Life", "savings", "CAD", 10000.0),
+            ("RESP", "Questrade", "other", "CAD", 6000.0),
+            ("Checking", "Bank", "chequing", "USD", 200.0),
+            ("Savings", "Bank", "savings", "CAD", 600.0),
+            ("Credit card", "Bank", "credit", "USD", -100.0),
+            ("Home mortgage", "Bank", "other", "CAD", -1000.0),
+            ("Overdraft", "Bank", "chequing", "CAD", -50.0),
+            ("Margin", "Broker", "brokerage", "USD", -200.0),
+        ] {
+            let id = add_typed_account(&conn, name, currency, kind);
+            conn.execute(
+                "UPDATE accounts SET institution = ?1 WHERE id = ?2",
+                rusqlite::params![institution, id],
+            )
+            .unwrap();
+            add_snapshot(&conn, id, "2025-01-01", 99999.0, currency);
+            add_snapshot(&conn, id, "2025-01-02", balance, currency);
+        }
+        let inactive = add_typed_account(&conn, "Inactive", "USD", "brokerage");
+        add_snapshot(&conn, inactive, "2025-01-03", 90000.0, "USD");
+        conn.execute("UPDATE accounts SET is_active = 0 WHERE id = ?1", [inactive]).unwrap();
+        let empty = add_typed_account(&conn, "Not synced yet", "USD", "savings");
+
+        let nw = compute_net_worth(&conn).unwrap();
+        assert_eq!(nw.accounts.len(), 12);
+        assert!(nw.accounts.iter().all(|account| account.account_id != inactive));
+        assert_eq!(
+            nw.accounts.iter().find(|account| account.account_id == empty).unwrap().balance,
+            0.0,
+        );
+        assert_eq!(nw.allocation, NetWorthAllocation {
+            investments: MoneyPair { usd: 16000.0, cad: 32000.0 },
+            savings: MoneyPair { usd: 500.0, cad: 1000.0 },
+            liabilities: MoneyPair { usd: 825.0, cad: 1650.0 },
+            unclassified: MoneyPair::default(),
+        });
+        assert_eq!(nw.total_usd, 15675.0);
+        assert_eq!(nw.total_cad, 31350.0);
+        assert_eq!(
+            nw.total_usd,
+            nw.allocation.investments.usd + nw.allocation.savings.usd
+                - nw.allocation.liabilities.usd,
+        );
+        let json = serde_json::to_value(&nw).unwrap();
+        assert_eq!(json["allocation"]["investments"]["cad"], 32000.0);
+        assert_eq!(json["allocation"]["liabilities"]["usd"], 825.0);
+    }
+
+    #[test]
+    fn allocation_keeps_unknown_assets_out_of_cash_and_offsets_credit_balances() {
+        let conn = setup();
+        let property = add_typed_account(&conn, "Home value", "USD", "other");
+        let credit = add_typed_account(&conn, "Credit card", "USD", "credit");
+        let refund = add_typed_account(&conn, "Credit balance", "USD", "credit");
+        add_snapshot(&conn, property, "2025-01-01", 10000.0, "USD");
+        add_snapshot(&conn, credit, "2025-01-01", -200.0, "USD");
+        add_snapshot(&conn, refund, "2025-01-01", 50.0, "USD");
+
+        let nw = compute_net_worth(&conn).unwrap();
+        assert_eq!(nw.allocation.savings, MoneyPair::default());
+        assert_eq!(nw.allocation.investments, MoneyPair::default());
+        assert_eq!(nw.allocation.unclassified.usd, 10000.0);
+        assert_eq!(nw.allocation.liabilities.usd, 150.0);
+        assert_eq!(nw.total_usd, 9850.0);
+    }
+
+    #[test]
+    fn allocation_is_zero_without_balances() {
+        let conn = setup();
+        assert_eq!(compute_net_worth(&conn).unwrap().allocation, NetWorthAllocation::default());
+        add_typed_account(&conn, "Savings", "USD", "savings");
+        add_typed_account(&conn, "Investments", "USD", "brokerage");
+        add_typed_account(&conn, "Credit card", "USD", "credit");
+        assert_eq!(compute_net_worth(&conn).unwrap().allocation, NetWorthAllocation::default());
+    }
+
+    #[test]
+    fn allocation_uses_the_same_fx_and_missing_rate_behavior_as_total_wealth() {
+        let conn = setup();
+        for (currency, rate) in [("CAD", 1.30), ("JMD", 155.0)] {
+            conn.execute(
+                "INSERT INTO fx_rates (from_currency, to_currency, rate, rate_date) \
+                 VALUES ('USD', ?1, ?2, '2025-01-01')",
+                rusqlite::params![currency, rate],
+            )
+            .unwrap();
+        }
+        let cash = add_typed_account(&conn, "Chequing", "JMD", "chequing");
+        let debt = add_typed_account(&conn, "Credit card", "JMD", "credit");
+        let no_rate = add_typed_account(&conn, "Brokerage", "GBP", "brokerage");
+        add_snapshot(&conn, cash, "2025-01-01", 15500.0, "JMD");
+        add_snapshot(&conn, debt, "2025-01-01", -1550.0, "JMD");
+        add_snapshot(&conn, no_rate, "2025-01-01", 500.0, "GBP");
+
+        let nw = compute_net_worth(&conn).unwrap();
+        assert_eq!(nw.allocation.savings, MoneyPair { usd: 100.0, cad: 130.0 });
+        assert_eq!(nw.allocation.liabilities, MoneyPair { usd: 10.0, cad: 13.0 });
+        assert_eq!(nw.allocation.investments, MoneyPair::default());
+        assert_eq!(nw.total_usd, 90.0);
+        assert_eq!(nw.total_cad, 117.0);
+    }
+
+    #[test]
+    fn delta_uses_the_same_stock_plan_and_retirement_classification() {
+        let conn = setup();
+        let stock_plan = add_typed_account(&conn, "Microsoft Stock Awards", "USD", "chequing");
+        let retirement = add_typed_account(&conn, "Workplace plan", "USD", "savings");
+        conn.execute(
+            "UPDATE accounts SET institution = 'Sun Life' WHERE id = ?1",
+            [retirement],
+        )
+        .unwrap();
+        for id in [stock_plan, retirement] {
+            add_snapshot(&conn, id, "2025-01-01", 1000.0, "USD");
+            add_snapshot(&conn, id, "2025-01-02", 1200.0, "USD");
+        }
+
+        let delta = compute_net_worth_delta(&conn).unwrap();
+        assert_eq!(delta.invested.usd, 2400.0);
+        assert_eq!(delta.invested_delta.usd, 400.0);
+        assert_eq!(delta.liquid, MoneyPair::default());
+        assert_eq!(delta.liquid_delta, MoneyPair::default());
+        assert_eq!(delta.total_delta.usd, 400.0);
     }
 
     #[test]

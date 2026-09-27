@@ -39,6 +39,12 @@ const accounts: Account[] = accountRows.map((row, index) => ({
 const netWorth: NetWorth = {
   total_usd: total,
   total_cad: total * rate,
+  allocation: {
+    investments: money(150_000),
+    savings: money(35_400),
+    liabilities: money(0),
+    unclassified: money(0),
+  },
   usd_cad_rate: rate,
   cad_usd_rate: 1 / rate,
   rate_date: date,
