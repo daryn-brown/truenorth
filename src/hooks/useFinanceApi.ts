@@ -205,8 +205,8 @@ export const simplefinGetStatus = (): Promise<SimpleFinStatus> =>
 export const simplefinConnect = (setupToken: string): Promise<SimpleFinStatus> =>
   invoke("simplefin_connect", { setupToken });
 
-export const simplefinSync = (): Promise<SimpleFinSyncSummary> =>
-  invoke("simplefin_sync");
+export const simplefinSync = (automatic = false): Promise<SimpleFinSyncSummary> =>
+  invoke("simplefin_sync", { automatic });
 
 export const simplefinDisconnect = (): Promise<SimpleFinStatus> =>
   invoke("simplefin_disconnect");

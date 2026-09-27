@@ -9,6 +9,7 @@ pub mod import;
 pub mod net_worth;
 pub mod questrade;
 pub mod simplefin;
+mod simplefin_health;
 pub mod simulator;
 pub mod snaptrade;
 pub mod teller;

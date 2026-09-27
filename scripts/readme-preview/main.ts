@@ -1,4 +1,4 @@
-import { mockIPC } from "@tauri-apps/api/mocks";
+import { mockIPC, mockWindows } from "@tauri-apps/api/mocks";
 import { responses, widgetSettings } from "./fixtures";
 
 if (!import.meta.env.DEV) {
@@ -6,7 +6,13 @@ if (!import.meta.env.DEV) {
 }
 
 localStorage.setItem("truenorth.advisor.open", "0");
-mockIPC((command, payload) => {
+export const calls: string[] = [];
+mockWindows("main");
+Object.defineProperty(window, "isTauri", { value: true });
+mockIPC(async (command, payload) => {
+  calls.push(command);
+  if (command === "plugin:shell|open") return;
+  if (command.endsWith("_sync")) await new Promise((resolve) => setTimeout(resolve, 300));
   if (command === "set_mac_widget_enabled") {
     if (!payload || !("enabled" in payload) || typeof payload.enabled !== "boolean") {
       throw new Error("The demo widget switch requires a boolean.");

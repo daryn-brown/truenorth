@@ -397,6 +397,26 @@ export interface SimpleFinStatus {
   last_synced_at: string | null;
   /** Number of active accounts connected via SimpleFIN. */
   account_count: number;
+  last_attempt_at: string | null;
+  app_auth_required: boolean;
+  messages: string[];
+  connections: SimpleFinConnectionHealth[];
+}
+
+export type BalanceStatus = "current" | "unknown" | "stale" | "missing" | "error" | "reauth_required";
+
+export interface BalanceHealth {
+  status: BalanceStatus;
+  balance_as_of: string | null;
+  message: string | null;
+}
+
+export interface SimpleFinConnectionHealth {
+  id: string;
+  name: string;
+  status: BalanceStatus;
+  messages: string[];
+  accounts: { account_id: number; name: string; health: BalanceHealth }[];
 }
 
 /** Result of a SimpleFIN sync, mirrored from the Rust `SimpleFinSyncSummary`. */
@@ -404,7 +424,8 @@ export interface SimpleFinSyncSummary {
   accounts_synced: number;
   holdings_synced: number;
   transactions_synced: number;
-  synced_at: string;
+  synced_at: string | null;
+  skipped: boolean;
   /** Non-fatal messages SimpleFIN returned (e.g. an institution needs re-auth). */
   warnings: string[];
 }

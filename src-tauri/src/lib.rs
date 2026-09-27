@@ -32,6 +32,7 @@ pub fn run() {
             ai::copilot::clear_runtime_state(&copilot_state_dir)?;
             db::setup_database(app).map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
             app.manage(connector::ConnectorRegistry::new());
+            app.manage(commands::simplefin::SimpleFinSyncLock::default());
             app.manage(ai::copilot::CopilotRuntime::default());
             Ok(())
         })

@@ -9,6 +9,7 @@ use rusqlite::{params, Connection, OptionalExtension};
 use serde::Serialize;
 use tauri::State;
 
+use super::simplefin_health::{self as health, ConnectionHealth};
 use crate::commands::accounts::aggregated_account_jurisdiction;
 use crate::connector::simplefin::{
     claim_access_url, SimpleFinAccount, SimpleFinAccountSet, SimpleFinClient, SimpleFinError,
@@ -18,6 +19,9 @@ use crate::db::secrets::{self, SIMPLEFIN_ACCESS_URL};
 use crate::db::{reconcile_aggregated_questrade_accounts, AppDb};
 
 const SETTING_LAST_SYNCED: &str = "simplefin_last_synced_at";
+
+#[derive(Default)]
+pub struct SimpleFinSyncLock(pub tokio::sync::Mutex<()>);
 
 // ---------------------------------------------------------------------------
 // Serialisable types returned to the frontend
@@ -30,6 +34,10 @@ pub struct SimpleFinStatus {
     pub last_synced_at: Option<String>,
     /// Number of active accounts connected via SimpleFIN.
     pub account_count: i64,
+    pub last_attempt_at: Option<String>,
+    pub app_auth_required: bool,
+    pub messages: Vec<String>,
+    pub connections: Vec<ConnectionHealth>,
 }
 
 #[derive(Debug, Serialize)]
@@ -37,9 +45,10 @@ pub struct SimpleFinSyncSummary {
     pub accounts_synced: usize,
     pub holdings_synced: usize,
     pub transactions_synced: usize,
-    pub synced_at: String,
+    pub synced_at: Option<String>,
     /// Non-fatal messages SimpleFIN returned (e.g. one institution needs to be re-authenticated).
     pub warnings: Vec<String>,
+    pub skipped: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -124,23 +133,13 @@ fn friendly(e: SimpleFinError) -> String {
 // DB reconcile helpers (synchronous — never run while awaiting)
 // ---------------------------------------------------------------------------
 
-/// The date to file a balance snapshot under: SimpleFIN's reported `balance-date` (the day the
-/// institution last refreshed the figure), converted to `YYYY-MM-DD`. Falls back to `today` when
-/// SimpleFIN omits it, and is clamped so a bad (future) timestamp can never file a snapshot ahead
-/// of today — which would otherwise become the permanent "latest" balance and block real updates.
-///
-/// Filing by the reported date (rather than always "today") is what keeps a stale account honest:
-/// when the Bridge can't refresh an institution it keeps returning the last-known balance with an
-/// old `balance-date`, so re-syncing simply rewrites that same old-dated snapshot instead of
-/// minting a fresh "today" one. The account's "as of" date then visibly lags, surfacing the stall
-/// instead of hiding it behind a balance that looks current but hasn't moved in weeks.
-fn snapshot_date_for(balance_date: Option<i64>, today: &str) -> String {
-    let date = epoch_to_date(balance_date, today);
-    if date.as_str() > today {
-        today.to_string()
-    } else {
-        date
-    }
+/// Missing or invalid provider dates must never become fresh "today" snapshots.
+fn snapshot_date_for(balance_date: Option<i64>, today: &str) -> Option<String> {
+    balance_date
+        .filter(|at| *at > 0)
+        .and_then(|at| chrono::DateTime::from_timestamp(at, 0))
+        .map(|at| at.format("%Y-%m-%d").to_string())
+        .filter(|date| date.as_str() <= today)
 }
 
 /// Upsert one SimpleFIN account (keyed by `connector_ref`) and write its balance snapshot — dated
@@ -153,7 +152,7 @@ fn upsert_account(
     now: &str,
 ) -> rusqlite::Result<i64> {
     let reported_currency = &account.currency;
-    let account_type = map_account_type(&account.name, !account.holdings.is_empty());
+    let mut account_type = map_account_type(&account.name, !account.holdings.is_empty());
     let institution = account
         .institution
         .clone()
@@ -166,19 +165,28 @@ fn upsert_account(
     // SimpleFIN reporting a Jamaican JMD account as CAD). The user can correct it via
     // `update_account_currency`, and preserving the stored value keeps that fix across syncs.
     // Questrade jurisdiction is normalized by `reconcile_aggregated_questrade_accounts`.
-    let existing: Option<(i64, String)> = conn
+    let reference = match &account.connection_id {
+        Some(connection) => serde_json::to_string(&(connection, &account.id))
+            .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?,
+        None => account.id.clone(),
+    };
+    let existing: Option<(i64, String, String)> = conn
         .query_row(
-            "SELECT id, currency FROM accounts WHERE connector_kind = 'simplefin' AND connector_ref = ?1",
-            params![account.id],
-            |r| Ok((r.get(0)?, r.get(1)?)),
+            "SELECT id, currency, account_type FROM accounts WHERE connector_kind = 'simplefin' \
+             AND connector_ref IN (?1, ?2) ORDER BY CASE WHEN connector_ref = ?1 THEN 0 ELSE 1 END LIMIT 1",
+            params![reference, account.id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
         )
         .optional()?;
 
-    let (account_id, currency) = if let Some((id, stored_currency)) = existing {
+    let (account_id, currency) = if let Some((id, stored_currency, stored_type)) = existing {
+        if !account.holdings_reported {
+            account_type = stored_type;
+        }
         conn.execute(
             "UPDATE accounts SET name = ?1, institution = ?2, account_type = ?3, \
-             is_active = 1, updated_at = ?4 WHERE id = ?5",
-            params![account.name, institution, account_type, now, id],
+             is_active = 1, updated_at = ?4, connector_ref = ?6 WHERE id = ?5",
+            params![account.name, institution, account_type, now, id, reference],
         )?;
         (id, stored_currency)
     } else {
@@ -186,13 +194,24 @@ fn upsert_account(
             "INSERT INTO accounts \
              (name, institution, account_type, currency, jurisdiction, connector_kind, connector_ref) \
              VALUES (?1, ?2, ?3, ?4, ?5, 'simplefin', ?6)",
-            params![account.name, institution, account_type, reported_currency, jurisdiction, account.id],
+            params![account.name, institution, account_type, reported_currency, jurisdiction, reference],
         )?;
         (conn.last_insert_rowid(), reported_currency.clone())
     };
 
-    if let Some(total) = account.balance {
-        let snapshot_date = snapshot_date_for(account.balance_date, today);
+    let checked_at = chrono::DateTime::parse_from_rfc3339(now)
+        .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?
+        .with_timezone(&chrono::Utc);
+    let source_time = health::source_time(account, checked_at);
+    let previous_time = health::load(conn)?.balance_at(account_id);
+    if let (Some(total), Some(snapshot_date), Some(source_time)) = (
+        account.balance,
+        snapshot_date_for(account.balance_date, today),
+        source_time,
+    ) {
+        if previous_time.is_some_and(|previous| source_time < previous) {
+            return Ok(account_id);
+        }
         conn.execute(
             "INSERT OR REPLACE INTO balance_snapshots \
              (account_id, snapshot_date, balance, currency, source) \
@@ -231,7 +250,10 @@ fn replace_holdings(
     let mut count = 0usize;
     for h in &account.holdings {
         let (last_price, average_cost) = holding_unit_prices(h);
-        let holding_currency = h.currency.clone().unwrap_or_else(|| account.currency.clone());
+        let holding_currency = h
+            .currency
+            .clone()
+            .unwrap_or_else(|| account.currency.clone());
         let last_price_at = last_price.map(|_| now.to_string());
         conn.execute(
             "INSERT OR REPLACE INTO holdings \
@@ -300,6 +322,8 @@ fn reconcile_transactions(
 /// Report whether SimpleFIN is connected, plus last-synced time and connected-account count.
 #[tauri::command]
 pub fn simplefin_get_status(db: State<AppDb>) -> Result<SimpleFinStatus, String> {
+    let access_url = secrets::get_secret(SIMPLEFIN_ACCESS_URL).map_err(|e| e.to_string())?;
+    let is_connected = access_url.is_some();
     let (last_synced_at, account_count) = {
         let conn = db.0.lock().map_err(|e| e.to_string())?;
         let last_synced_at = get_setting(&conn, SETTING_LAST_SYNCED).map_err(|e| e.to_string())?;
@@ -313,12 +337,21 @@ pub fn simplefin_get_status(db: State<AppDb>) -> Result<SimpleFinStatus, String>
         (last_synced_at, account_count)
     };
 
-    let access_url = secrets::get_secret(SIMPLEFIN_ACCESS_URL).map_err(|e| e.to_string())?;
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    let state = health::load(&conn).map_err(|e| e.to_string())?;
+    let connections = state
+        .connections(&conn, is_connected, chrono::Utc::now())
+        .map_err(|e| e.to_string())?;
+    let messages = state.messages();
 
     Ok(SimpleFinStatus {
-        is_connected: access_url.is_some(),
+        is_connected,
         last_synced_at,
         account_count,
+        last_attempt_at: state.last_attempt_at,
+        app_auth_required: state.app_auth_required,
+        messages,
+        connections,
     })
 }
 
@@ -326,21 +359,24 @@ pub fn simplefin_get_status(db: State<AppDb>) -> Result<SimpleFinStatus, String>
 #[tauri::command]
 pub async fn simplefin_connect(
     db: State<'_, AppDb>,
+    sync: State<'_, SimpleFinSyncLock>,
     setup_token: String,
 ) -> Result<SimpleFinStatus, String> {
+    let _guard = sync.0.lock().await;
     let setup_token = setup_token.trim().to_string();
     if setup_token.is_empty() {
         return Err("Paste the setup token from your SimpleFIN bridge first.".into());
     }
 
-    // Exchange the one-time token for a durable access URL, then confirm it actually works.
+    // Persist a claimed token before fetching. An outage must not lose a one-time credential.
     let access_url = claim_access_url(&setup_token).await.map_err(friendly)?;
-    SimpleFinClient::new(access_url.clone())
-        .check()
-        .await
-        .map_err(friendly)?;
-
     secrets::set_secret(SIMPLEFIN_ACCESS_URL, &access_url).map_err(|e| e.to_string())?;
+    {
+        let conn = db.0.lock().map_err(|e| e.to_string())?;
+        let mut state = health::load(&conn).map_err(|e| e.to_string())?;
+        state.token_saved();
+        health::save(&conn, &state).map_err(|e| e.to_string())?;
+    }
 
     simplefin_get_status(db)
 }
@@ -348,34 +384,73 @@ pub async fn simplefin_connect(
 /// Pull accounts + balances + holdings from SimpleFIN and reconcile them into the local DB.
 /// Writes one balance snapshot per account so net worth updates automatically.
 #[tauri::command]
-pub async fn simplefin_sync(db: State<'_, AppDb>) -> Result<SimpleFinSyncSummary, String> {
+pub async fn simplefin_sync(
+    db: State<'_, AppDb>,
+    sync: State<'_, SimpleFinSyncLock>,
+    automatic: Option<bool>,
+) -> Result<SimpleFinSyncSummary, String> {
+    let _guard = sync.0.lock().await;
     let access_url = secrets::get_secret(SIMPLEFIN_ACCESS_URL)
         .map_err(|e| e.to_string())?
         .ok_or("Connect SimpleFIN before syncing.")?;
 
-    // Fetch over the network first — no DB lock is held across an await.
-    let account_set: SimpleFinAccountSet = SimpleFinClient::new(access_url)
-        .fetch_accounts()
-        .await
-        .map_err(friendly)?;
+    let mut state = {
+        let conn = db.0.lock().map_err(|e| e.to_string())?;
+        let mut state = health::load(&conn).map_err(|e| e.to_string())?;
+        if !state.reserve(chrono::Utc::now(), automatic.unwrap_or(false))? {
+            return Ok(SimpleFinSyncSummary {
+                accounts_synced: 0,
+                holdings_synced: 0,
+                transactions_synced: 0,
+                synced_at: state.last_response_at.clone(),
+                warnings: state.messages(),
+                skipped: true,
+            });
+        }
+        health::save(&conn, &state).map_err(|e| e.to_string())?;
+        state
+    };
+    let fetched = async { SimpleFinClient::new(access_url)?.fetch_accounts().await }.await;
+    let account_set: SimpleFinAccountSet = match fetched {
+        Ok(data) => data,
+        Err(error) => {
+            state.app_auth_required |= error.is_auth();
+            let message = friendly(error);
+            state.last_error = Some(message.clone());
+            let conn = db.0.lock().map_err(|e| e.to_string())?;
+            health::save(&conn, &state)
+                .map_err(|e| format!("{message} Could not save connection status: {e}"))?;
+            return Err(message);
+        }
+    };
 
-    let now = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
-    let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
+    let checked_at = chrono::Utc::now();
+    let now = health::stamp(checked_at);
+    let today = checked_at.format("%Y-%m-%d").to_string();
 
     let mut accounts_synced = 0usize;
     let mut holdings_synced = 0usize;
     let mut transactions_synced = 0usize;
 
-    {
+    let reconciled = (|| -> Result<(), String> {
         let mut conn = db.0.lock().map_err(|e| e.to_string())?;
         let tx = conn.transaction().map_err(|e| e.to_string())?;
+        state.response(&account_set, checked_at);
 
         for account in &account_set.accounts {
+            let failed = health::account_data_failed(&account_set, account);
+            let mut safe_account = account.clone();
+            if failed {
+                safe_account.balance = None;
+                safe_account.holdings_reported = false;
+            }
             let account_id =
-                upsert_account(&tx, account, &today, &now).map_err(|e| e.to_string())?;
+                upsert_account(&tx, &safe_account, &today, &now).map_err(|e| e.to_string())?;
             accounts_synced += 1;
-            holdings_synced +=
-                replace_holdings(&tx, account_id, account, &now).map_err(|e| e.to_string())?;
+            if account.holdings_reported && !failed {
+                holdings_synced +=
+                    replace_holdings(&tx, account_id, account, &now).map_err(|e| e.to_string())?;
+            }
             transactions_synced += reconcile_transactions(
                 &tx,
                 account_id,
@@ -384,30 +459,51 @@ pub async fn simplefin_sync(db: State<'_, AppDb>) -> Result<SimpleFinSyncSummary
                 &today,
             )
             .map_err(|e| e.to_string())?;
+            state.record_account(account_id, &safe_account, checked_at);
         }
 
         reconcile_aggregated_questrade_accounts(&tx).map_err(|e| e.to_string())?;
         set_setting(&tx, SETTING_LAST_SYNCED, &now).map_err(|e| e.to_string())?;
+        state.finish_response();
+        health::save(&tx, &state).map_err(|e| e.to_string())?;
         tx.commit().map_err(|e| e.to_string())?;
+        Ok(())
+    })();
+    if let Err(message) = reconciled {
+        let conn = db.0.lock().map_err(|e| e.to_string())?;
+        let mut failed = health::load(&conn).map_err(|e| e.to_string())?;
+        failed.last_error = Some(format!("Could not import SimpleFIN data: {message}"));
+        health::save(&conn, &failed)
+            .map_err(|e| format!("{message} Could not save connection status: {e}"))?;
+        return Err(message);
     }
 
     Ok(SimpleFinSyncSummary {
         accounts_synced,
         holdings_synced,
         transactions_synced,
-        synced_at: now,
+        synced_at: Some(now),
         warnings: account_set.errors,
+        skipped: false,
     })
 }
 
 /// Disconnect SimpleFIN: remove the stored access URL, clear the last-synced marker, and
 /// deactivate the connected accounts. Historical snapshots are left untouched.
 #[tauri::command]
-pub fn simplefin_disconnect(db: State<AppDb>) -> Result<SimpleFinStatus, String> {
+pub async fn simplefin_disconnect(
+    db: State<'_, AppDb>,
+    sync: State<'_, SimpleFinSyncLock>,
+) -> Result<SimpleFinStatus, String> {
+    let _guard = sync.0.lock().await;
     secrets::delete_secret(SIMPLEFIN_ACCESS_URL).map_err(|e| e.to_string())?;
     {
         let conn = db.0.lock().map_err(|e| e.to_string())?;
         delete_setting(&conn, SETTING_LAST_SYNCED).map_err(|e| e.to_string())?;
+        let mut state = health::load(&conn).map_err(|e| e.to_string())?;
+        state.app_auth_required = false;
+        state.last_error = None;
+        health::save(&conn, &state).map_err(|e| e.to_string())?;
         conn.execute(
             "UPDATE accounts SET is_active = 0, updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') \
              WHERE connector_kind = 'simplefin'",
@@ -473,8 +569,10 @@ mod tests {
             name: "Self-Directed Brokerage".into(),
             currency: "USD".into(),
             balance: Some(1000.0),
-            balance_date: None,
+            balance_date: Some(1_735_689_600),
             institution: Some("Wealthsimple".into()),
+            connection_id: None,
+            holdings_reported: true,
             holdings: vec![SimpleFinHolding {
                 symbol: "AAPL".into(),
                 shares: 10.0,
@@ -562,8 +660,10 @@ mod tests {
             name: "Everyday Chequing".into(),
             currency: "CAD".into(),
             balance: Some(500.0),
-            balance_date: None,
+            balance_date: Some(1_735_689_600),
             institution: Some("Scotiabank".into()),
+            connection_id: None,
+            holdings_reported: true,
             holdings: vec![],
             transactions: vec![
                 SimpleFinTransaction {
@@ -586,19 +686,23 @@ mod tests {
 
     #[test]
     fn epoch_to_date_converts_or_falls_back() {
-        assert_eq!(epoch_to_date(Some(1_700_000_000), "2025-01-01"), "2023-11-14");
+        assert_eq!(
+            epoch_to_date(Some(1_700_000_000), "2025-01-01"),
+            "2023-11-14"
+        );
         assert_eq!(epoch_to_date(None, "2025-01-01"), "2025-01-01");
     }
 
     #[test]
-    fn snapshot_date_prefers_balance_date_and_clamps_future() {
+    fn snapshot_date_requires_a_valid_source_date() {
         // A real (past) balance-date is used as-is — that is what keeps a stale account honest.
-        assert_eq!(snapshot_date_for(Some(1_700_000_000), "2025-07-01"), "2023-11-14");
-        // Missing balance-date falls back to today.
-        assert_eq!(snapshot_date_for(None, "2025-07-01"), "2025-07-01");
-        // A future balance-date (clock skew / bad data) is clamped so it can't become a
-        // permanent "latest" that blocks real updates.
-        assert_eq!(snapshot_date_for(Some(4_102_444_800), "2025-07-01"), "2025-07-01");
+        assert_eq!(
+            snapshot_date_for(Some(1_700_000_000), "2025-07-01").as_deref(),
+            Some("2023-11-14")
+        );
+        assert!(snapshot_date_for(None, "2025-07-01").is_none());
+        assert!(snapshot_date_for(Some(4_102_444_800), "2025-07-01").is_none());
+        assert!(snapshot_date_for(Some(0), "2025-07-01").is_none());
     }
 
     fn stale_credit_card(balance_date: Option<i64>) -> SimpleFinAccount {
@@ -609,6 +713,8 @@ mod tests {
             balance: Some(-1234.56),
             balance_date,
             institution: Some("Scotiabank".into()),
+            connection_id: None,
+            holdings_reported: true,
             holdings: vec![],
             transactions: vec![],
         }
@@ -658,21 +764,100 @@ mod tests {
     }
 
     #[test]
-    fn balance_snapshot_without_balance_date_falls_back_to_today() {
+    fn balance_snapshot_without_balance_date_does_not_look_fresh() {
         let conn = Connection::open_in_memory().unwrap();
         crate::db::apply_schema(&conn).unwrap();
 
-        // A healthy account that omits balance-date is still filed under today.
         let card = stale_credit_card(None);
         let id = upsert_account(&conn, &card, "2025-07-01", "2025-07-01T00:00:00Z").unwrap();
-        let date: String = conn
+        let count: i64 = conn
             .query_row(
-                "SELECT snapshot_date FROM balance_snapshots WHERE account_id = ?1",
+                "SELECT COUNT(*) FROM balance_snapshots WHERE account_id = ?1",
                 params![id],
                 |r| r.get(0),
             )
             .unwrap();
-        assert_eq!(date, "2025-07-01");
+        assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn scoped_ids_migrate_existing_accounts_without_losing_history_or_currency_overrides() {
+        let conn = Connection::open_in_memory().unwrap();
+        crate::db::apply_schema(&conn).unwrap();
+        let mut account = brokerage_account();
+        let id = upsert_account(&conn, &account, "2025-01-01", "2025-01-01T00:00:00Z").unwrap();
+        conn.execute("UPDATE accounts SET currency = 'JMD' WHERE id = ?1", [id])
+            .unwrap();
+        account.connection_id = Some("personal".into());
+        account.holdings_reported = false;
+        account.holdings.clear();
+        let migrated =
+            upsert_account(&conn, &account, "2025-01-01", "2025-01-01T00:00:00Z").unwrap();
+        assert_eq!(migrated, id);
+        let (currency, kind): (String, String) = conn
+            .query_row(
+                "SELECT currency, account_type FROM accounts WHERE id = ?1",
+                [id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(currency, "JMD");
+        assert_eq!(kind, "brokerage");
+        account.connection_id = Some("joint".into());
+        assert_ne!(
+            upsert_account(&conn, &account, "2025-01-01", "2025-01-01T00:00:00Z").unwrap(),
+            id
+        );
+    }
+
+    #[test]
+    fn health_stays_stale_after_a_cached_sync_and_missing_accounts_keep_their_balance() {
+        let conn = Connection::open_in_memory().unwrap();
+        crate::db::apply_schema(&conn).unwrap();
+        let checked = chrono::DateTime::parse_from_rfc3339("2025-01-03T00:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        let account = brokerage_account();
+        let id = upsert_account(&conn, &account, "2025-01-03", &health::stamp(checked)).unwrap();
+        let mut state = health::load(&conn).unwrap();
+        let data = SimpleFinAccountSet {
+            accounts: vec![account.clone()],
+            ..Default::default()
+        };
+        state.response(&data, checked);
+        state.record_account(id, &account, checked);
+        health::save(&conn, &state).unwrap();
+        assert_eq!(
+            state
+                .connections(&conn, true, checked - chrono::Duration::seconds(1))
+                .unwrap()[0]
+                .status,
+            super::health::BalanceStatus::Current
+        );
+        assert_eq!(
+            state.connections(&conn, true, checked).unwrap()[0].status,
+            super::health::BalanceStatus::Stale
+        );
+        let mut older = account.clone();
+        older.balance = Some(99_999.0);
+        older.balance_date = Some(1_735_689_599);
+        upsert_account(&conn, &older, "2025-01-03", &health::stamp(checked)).unwrap();
+        let balance: f64 = conn
+            .query_row(
+                "SELECT balance FROM balance_snapshots WHERE account_id = ?1",
+                [id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(balance, 1000.0);
+        state.response(
+            &SimpleFinAccountSet::default(),
+            checked + chrono::Duration::hours(6),
+        );
+        assert_eq!(
+            state.connections(&conn, true, checked).unwrap()[0].status,
+            super::health::BalanceStatus::Missing
+        );
     }
 
     #[test]
@@ -766,11 +951,16 @@ mod tests {
 
         // A later sync still reports CAD, but the correction must stick and the new snapshot
         // must inherit the stored JMD currency.
+        account.balance_date = Some(1_735_776_000);
         let id2 = upsert_account(&conn, &account, "2025-01-02", "2025-01-02T00:00:00Z").unwrap();
         assert_eq!(id2, id);
 
         let currency: String = conn
-            .query_row("SELECT currency FROM accounts WHERE id = ?1", params![id], |r| r.get(0))
+            .query_row(
+                "SELECT currency FROM accounts WHERE id = ?1",
+                params![id],
+                |r| r.get(0),
+            )
             .unwrap();
         assert_eq!(currency, "JMD");
 

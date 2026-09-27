@@ -1,7 +1,7 @@
 import type {
   Account, CashflowSummary, DividendSummary, FirePlan, GoalProgress,
   MacWidgetSettings, MoneyPair, NetWorth, NetWorthDelta, NetWorthHistoryPoint,
-  ProgressMetrics, SeattleProjection,
+  ProgressMetrics, SeattleProjection, SimpleFinStatus,
 } from "../../src/types/finance";
 import type { AiSettings } from "../../src/types/ai";
 
@@ -35,6 +35,31 @@ const accounts: Account[] = accountRows.map((row, index) => ({
   latest_balance: row.balance,
   latest_balance_date: date,
 }));
+
+export const simplefinStatus: SimpleFinStatus = {
+  is_connected: true,
+  last_synced_at: timestamp,
+  last_attempt_at: new Date().toISOString(),
+  account_count: 2,
+  app_auth_required: false,
+  messages: [],
+  connections: [
+    {
+      id: "demo-harbor", name: "Harbor Bank", status: "reauth_required",
+      messages: ["Approve the bank connection in your banking app."],
+      accounts: [{ account_id: 3, name: "High-yield savings", health: {
+        status: "reauth_required", balance_as_of: timestamp,
+        message: "Approve the bank connection in your banking app.",
+      } }],
+    },
+    {
+      id: "demo-maple", name: "Maple Bank", status: "current", messages: [],
+      accounts: [{ account_id: 5, name: "Everyday chequing", health: {
+        status: "current", balance_as_of: new Date().toISOString(), message: null,
+      } }],
+    },
+  ],
+};
 
 const netWorth: NetWorth = {
   total_usd: total,
@@ -171,6 +196,19 @@ const ai: AiSettings = {
 };
 
 export const responses: Record<string, unknown> = {
+  simplefin_get_status: simplefinStatus,
+  simplefin_sync: { accounts_synced: 2, holdings_synced: 0, transactions_synced: 12, synced_at: timestamp, warnings: [], skipped: false },
+  snaptrade_get_status: {
+    has_credentials: true, is_connected: true, is_personal: false, client_id: "DEMO",
+    last_synced_at: timestamp, account_count: 2,
+  },
+  snaptrade_sync: { accounts_synced: 2, holdings_synced: 8, synced_at: timestamp },
+  questrade_get_status: { is_connected: true, last_synced_at: timestamp, account_count: 1 },
+  questrade_sync: { accounts_synced: 1, holdings_synced: 3, duplicates_hidden: 0, synced_at: timestamp },
+  teller_get_status: {
+    is_connected: false, has_certificate: false, environment: "sandbox", application_id: null,
+    enrollment_count: 0, account_count: 0, last_synced_at: null,
+  },
   list_accounts: accounts,
   get_net_worth: netWorth,
   get_net_worth_delta: delta,
