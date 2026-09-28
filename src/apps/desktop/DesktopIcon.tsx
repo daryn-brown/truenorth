@@ -3,6 +3,7 @@ import type { ReactNode } from "react";
 export type DesktopIconName =
   | "accounts"
   | "chart"
+  | "close"
   | "connect"
   | "download"
   | "edit"
@@ -99,6 +100,7 @@ const paths: Record<DesktopIconName, ReactNode> = {
     </>
   ),
   plus: <path d="M12 5v14M5 12h14" />,
+  close: <path d="m6 6 12 12M6 18 18 6" />,
   exchange: (
     <>
       <path d="M5 7h13l-3-3M19 17H6l3 3" />

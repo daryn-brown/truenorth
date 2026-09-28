@@ -1,5 +1,6 @@
 import type { Currency, MoneyPair, NetWorth, NetWorthDelta } from "../types/finance";
 import DesktopIcon from "../apps/desktop/DesktopIcon";
+import DismissibleBanner from "./DismissibleBanner";
 
 interface Props {
   netWorth: NetWorth | null;
@@ -7,7 +8,7 @@ interface Props {
   homeCurrency: Currency;
   onToggleCurrency: () => void;
   loading: boolean;
-  connectionAttention?: boolean;
+  connectionWarningKey?: string | null;
   onReviewConnections?: () => void;
 }
 
@@ -108,7 +109,7 @@ export default function NetWorthCard({
   homeCurrency,
   onToggleCurrency,
   loading,
-  connectionAttention = false,
+  connectionWarningKey = null,
   onReviewConnections,
 }: Props) {
   const primary = homeCurrency === "CAD" ? netWorth?.total_cad : netWorth?.total_usd;
@@ -147,18 +148,22 @@ export default function NetWorthCard({
         </button>
       </div>
 
-      {!loading && connectionAttention && (
-        <div role="status" className="mt-4 rounded-xl border border-amber-700/40 bg-amber-900/20 px-4 py-3">
-          <p className="text-sm font-semibold text-amber-200">Figures may be out of date or incomplete</p>
-          <p className="mt-1 text-xs text-slate-400">
-            Some SimpleFIN connections or balances need attention. Totals include last-known
-            balances; accounts without a balance are not included.
-          </p>
-          <button type="button" onClick={onReviewConnections} className="mt-2 text-xs text-amber-200 underline">
-            Review connections
-          </button>
-        </div>
-      )}
+      <DismissibleBanner
+        noticeKey={connectionWarningKey}
+        dismissLabel="Dismiss balance warning"
+        className="mt-4 rounded-xl border border-amber-700/40 bg-amber-900/20 px-4 py-3 text-amber-200"
+        role="status"
+        hidden={loading}
+      >
+        <p className="text-sm font-semibold text-amber-200">Figures may be out of date or incomplete</p>
+        <p className="mt-1 text-xs text-slate-400">
+          Some SimpleFIN connections or balances need attention. Totals include last-known
+          balances; accounts without a balance are not included.
+        </p>
+        <button type="button" onClick={onReviewConnections} className="mt-2 text-xs text-amber-200 underline">
+          Review connections
+        </button>
+      </DismissibleBanner>
 
       {!loading && (
         <div className={`net-worth-orbs net-worth-orbs--${hasAccounts ? 3 : 1}`}>
