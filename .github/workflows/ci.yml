@@ -45,6 +45,9 @@ jobs:
       - name: Net-worth category UI tests
         run: npm run test:net-worth
 
+      - name: Dashboard banner UI tests
+        run: npm run test:banners
+
       - name: Account selection and sync UI tests
         run: npm run test:account-sync
 

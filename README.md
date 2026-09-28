@@ -63,6 +63,11 @@ stale or unverified balances are flagged on accounts and total wealth. Guided re
 SimpleFIN in your browser without asking you to replace the app token for ordinary bank MFA.
 See [SimpleFIN connection health](docs/simplefin.md#connection-health-and-reauthentication).
 
+Dashboard alerts, sync notices, and the total-wealth warning each have a close button. Dismissed
+notices stay hidden through refreshes and syncs until their warning details change or the app
+restarts. Closing a banner does not clear connection health: the compact status badge, account
+warnings, and connection details remain available.
+
 **Mac net-worth widget.** Signed macOS builds can share USD and CAD totals with a native
 desktop / Notification Center widget in small and medium sizes. Sharing is off by default;
 the widget receives only a local summary, never the encrypted database or account credentials.

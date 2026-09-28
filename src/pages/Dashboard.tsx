@@ -67,6 +67,7 @@ import BrandMark from "../shared/BrandMark";
 import MacWidgetModal from "../components/MacWidgetModal";
 import ConfirmationDialog from "../components/ConfirmationDialog";
 import { ACCOUNT_TYPE_LABELS, CONNECTOR_LABELS } from "../shared/accountLabels";
+import DismissibleBanner from "../components/DismissibleBanner";
 
 type ModalState =
   | { open: false }
@@ -172,7 +173,6 @@ export default function Dashboard({
 
   const load = useCallback(async (completedAction?: string) => {
     setLoading(true);
-    setLoadError(null);
     try {
       void refreshConnectionHealth();
       // Keep conversions current without a manual click: refresh FX at most once per day. This is
@@ -245,9 +245,9 @@ export default function Dashboard({
 
   const handleRefreshFx = async () => {
     setRefreshingFx(true);
-    setFxError(null);
     try {
       await refreshFxRates();
+      setFxError(null);
       await load();
     } catch (err) {
       setFxError(String(err));
@@ -294,8 +294,6 @@ export default function Dashboard({
     if (syncInFlight.current) return;
     syncInFlight.current = true;
     setSyncing(true);
-    setSyncError(null);
-    setSyncNotice(null);
     let connected = 0;
     let synced = 0;
     let succeeded = 0;
@@ -329,12 +327,14 @@ export default function Dashboard({
       }));
       if (succeeded > 0) await handleConnectorChanged();
       await refreshConnectionHealth();
-      if (problems.length > 0) setSyncError(problems.join("\n"));
+      setSyncError(problems.length > 0 ? problems.sort().join("\n") : null);
       if (succeeded > 0) {
         setSyncNotice(`Received updates for ${synced} account(s). Check source dates: banks can still return cached balances.`);
       } else if (connected === 0 && problems.length === 0) {
         setConnectOpen(true);
         setSyncNotice("Connect an account to enable syncing.");
+      } else {
+        setSyncNotice(null);
       }
     } finally {
       syncInFlight.current = false;
@@ -358,7 +358,9 @@ export default function Dashboard({
           if (result.accounts_needing_review) {
             setSyncNotice(`SimpleFIN: ${result.accounts_needing_review} new account(s) need review. They were not imported. Open Choose accounts to sync.`);
           }
-          if (result.warnings.length) setSyncError(result.warnings.join("\n"));
+          if (result.warnings.length) {
+            setSyncError(result.warnings.map((message) => `SimpleFIN: ${message}`).sort().join("\n"));
+          }
           await handleConnectorChanged();
         }
       } catch (err) {
@@ -381,6 +383,28 @@ export default function Dashboard({
   const connectionAttention = Boolean(healthError || simplefinStatus?.app_auth_required ||
     simplefinStatus?.messages.length ||
     simplefinStatus?.connections.some((bank) => bank.status !== "current"));
+  // Ignore polling timestamps and healthy balances when deciding whether a warning has changed.
+  const connectionWarningKey = connectionAttention ? JSON.stringify({
+    healthError,
+    appAuthRequired: simplefinStatus?.app_auth_required ?? false,
+    messages: [...(simplefinStatus?.messages ?? [])].sort(),
+    connections: (simplefinStatus?.connections ?? [])
+      .filter((bank) => bank.status !== "current")
+      .map((bank) => ({
+        id: bank.id,
+        status: bank.status,
+        messages: [...bank.messages].sort(),
+        accounts: bank.accounts
+          .filter((account) => account.health.status !== "current")
+          .map((account) => ({
+            id: account.account_id,
+            status: account.health.status,
+            message: account.health.message,
+          }))
+          .sort((a, b) => a.id - b.id),
+      }))
+      .sort((a, b) => a.id.localeCompare(b.id)),
+  }) : null;
 
   const handleUpdateCurrency = useCallback(
     async (accountId: number, currency: string) => {
@@ -532,36 +556,53 @@ export default function Dashboard({
             </div>
           </section>
 
-          {loadError && (
-            <div role="alert" className="desktop-alert desktop-alert--error">
-              {loadError}
-              <button type="button" className="desktop-action" disabled={loading} onClick={() => void load()}>
-                Retry refresh
-              </button>
-            </div>
-          )}
-          {(syncError || healthError) && (
-            <div role="alert" className="desktop-alert desktop-alert--error">
-              <span className="whitespace-pre-wrap">{syncError ?? healthError}</span>{" "}
-              <button type="button" className="desktop-section-action" onClick={reviewConnections}>Review connections</button>
-            </div>
-          )}
-          {syncNotice && <p role="status" className="mb-4 text-sm text-slate-400">{syncNotice}</p>}
-
-        {fxError && (
-          <div className="desktop-alert desktop-alert--error">
+          <DismissibleBanner
+            noticeKey={loadError}
+            dismissLabel="Dismiss dashboard warning"
+            className="desktop-alert desktop-alert--error"
+            hidden={loading}
+          >
+            {loadError}
+            <button type="button" className="desktop-action" disabled={loading} onClick={() => void load()}>
+              Retry refresh
+            </button>
+          </DismissibleBanner>
+          <DismissibleBanner
+            noticeKey={syncError ?? healthError}
+            dismissLabel="Dismiss connection warnings"
+            className="desktop-alert desktop-alert--error"
+            hidden={syncing}
+          >
+            <span className="whitespace-pre-wrap">{syncError ?? healthError}</span>{" "}
+            <button type="button" className="desktop-section-action" onClick={reviewConnections}>Review connections</button>
+          </DismissibleBanner>
+          <DismissibleBanner
+            noticeKey={syncNotice}
+            dismissLabel="Dismiss sync notice"
+            className="mb-4 text-sm text-slate-400"
+            role="status"
+            hidden={syncing}
+          >
+            {syncNotice}
+          </DismissibleBanner>
+          <DismissibleBanner
+            noticeKey={fxError}
+            dismissLabel="Dismiss exchange rate warning"
+            className="desktop-alert desktop-alert--error"
+            hidden={refreshingFx}
+          >
             FX refresh failed: {fxError}
-          </div>
-        )}
-
-          {widgetError && (
-            <div className="desktop-alert desktop-alert--error" role="alert">
-              Mac widget refresh failed: {widgetError}
-              <button type="button" className="desktop-action" onClick={() => void refreshWidget()}>
-                Retry widget refresh
-              </button>
-            </div>
-          )}
+          </DismissibleBanner>
+          <DismissibleBanner
+            noticeKey={widgetError}
+            dismissLabel="Dismiss widget warning"
+            className="desktop-alert desktop-alert--error"
+          >
+            Mac widget refresh failed: {widgetError}
+            <button type="button" className="desktop-action" onClick={() => void refreshWidget()}>
+              Retry widget refresh
+            </button>
+          </DismissibleBanner>
 
           <div className="desktop-layout-grid desktop-layout-grid--overview">
             <div className="desktop-span-8">
@@ -573,7 +614,7 @@ export default function Dashboard({
                   setHomeCurrency((currency) => (currency === "CAD" ? "USD" : "CAD"))
                 }
                 loading={loading}
-                connectionAttention={connectionAttention}
+                connectionWarningKey={connectionWarningKey}
                 onReviewConnections={reviewConnections}
               />
             </div>
